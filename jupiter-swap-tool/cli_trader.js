@@ -231,6 +231,86 @@ const FALLBACK_TOKEN_CATALOG = [
   },
 ];
 
+function describePathForLog(targetPath) {
+  const resolved = path.resolve(targetPath);
+  const relative = path.relative(process.cwd(), resolved);
+  if (relative && !relative.startsWith("..")) {
+    return relative;
+  }
+  return resolved;
+}
+
+function ensureStartupResources() {
+  const keypairPath = path.resolve(KEYPAIR_DIR);
+  const rpcFilePath = RPC_LIST_FILE;
+  const status = {
+    keypairs: {
+      path: keypairPath,
+      existed: fs.existsSync(keypairPath),
+      created: false,
+    },
+    rpcList: {
+      path: rpcFilePath,
+      existed: false,
+      created: false,
+    },
+  };
+
+  if (!status.keypairs.existed) {
+    try {
+      fs.mkdirSync(keypairPath, { recursive: true });
+      status.keypairs.created = true;
+    } catch (err) {
+      throw new Error(
+        `Failed to create keypair directory at ${keypairPath}: ${err.message}`
+      );
+    }
+  }
+
+  const rpcDir = path.dirname(rpcFilePath);
+  if (!fs.existsSync(rpcDir)) {
+    fs.mkdirSync(rpcDir, { recursive: true });
+  }
+  status.rpcList.existed = fs.existsSync(rpcFilePath);
+  if (!status.rpcList.existed) {
+    const defaultContents =
+      "# Add RPC endpoints here (one per line or separated by commas)\n";
+    try {
+      fs.writeFileSync(rpcFilePath, defaultContents, { flag: "wx" });
+      status.rpcList.created = true;
+    } catch (err) {
+      if (err.code !== "EEXIST") {
+        throw new Error(
+          `Failed to create RPC endpoints file at ${rpcFilePath}: ${err.message}`
+        );
+      }
+    }
+  }
+
+  return status;
+}
+
+function announceStartupResources(status, options = {}) {
+  const { skipBanner = false } = options;
+  if (skipBanner) return;
+
+  const keypairLabel = describePathForLog(status.keypairs.path);
+  if (status.keypairs.created) {
+    console.log(
+      paint(`Initialized keypair directory at ${keypairLabel}`, "success")
+    );
+  } else {
+    console.log(paint(`Keypair directory ready at ${keypairLabel}`, "muted"));
+  }
+
+  const rpcLabel = describePathForLog(status.rpcList.path);
+  if (status.rpcList.created) {
+    console.log(paint(`Created RPC endpoints template at ${rpcLabel}`, "success"));
+  } else {
+    console.log(paint(`RPC endpoints file found at ${rpcLabel}`, "muted"));
+  }
+}
+
 function normaliseTokenRecord(raw, source = "catalog") {
   if (!raw || typeof raw !== "object") return null;
   const symbolRaw = typeof raw.symbol === "string" ? raw.symbol.trim() : "";
@@ -4492,12 +4572,14 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
 // Parses CLI arguments, performs RPC health checks, and dispatches to the
 // appropriate command implementation. New commands should be registered here.
 async function main() {
+  const startupResources = ensureStartupResources();
   const skipBanner =
     process.env.JUPITER_SWAP_TOOL_NO_BANNER === "1" ||
     process.env.JUPITER_NO_BANNER === "1";
   if (!skipBanner) {
     printStartupBanner();
   }
+  announceStartupResources(startupResources, { skipBanner });
   const args = process.argv.slice(2);
   const cmd = args[0];
   if (!cmd) {

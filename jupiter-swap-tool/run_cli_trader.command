@@ -41,6 +41,18 @@ USDC_MAINNET="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 POPCAT_MINT="7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"
 CREW_WALLET="crew_1.json"
 
+KEYPAIRS_DIR="keypairs"
+KEYPAIRS_EXISTED_BEFORE=0
+if [[ -d "$KEYPAIRS_DIR" ]]; then
+  KEYPAIRS_EXISTED_BEFORE=1
+fi
+
+RPC_FILE_CONFIG="${RPC_LIST_FILE:-rpc_endpoints.txt}"
+RPC_FILE_EXISTED_BEFORE=0
+if [[ -f "$RPC_FILE_CONFIG" ]]; then
+  RPC_FILE_EXISTED_BEFORE=1
+fi
+
 WALLET_COUNT="..."
 GUARD_STATUS_READY=0
 GUARD_MODE=""
@@ -547,6 +559,24 @@ advanced_menu() {
 USDC_MINT="${USDC_MINT:-$USDC_MAINNET}"
 reset_launcher_state
 update_launcher_state
+KEYPAIRS_EXISTS_NOW=0
+if [[ -d "$KEYPAIRS_DIR" ]]; then
+  KEYPAIRS_EXISTS_NOW=1
+  if [[ $KEYPAIRS_EXISTED_BEFORE -eq 1 ]]; then
+    echo "Keypair directory ready at ${KEYPAIRS_DIR}/"
+  else
+    echo "Initialized keypair directory at ${KEYPAIRS_DIR}/"
+  fi
+fi
+RPC_FILE_EXISTS_NOW=0
+if [[ -f "$RPC_FILE_CONFIG" ]]; then
+  RPC_FILE_EXISTS_NOW=1
+  if [[ $RPC_FILE_EXISTED_BEFORE -eq 1 ]]; then
+    echo "RPC endpoints file found at ${RPC_FILE_CONFIG}"
+  else
+    echo "Created RPC endpoints template at ${RPC_FILE_CONFIG}"
+  fi
+fi
 print_hotkeys
 
 while true; do
