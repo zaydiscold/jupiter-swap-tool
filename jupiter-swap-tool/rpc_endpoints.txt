@@ -1,7 +1,0 @@
-https://mainnet.helius-rpc.com/?api-key=98a9fb2e-26c6-4420-b0bf-a38ece2eb907
-# https://thrumming-multi-wish.solana-mainnet.quiknode.pro/2ac08494440d19e8a13d699e485cc45496603ed7/
-#https://solana-mainnet.core.chainstack.com/2bd6ee81426ee5e40f50be725e372f14
-# https://api.mainnet-beta.solana.com
-# https://solana-mainnet.api.syndica.io/api-key/351zvLRtmZHAETUof6VDNrLuyZ5wNqRLG65B4DaAyq4zCuGMbGdCpZuPUQvT681EwPshNWavabGXGhLh7y3Bhwss87XAGVB6j9d
-# https://solana-mainnet.gateway.tatum.io
-# https://go.getblock.us/293c827078a246cf901065ef6a0d7838
