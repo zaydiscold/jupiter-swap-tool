@@ -9,3 +9,6 @@ node_modules/
 
 # Local wallet material
 keypairs/
+
+# Private endpoint lists (may contain API keys)
+rpc_endpoints.txt
