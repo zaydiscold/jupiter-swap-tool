@@ -1,0 +1,890 @@
+##!/usr/bin/env node
+/**
+ * CLI Multi-Wallet Tool for Solana + Jupiter (updated)
+ *
+ * New commands:
+ *   list
+ *   fund-all <fromWalletFile> <lamportsEach>
+ *   airdrop <walletFile> <lamports>
+ *   airdrop-all <lamports>
+ *
+ * Existing commands:
+ *   generate <n>
+ *   balances [tokenMint]
+ *   send <fromWalletFile> <toWalletFile> <lamports>
+ *   swap <inputMint> <outputMint> <amount>
+ *
+ * NOTE: Airdrop only works on devnet. Use RPC_URL env var to point to devnet or mainnet.
+ */
+
+// ---------------- Dependencies ----------------
+import fs from "fs";
+import path from "path";
+import fetch from "cross-fetch";
+import bs58 from "bs58";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  VersionedTransaction,
+  Transaction,
+  SystemProgram,
+} from "@solana/web3.js";
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from "@solana/spl-token";
+
+// ---------------- Config ----------------
+const KEYPAIR_DIR = "./keypairs";
+const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+const JUPITER_API = process.env.JUPITER_API || "https://lite-api.jup.ag";
+const SLIPPAGE_BPS = 50;
+const DELAY_BETWEEN_CALLS_MS = 500;
+
+// ------------- Helpers ----------------
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+function ensureKeypairDir() {
+  if (!fs.existsSync(KEYPAIR_DIR)) fs.mkdirSync(KEYPAIR_DIR);
+}
+
+function loadKeypairFromFile(filepath) {
+  const raw = fs.readFileSync(filepath, "utf8").trim();
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return Keypair.fromSecretKey(Uint8Array.from(arr));
+    }
+  } catch (e) {}
+  try {
+    const buf = bs58.decode(raw);
+    return Keypair.fromSecretKey(buf);
+  } catch (e) {
+    throw new Error(`Cannot parse keyfile ${filepath}: ${e.message}`);
+  }
+}
+
+function listWallets() {
+  if (!fs.existsSync(KEYPAIR_DIR)) return [];
+  const files = fs.readdirSync(KEYPAIR_DIR).filter(f => !f.startsWith("."));
+  const wallets = [];
+  for (const f of files) {
+    const fp = path.join(KEYPAIR_DIR, f);
+    try {
+      const kp = loadKeypairFromFile(fp);
+      wallets.push({ name: f, kp });
+    } catch (err) {
+      console.warn(`Skipping invalid key file ${f}: ${err.message}`);
+    }
+  }
+  return wallets;
+}
+
+// generate new wallets and save
+function generateWallets(n) {
+  ensureKeypairDir();
+  const created = [];
+  for (let i = 0; i < n; i++) {
+    const kp = Keypair.generate();
+    const arr = Array.from(kp.secretKey);
+    const fname = `w_${Date.now()}_${i}.json`;
+    fs.writeFileSync(path.join(KEYPAIR_DIR, fname), JSON.stringify(arr));
+    created.push({ name: fname, publicKey: kp.publicKey.toBase58() });
+  }
+  return created;
+}
+
+// get SOL balance
+async function getSolBalance(connection, pubkey) {
+  const lam = await connection.getBalance(pubkey);
+  return lam;
+}
+
+// get token balance (returns uiAmount or 0)
+async function getTokenBalance(connection, walletPubkey, mint) {
+  try {
+    const ata = await getAssociatedTokenAddress(mint, walletPubkey);
+    const resp = await connection.getTokenAccountBalance(ata);
+    return resp.value.uiAmount;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// check & create ATA if missing
+async function ensureAta(connection, ownerPubkey, mint, payerKeypair) {
+  const ata = await getAssociatedTokenAddress(mint, ownerPubkey);
+  const info = await connection.getAccountInfo(ata);
+  if (info === null) {
+    // create ATA
+    const ix = createAssociatedTokenAccountInstruction(
+      payerKeypair.publicKey,
+      ata,
+      ownerPubkey,
+      mint
+    );
+    const tx = new Transaction().add(ix);
+    tx.feePayer = payerKeypair.publicKey;
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.sign(payerKeypair);
+    const raw = tx.serialize();
+    const sig = await connection.sendRawTransaction(raw);
+    await connection.confirmTransaction(sig, "confirmed");
+    console.log(`Created ATA ${ata.toBase58()} for ${ownerPubkey.toBase58()}`);
+  }
+  return ata;
+}
+
+// fetch Jupiter quote
+async function fetchQuote(inputMint, outputMint, amt, userPubkey) {
+  const url = new URL(`${JUPITER_API}/quote`);
+  url.searchParams.set("inputMint", inputMint);
+  url.searchParams.set("outputMint", outputMint);
+  url.searchParams.set("amount", amt.toString());
+  url.searchParams.set("slippageBps", SLIPPAGE_BPS.toString());
+  url.searchParams.set("userPublicKey", userPubkey);
+  url.searchParams.set("onlyDirectRoutes", "false");
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Quote API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.data || j.data.length === 0) throw new Error("No routes returned");
+  return j.data[0];
+}
+
+// fetch Jupiter swap payload
+async function fetchSwap(route, userPubkey) {
+  const res = await fetch(`${JUPITER_API}/swap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      routePlan: route.routePlan ?? route,
+      userPublicKey: userPubkey,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Swap API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.swapTransaction) throw new Error("Swap payload missing");
+  return j;
+}
+
+// send a signed native SOL transfer tx
+async function sendSolTransfer(connection, fromKeypair, toPubkey, lamports) {
+  const tx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: fromKeypair.publicKey,
+      toPubkey,
+      lamports,
+    })
+  );
+  tx.feePayer = fromKeypair.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.sign(fromKeypair);
+  const raw = tx.serialize();
+  const sig = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(sig, "confirmed");
+  return sig;
+}
+
+// listing addresses + balances
+async function listWalletAddresses() {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log("No wallets in", KEYPAIR_DIR);
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    try {
+      const lam = await getSolBalance(connection, w.kp.publicKey);
+      console.log(`${w.name}  ${w.kp.publicKey.toBase58()}  ${(lam / 1e9).toFixed(6)} SOL`);
+    } catch (e) {
+      console.log(`${w.name}  ${w.kp.publicKey.toBase58()}  error reading balance: ${e.message}`);
+    }
+  }
+}
+
+// fund all wallets from one source - same lamportsEach to each wallet
+async function fundAll(fromWalletFile, lamportsEach) {
+  const wallets = listWallets();
+  const fromFp = path.join(KEYPAIR_DIR, fromWalletFile);
+  if (!fs.existsSync(fromFp)) {
+    console.error("Source wallet not found:", fromWalletFile);
+    return;
+  }
+  const fromKp = loadKeypairFromFile(fromFp);
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  // confirm from has funds
+  const fromBal = await getSolBalance(connection, fromKp.publicKey);
+  const required = BigInt(lamportsEach) * BigInt(wallets.length);
+  if (BigInt(fromBal) < required) {
+    console.warn(`Source balance ${(fromBal/1e9).toFixed(6)} SOL is less than required ${(Number(required)/1e9).toFixed(6)} SOL`);
+  }
+
+  for (const w of wallets) {
+    // skip if same as source
+    if (w.kp.publicKey.equals(fromKp.publicKey)) {
+      console.log(`Skipping source wallet ${w.name}`);
+      continue;
+    }
+    try {
+      const sig = await sendSolTransfer(connection, fromKp, w.kp.publicKey, lamportsEach);
+      console.log(`Funded ${w.name} ${w.kp.publicKey.toBase58()} with ${lamportsEach} lamports — tx ${sig}`);
+    } catch (e) {
+      console.error(`Failed to fund ${w.name}: ${e.message}`);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// single send (explicit by file names)
+async function sendSolBetween(fromWalletName, toWalletName, lamports) {
+  const fromFp = path.join(KEYPAIR_DIR, fromWalletName);
+  const toFp = path.join(KEYPAIR_DIR, toWalletName);
+  if (!fs.existsSync(fromFp) || !fs.existsSync(toFp)) {
+    console.error("Invalid wallet names");
+    return;
+  }
+  const fromKp = loadKeypairFromFile(fromFp);
+  const toKp = loadKeypairFromFile(toFp);
+  const connection = new Connection(RPC_URL, "confirmed");
+  const sig = await sendSolTransfer(connection, fromKp, toKp.publicKey, lamports);
+  console.log("Sent tx", sig);
+}
+
+// airdrop single wallet (devnet)
+async function airdrop(walletFile, lamports) {
+  const fp = path.join(KEYPAIR_DIR, walletFile);
+  if (!fs.existsSync(fp)) {
+    console.error("Wallet not found:", walletFile);
+    return;
+  }
+  const kp = loadKeypairFromFile(fp);
+  const connection = new Connection(RPC_URL, "confirmed");
+  console.log("Requesting airdrop to", kp.publicKey.toBase58());
+  const sig = await connection.requestAirdrop(kp.publicKey, lamports);
+  await connection.confirmTransaction(sig, "confirmed");
+  console.log("Airdrop confirmed:", sig);
+}
+
+// airdrop all wallets
+async function airdropAll(lamports) {
+  const wallets = listWallets();
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    try {
+      const sig = await connection.requestAirdrop(w.kp.publicKey, lamports);
+      await connection.confirmTransaction(sig, "confirmed");
+      console.log(`Airdropped ${lamports} to ${w.name} ${w.kp.publicKey.toBase58()} tx ${sig}`);
+    } catch (e) {
+      console.error(`Airdrop failed for ${w.name}: ${e.message}`);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// show balances (optionally token)
+async function showBalances(tokenMint) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log("No wallets found");
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    const sol = await getSolBalance(connection, w.kp.publicKey);
+    let tokenBal = null;
+    if (tokenMint) {
+      tokenBal = await getTokenBalance(connection, w.kp.publicKey, new PublicKey(tokenMint));
+    }
+    console.log(`Wallet ${w.name}  ${w.kp.publicKey.toBase58()}`);
+    console.log(`  SOL: ${(sol / 1e9).toFixed(6)} SOL`);
+    if (tokenMint) {
+      console.log(`  Token(${tokenMint}): ${tokenBal}`);
+    }
+  }
+}
+
+// perform the swap across all wallets (one swap each)
+async function doSwapAcross(inputMint, outputMint, amount) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.error("No wallets found in keypairs folder.");
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  for (const w of wallets) {
+    console.log(`\n>> wallet ${w.name} (${w.kp.publicKey.toBase58()})`);
+    try {
+      // ensure ATA for outputMint
+      await ensureAta(connection, w.kp.publicKey, new PublicKey(outputMint), w.kp);
+      const route = await fetchQuote(inputMint, outputMint, amount, w.kp.publicKey.toBase58());
+      console.log("  route estOut:", route.expectedAmountOut ?? route.outAmount);
+      await sleep(DELAY_BETWEEN_CALLS_MS);
+      const swapResp = await fetchSwap(route, w.kp.publicKey.toBase58());
+      const txbase64 = swapResp.swapTransaction;
+      const txbuf = Buffer.from(txbase64, "base64");
+      const vtx = VersionedTransaction.deserialize(txbuf);
+      vtx.sign([w.kp]);
+      const raw = vtx.serialize();
+      const sig = await connection.sendRawTransaction(raw);
+      console.log("  sent tx:", sig);
+      await connection.confirmTransaction(sig, "confirmed");
+      console.log("  confirmed");
+    } catch (e) {
+      console.error("  swap error:", e.message);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// fetch functions referenced above (pulled here to avoid hoisting issues)
+async function fetchQuote(inputMint, outputMint, amt, userPubkey) {
+  const url = new URL(`${JUPITER_API}/quote`);
+  url.searchParams.set("inputMint", inputMint);
+  url.searchParams.set("outputMint", outputMint);
+  url.searchParams.set("amount", amt.toString());
+  url.searchParams.set("slippageBps", SLIPPAGE_BPS.toString());
+  url.searchParams.set("userPublicKey", userPubkey);
+  url.searchParams.set("onlyDirectRoutes", "false");
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Quote API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.data || j.data.length === 0) throw new Error("No routes returned");
+  return j.data[0];
+}
+
+async function fetchSwap(route, userPubkey) {
+  const res = await fetch(`${JUPITER_API}/swap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      routePlan: route.routePlan ?? route,
+      userPublicKey: userPubkey,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Swap API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.swapTransaction) throw new Error("Swap payload missing");
+  return j;
+}
+
+// CLI dispatch
+async function main() {
+  const args = process.argv.slice(2);
+  const cmd = args[0];
+  if (!cmd) {
+    console.log("Commands: list | generate <n> | balances [tokenMint] | fund-all <from> <lamportsEach> | fund <from> <to> <lamports> | send <from> <to> <lamports> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> <amount>");
+    process.exit(0);
+  }
+
+  try {
+    if (cmd === "generate") {
+      const n = parseInt(args[1]);
+      if (!n || n <= 0) throw new Error("Invalid number for generate");
+      const created = generateWallets(n);
+      console.log("Generated wallets:", created);
+    } else if (cmd === "list") {
+      await listWalletAddresses();
+    } else if (cmd === "balances") {
+      const tokenMint = args[1] || null;
+      await showBalances(tokenMint);
+    } else if (cmd === "fund-all") {
+      const [ , fromName, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!fromName || isNaN(lam)) throw new Error("fund-all usage: fund-all <fromWalletFile> <lamportsEach>");
+      await fundAll(fromName, lam);
+    } else if (cmd === "fund" || cmd === "send") {
+      const [ , fromName, toName, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!fromName || !toName || isNaN(lam)) throw new Error("send/fund usage: send <fromWalletFile> <toWalletFile> <lamports>");
+      await sendSolBetween(fromName, toName, lam);
+    } else if (cmd === "airdrop") {
+      const [ , walletFile, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!walletFile || isNaN(lam)) throw new Error("airdrop usage: airdrop <walletFile> <lamports>");
+      await airdrop(walletFile, lam);
+    } else if (cmd === "airdrop-all") {
+      const lam = parseInt(args[1]);
+      if (isNaN(lam)) throw new Error("airdrop-all usage: airdrop-all <lamports>");
+      await airdropAll(lam);
+    } else if (cmd === "swap") {
+      const [ , inMint, outMint, amtStr ] = args;
+      const amt = parseInt(amtStr);
+      if (!inMint || !outMint || isNaN(amt)) throw new Error("swap usage: swap <inputMint> <outputMint> <amountInBaseUnits>");
+      await doSwapAcross(inMint, outMint, amt);
+    } else {
+      throw new Error("Unknown command: " + cmd);
+    }
+  } catch (e) {
+    console.error("Error:", e.message);
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
+main();
+!/usr/bin/env node
+/**
+ * CLI Multi-Wallet Tool for Solana + Jupiter (updated)
+ *
+ * New commands:
+ *   list
+ *   fund-all <fromWalletFile> <lamportsEach>
+ *   airdrop <walletFile> <lamports>
+ *   airdrop-all <lamports>
+ *
+ * Existing commands:
+ *   generate <n>
+ *   balances [tokenMint]
+ *   send <fromWalletFile> <toWalletFile> <lamports>
+ *   swap <inputMint> <outputMint> <amount>
+ *
+ * NOTE: Airdrop only works on devnet. Use RPC_URL env var to point to devnet or mainnet.
+ */
+
+// ---------------- Dependencies ----------------
+import fs from "fs";
+import path from "path";
+import fetch from "cross-fetch";
+import bs58 from "bs58";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  VersionedTransaction,
+  Transaction,
+  SystemProgram,
+} from "@solana/web3.js";
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from "@solana/spl-token";
+
+// ---------------- Config ----------------
+const KEYPAIR_DIR = "./keypairs";
+const RPC_URL = process.env.RPC_URL || "https://api.mainnet-beta.solana.com";
+const JUPITER_API = process.env.JUPITER_API || "https://lite-api.jup.ag";
+const SLIPPAGE_BPS = 50;
+const DELAY_BETWEEN_CALLS_MS = 500;
+
+// ------------- Helpers ----------------
+function sleep(ms) {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+function ensureKeypairDir() {
+  if (!fs.existsSync(KEYPAIR_DIR)) fs.mkdirSync(KEYPAIR_DIR);
+}
+
+function loadKeypairFromFile(filepath) {
+  const raw = fs.readFileSync(filepath, "utf8").trim();
+  try {
+    const arr = JSON.parse(raw);
+    if (Array.isArray(arr)) {
+      return Keypair.fromSecretKey(Uint8Array.from(arr));
+    }
+  } catch (e) {}
+  try {
+    const buf = bs58.decode(raw);
+    return Keypair.fromSecretKey(buf);
+  } catch (e) {
+    throw new Error(`Cannot parse keyfile ${filepath}: ${e.message}`);
+  }
+}
+
+function listWallets() {
+  if (!fs.existsSync(KEYPAIR_DIR)) return [];
+  const files = fs.readdirSync(KEYPAIR_DIR).filter(f => !f.startsWith("."));
+  const wallets = [];
+  for (const f of files) {
+    const fp = path.join(KEYPAIR_DIR, f);
+    try {
+      const kp = loadKeypairFromFile(fp);
+      wallets.push({ name: f, kp });
+    } catch (err) {
+      console.warn(`Skipping invalid key file ${f}: ${err.message}`);
+    }
+  }
+  return wallets;
+}
+
+// generate new wallets and save
+function generateWallets(n) {
+  ensureKeypairDir();
+  const created = [];
+  for (let i = 0; i < n; i++) {
+    const kp = Keypair.generate();
+    const arr = Array.from(kp.secretKey);
+    const fname = `w_${Date.now()}_${i}.json`;
+    fs.writeFileSync(path.join(KEYPAIR_DIR, fname), JSON.stringify(arr));
+    created.push({ name: fname, publicKey: kp.publicKey.toBase58() });
+  }
+  return created;
+}
+
+// get SOL balance
+async function getSolBalance(connection, pubkey) {
+  const lam = await connection.getBalance(pubkey);
+  return lam;
+}
+
+// get token balance (returns uiAmount or 0)
+async function getTokenBalance(connection, walletPubkey, mint) {
+  try {
+    const ata = await getAssociatedTokenAddress(mint, walletPubkey);
+    const resp = await connection.getTokenAccountBalance(ata);
+    return resp.value.uiAmount;
+  } catch (e) {
+    return 0;
+  }
+}
+
+// check & create ATA if missing
+async function ensureAta(connection, ownerPubkey, mint, payerKeypair) {
+  const ata = await getAssociatedTokenAddress(mint, ownerPubkey);
+  const info = await connection.getAccountInfo(ata);
+  if (info === null) {
+    // create ATA
+    const ix = createAssociatedTokenAccountInstruction(
+      payerKeypair.publicKey,
+      ata,
+      ownerPubkey,
+      mint
+    );
+    const tx = new Transaction().add(ix);
+    tx.feePayer = payerKeypair.publicKey;
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.sign(payerKeypair);
+    const raw = tx.serialize();
+    const sig = await connection.sendRawTransaction(raw);
+    await connection.confirmTransaction(sig, "confirmed");
+    console.log(`Created ATA ${ata.toBase58()} for ${ownerPubkey.toBase58()}`);
+  }
+  return ata;
+}
+
+// fetch Jupiter quote
+async function fetchQuote(inputMint, outputMint, amt, userPubkey) {
+  const url = new URL(`${JUPITER_API}/quote`);
+  url.searchParams.set("inputMint", inputMint);
+  url.searchParams.set("outputMint", outputMint);
+  url.searchParams.set("amount", amt.toString());
+  url.searchParams.set("slippageBps", SLIPPAGE_BPS.toString());
+  url.searchParams.set("userPublicKey", userPubkey);
+  url.searchParams.set("onlyDirectRoutes", "false");
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Quote API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.data || j.data.length === 0) throw new Error("No routes returned");
+  return j.data[0];
+}
+
+// fetch Jupiter swap payload
+async function fetchSwap(route, userPubkey) {
+  const res = await fetch(`${JUPITER_API}/swap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      routePlan: route.routePlan ?? route,
+      userPublicKey: userPubkey,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Swap API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.swapTransaction) throw new Error("Swap payload missing");
+  return j;
+}
+
+// send a signed native SOL transfer tx
+async function sendSolTransfer(connection, fromKeypair, toPubkey, lamports) {
+  const tx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: fromKeypair.publicKey,
+      toPubkey,
+      lamports,
+    })
+  );
+  tx.feePayer = fromKeypair.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.sign(fromKeypair);
+  const raw = tx.serialize();
+  const sig = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(sig, "confirmed");
+  return sig;
+}
+
+// listing addresses + balances
+async function listWalletAddresses() {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log("No wallets in", KEYPAIR_DIR);
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    try {
+      const lam = await getSolBalance(connection, w.kp.publicKey);
+      console.log(`${w.name}  ${w.kp.publicKey.toBase58()}  ${(lam / 1e9).toFixed(6)} SOL`);
+    } catch (e) {
+      console.log(`${w.name}  ${w.kp.publicKey.toBase58()}  error reading balance: ${e.message}`);
+    }
+  }
+}
+
+// fund all wallets from one source - same lamportsEach to each wallet
+async function fundAll(fromWalletFile, lamportsEach) {
+  const wallets = listWallets();
+  const fromFp = path.join(KEYPAIR_DIR, fromWalletFile);
+  if (!fs.existsSync(fromFp)) {
+    console.error("Source wallet not found:", fromWalletFile);
+    return;
+  }
+  const fromKp = loadKeypairFromFile(fromFp);
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  // confirm from has funds
+  const fromBal = await getSolBalance(connection, fromKp.publicKey);
+  const required = BigInt(lamportsEach) * BigInt(wallets.length);
+  if (BigInt(fromBal) < required) {
+    console.warn(`Source balance ${(fromBal/1e9).toFixed(6)} SOL is less than required ${(Number(required)/1e9).toFixed(6)} SOL`);
+  }
+
+  for (const w of wallets) {
+    // skip if same as source
+    if (w.kp.publicKey.equals(fromKp.publicKey)) {
+      console.log(`Skipping source wallet ${w.name}`);
+      continue;
+    }
+    try {
+      const sig = await sendSolTransfer(connection, fromKp, w.kp.publicKey, lamportsEach);
+      console.log(`Funded ${w.name} ${w.kp.publicKey.toBase58()} with ${lamportsEach} lamports — tx ${sig}`);
+    } catch (e) {
+      console.error(`Failed to fund ${w.name}: ${e.message}`);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// single send (explicit by file names)
+async function sendSolBetween(fromWalletName, toWalletName, lamports) {
+  const fromFp = path.join(KEYPAIR_DIR, fromWalletName);
+  const toFp = path.join(KEYPAIR_DIR, toWalletName);
+  if (!fs.existsSync(fromFp) || !fs.existsSync(toFp)) {
+    console.error("Invalid wallet names");
+    return;
+  }
+  const fromKp = loadKeypairFromFile(fromFp);
+  const toKp = loadKeypairFromFile(toFp);
+  const connection = new Connection(RPC_URL, "confirmed");
+  const sig = await sendSolTransfer(connection, fromKp, toKp.publicKey, lamports);
+  console.log("Sent tx", sig);
+}
+
+// airdrop single wallet (devnet)
+async function airdrop(walletFile, lamports) {
+  const fp = path.join(KEYPAIR_DIR, walletFile);
+  if (!fs.existsSync(fp)) {
+    console.error("Wallet not found:", walletFile);
+    return;
+  }
+  const kp = loadKeypairFromFile(fp);
+  const connection = new Connection(RPC_URL, "confirmed");
+  console.log("Requesting airdrop to", kp.publicKey.toBase58());
+  const sig = await connection.requestAirdrop(kp.publicKey, lamports);
+  await connection.confirmTransaction(sig, "confirmed");
+  console.log("Airdrop confirmed:", sig);
+}
+
+// airdrop all wallets
+async function airdropAll(lamports) {
+  const wallets = listWallets();
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    try {
+      const sig = await connection.requestAirdrop(w.kp.publicKey, lamports);
+      await connection.confirmTransaction(sig, "confirmed");
+      console.log(`Airdropped ${lamports} to ${w.name} ${w.kp.publicKey.toBase58()} tx ${sig}`);
+    } catch (e) {
+      console.error(`Airdrop failed for ${w.name}: ${e.message}`);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// show balances (optionally token)
+async function showBalances(tokenMint) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log("No wallets found");
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+  for (const w of wallets) {
+    const sol = await getSolBalance(connection, w.kp.publicKey);
+    let tokenBal = null;
+    if (tokenMint) {
+      tokenBal = await getTokenBalance(connection, w.kp.publicKey, new PublicKey(tokenMint));
+    }
+    console.log(`Wallet ${w.name}  ${w.kp.publicKey.toBase58()}`);
+    console.log(`  SOL: ${(sol / 1e9).toFixed(6)} SOL`);
+    if (tokenMint) {
+      console.log(`  Token(${tokenMint}): ${tokenBal}`);
+    }
+  }
+}
+
+// perform the swap across all wallets (one swap each)
+async function doSwapAcross(inputMint, outputMint, amount) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.error("No wallets found in keypairs folder.");
+    return;
+  }
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  for (const w of wallets) {
+    console.log(`\n>> wallet ${w.name} (${w.kp.publicKey.toBase58()})`);
+    try {
+      // ensure ATA for outputMint
+      await ensureAta(connection, w.kp.publicKey, new PublicKey(outputMint), w.kp);
+      const route = await fetchQuote(inputMint, outputMint, amount, w.kp.publicKey.toBase58());
+      console.log("  route estOut:", route.expectedAmountOut ?? route.outAmount);
+      await sleep(DELAY_BETWEEN_CALLS_MS);
+      const swapResp = await fetchSwap(route, w.kp.publicKey.toBase58());
+      const txbase64 = swapResp.swapTransaction;
+      const txbuf = Buffer.from(txbase64, "base64");
+      const vtx = VersionedTransaction.deserialize(txbuf);
+      vtx.sign([w.kp]);
+      const raw = vtx.serialize();
+      const sig = await connection.sendRawTransaction(raw);
+      console.log("  sent tx:", sig);
+      await connection.confirmTransaction(sig, "confirmed");
+      console.log("  confirmed");
+    } catch (e) {
+      console.error("  swap error:", e.message);
+    }
+    await sleep(DELAY_BETWEEN_CALLS_MS);
+  }
+}
+
+// fetch functions referenced above (pulled here to avoid hoisting issues)
+async function fetchQuote(inputMint, outputMint, amt, userPubkey) {
+  const url = new URL(`${JUPITER_API}/quote`);
+  url.searchParams.set("inputMint", inputMint);
+  url.searchParams.set("outputMint", outputMint);
+  url.searchParams.set("amount", amt.toString());
+  url.searchParams.set("slippageBps", SLIPPAGE_BPS.toString());
+  url.searchParams.set("userPublicKey", userPubkey);
+  url.searchParams.set("onlyDirectRoutes", "false");
+  const res = await fetch(url.toString());
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Quote API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.data || j.data.length === 0) throw new Error("No routes returned");
+  return j.data[0];
+}
+
+async function fetchSwap(route, userPubkey) {
+  const res = await fetch(`${JUPITER_API}/swap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      routePlan: route.routePlan ?? route,
+      userPublicKey: userPubkey,
+    }),
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Swap API failed ${res.status}: ${txt}`);
+  }
+  const j = await res.json();
+  if (!j.swapTransaction) throw new Error("Swap payload missing");
+  return j;
+}
+
+// CLI dispatch
+async function main() {
+  const args = process.argv.slice(2);
+  const cmd = args[0];
+  if (!cmd) {
+    console.log("Commands: list | generate <n> | balances [tokenMint] | fund-all <from> <lamportsEach> | fund <from> <to> <lamports> | send <from> <to> <lamports> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> <amount>");
+    process.exit(0);
+  }
+
+  try {
+    if (cmd === "generate") {
+      const n = parseInt(args[1]);
+      if (!n || n <= 0) throw new Error("Invalid number for generate");
+      const created = generateWallets(n);
+      console.log("Generated wallets:", created);
+    } else if (cmd === "list") {
+      await listWalletAddresses();
+    } else if (cmd === "balances") {
+      const tokenMint = args[1] || null;
+      await showBalances(tokenMint);
+    } else if (cmd === "fund-all") {
+      const [ , fromName, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!fromName || isNaN(lam)) throw new Error("fund-all usage: fund-all <fromWalletFile> <lamportsEach>");
+      await fundAll(fromName, lam);
+    } else if (cmd === "fund" || cmd === "send") {
+      const [ , fromName, toName, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!fromName || !toName || isNaN(lam)) throw new Error("send/fund usage: send <fromWalletFile> <toWalletFile> <lamports>");
+      await sendSolBetween(fromName, toName, lam);
+    } else if (cmd === "airdrop") {
+      const [ , walletFile, lamStr ] = args;
+      const lam = parseInt(lamStr);
+      if (!walletFile || isNaN(lam)) throw new Error("airdrop usage: airdrop <walletFile> <lamports>");
+      await airdrop(walletFile, lam);
+    } else if (cmd === "airdrop-all") {
+      const lam = parseInt(args[1]);
+      if (isNaN(lam)) throw new Error("airdrop-all usage: airdrop-all <lamports>");
+      await airdropAll(lam);
+    } else if (cmd === "swap") {
+      const [ , inMint, outMint, amtStr ] = args;
+      const amt = parseInt(amtStr);
+      if (!inMint || !outMint || isNaN(amt)) throw new Error("swap usage: swap <inputMint> <outputMint> <amountInBaseUnits>");
+      await doSwapAcross(inMint, outMint, amt);
+    } else {
+      throw new Error("Unknown command: " + cmd);
+    }
+  } catch (e) {
+    console.error("Error:", e.message);
+    process.exit(1);
+  }
+
+  process.exit(0);
+}
+
+main();

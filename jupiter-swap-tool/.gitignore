@@ -1,0 +1,11 @@
+# macOS cruft
+.DS_Store
+
+# IDE settings
+.vscode/
+
+# Dependencies
+node_modules/
+
+# Local wallet material
+keypairs/

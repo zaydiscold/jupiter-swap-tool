@@ -1,0 +1,93 @@
+[
+  {
+    "symbol": "SOL",
+    "mint": "So11111111111111111111111111111111111111112",
+    "decimals": 9,
+    "program": "native",
+    "tags": ["terminal"]
+  },
+  {
+    "symbol": "USDC",
+    "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "long-circle", "secondary-pool", "secondary-terminal", "crew-cycle"]
+  },
+  {
+    "symbol": "USDT",
+    "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+    "decimals": 6,
+    "program": "spl",
+    "tags": []
+  },
+  {
+    "symbol": "POPCAT",
+    "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
+    "decimals": 9,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "PUMP",
+    "mint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
+    "decimals": 6,
+    "program": "token-2022",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "PENGU",
+    "mint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "FART",
+    "mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "USELESS",
+    "mint": "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "WIF",
+    "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "PFP",
+    "mint": "5TfqNKZbn9AnNtzq8bbkyhKgcPGTfNDc9wNzFrTBpump",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+  },
+  {
+    "symbol": "wBTC",
+    "mint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
+    "decimals": 8,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"]
+  },
+  {
+    "symbol": "cbBTC",
+    "mint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
+    "decimals": 8,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"]
+  },
+  {
+    "symbol": "wETH",
+    "mint": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+    "decimals": 8,
+    "program": "spl",
+    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"]
+  }
+]
