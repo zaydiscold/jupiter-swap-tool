@@ -28,10 +28,10 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.0.1
+// version 1.0.2
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.0.1";
+const TOOL_VERSION = "1.0.2";
 
 // ---------------- Config ----------------
 // All of the CLI's tunable parameters live in this block so the rest of the
@@ -243,73 +243,86 @@ function describePathForLog(targetPath) {
 }
 
 function ensureStartupResources() {
-  const keypairPath = path.resolve(KEYPAIR_DIR);
-  const rpcFilePath = RPC_LIST_FILE;
-  const status = {
-    keypairs: {
-      path: keypairPath,
-      existed: fs.existsSync(keypairPath),
-      created: false,
+  // Ensure critical folders/files exist before the CLI proceeds.
+  const defaultResources = [
+    {
+      id: "keypairs",
+      kind: "directory",
+      targetPath: path.resolve(KEYPAIR_DIR),
+      ensure: () => fs.mkdirSync(path.resolve(KEYPAIR_DIR), { recursive: true }),
     },
-    rpcList: {
-      path: rpcFilePath,
-      existed: false,
-      created: false,
+    {
+      id: "rpcList",
+      kind: "file",
+      targetPath: RPC_LIST_FILE,
+      ensure: () => {
+        const directory = path.dirname(RPC_LIST_FILE);
+        if (!fs.existsSync(directory)) {
+          fs.mkdirSync(directory, { recursive: true });
+        }
+        if (!fs.existsSync(RPC_LIST_FILE)) {
+          const template =
+            "# Add RPC endpoints here (one per line or separated by commas)\n";
+          try {
+            fs.writeFileSync(RPC_LIST_FILE, template, { flag: "wx" });
+          } catch (err) {
+            if (err.code !== "EEXIST") {
+              throw err;
+            }
+          }
+        }
+      },
     },
-  };
+  ];
 
-  if (!status.keypairs.existed) {
-    try {
-      fs.mkdirSync(keypairPath, { recursive: true });
-      status.keypairs.created = true;
-    } catch (err) {
-      throw new Error(
-        `Failed to create keypair directory at ${keypairPath}: ${err.message}`
-      );
-    }
-  }
-
-  const rpcDir = path.dirname(rpcFilePath);
-  if (!fs.existsSync(rpcDir)) {
-    fs.mkdirSync(rpcDir, { recursive: true });
-  }
-  status.rpcList.existed = fs.existsSync(rpcFilePath);
-  if (!status.rpcList.existed) {
-    const defaultContents =
-      "# Add RPC endpoints here (one per line or separated by commas)\n";
-    try {
-      fs.writeFileSync(rpcFilePath, defaultContents, { flag: "wx" });
-      status.rpcList.created = true;
-    } catch (err) {
-      if (err.code !== "EEXIST") {
+  const summary = new Map();
+  for (const resource of defaultResources) {
+    const existed = fs.existsSync(resource.targetPath);
+    if (!existed) {
+      try {
+        resource.ensure();
+      } catch (err) {
         throw new Error(
-          `Failed to create RPC endpoints file at ${rpcFilePath}: ${err.message}`
+          `Failed to create required ${resource.kind} at ${resource.targetPath}: ${err.message}`
         );
       }
     }
+    summary.set(resource.id, {
+      path: resource.targetPath,
+      existed,
+      created: !existed,
+    });
   }
 
-  return status;
+  return summary;
 }
 
-function announceStartupResources(status, options = {}) {
+function announceStartupResources(summary, options = {}) {
   const { skipBanner = false } = options;
   if (skipBanner) return;
 
-  const keypairLabel = describePathForLog(status.keypairs.path);
-  if (status.keypairs.created) {
-    console.log(
-      paint(`Initialized keypair directory at ${keypairLabel}`, "success")
-    );
-  } else {
-    console.log(paint(`Keypair directory ready at ${keypairLabel}`, "muted"));
-  }
+  const resourcesToReport = [
+    {
+      id: "keypairs",
+      createdMessage: (location) => `Initialized keypair directory at ${location}`,
+      readyMessage: (location) => `Keypair directory ready at ${location}`,
+    },
+    {
+      id: "rpcList",
+      createdMessage: (location) => `Created RPC endpoints template at ${location}`,
+      readyMessage: (location) => `RPC endpoints file found at ${location}`,
+    },
+  ];
 
-  const rpcLabel = describePathForLog(status.rpcList.path);
-  if (status.rpcList.created) {
-    console.log(paint(`Created RPC endpoints template at ${rpcLabel}`, "success"));
-  } else {
-    console.log(paint(`RPC endpoints file found at ${rpcLabel}`, "muted"));
+  for (const resource of resourcesToReport) {
+    const details = summary.get(resource.id);
+    if (!details) continue;
+    const location = describePathForLog(details.path);
+    const tone = details.created ? "success" : "muted";
+    const message = details.created
+      ? resource.createdMessage(location)
+      : resource.readyMessage(location);
+    console.log(paint(message, tone));
   }
 }
 

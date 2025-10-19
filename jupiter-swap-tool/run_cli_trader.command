@@ -9,6 +9,7 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 DEFAULT_RPC="${RPC_URL:-https://mainnet.helius-rpc.com/?api-key=98a9fb2e-26c6-4420-b0bf-a38ece2eb907}"
+printf '\033[96m'
 cat <<'BANNER'
      ____.                   _____    ________    _____                      
     |    |__ ________       /  _  \  /  _____/  _/ ____\____ _______  _____  
@@ -18,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf '\033[96mJupiter Swap Tool v1.0.1 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.0.2 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC

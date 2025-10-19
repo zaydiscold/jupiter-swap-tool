@@ -3,3 +3,7 @@
 - crew_1.json now bypasses wallet guard thresholds while continuing to log guard status.
 - Updated launch banners to show the version and “made by zayd / cold” and refreshed header coloring with cyan accents.
 - Introduced this patch notes log for tracking future Codex-assisted sessions.
+[v1.0.2] 2025-10-18
+- Refactored startup resource checks to eliminate duplicate logic and added context comments for future contributors.
+- crew_1.json guard override hardened across load/refresh cycles to guarantee it stays active regardless of balance.
+- Applied consistent cyan styling to the launcher ASCII banner and tightened CLI color usage for readability.
