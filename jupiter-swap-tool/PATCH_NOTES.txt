@@ -1,0 +1,5 @@
+[v1.0.1] 2025-10-18
+- Auto-create the keypairs directory and rpc_endpoints.txt when missing, with startup announcements.
+- crew_1.json now bypasses wallet guard thresholds while continuing to log guard status.
+- Updated launch banners to show the version and “made by zayd / cold” and refreshed header coloring with cyan accents.
+- Introduced this patch notes log for tracking future Codex-assisted sessions.

@@ -1,4 +1,4 @@
-# Jupiter Swap Tool CLI (v1.0.0)
+# Jupiter Swap Tool CLI (v1.0.1)
 
 ## Getting Started
 1. Install Node.js 18+ and clone the repo.

@@ -28,8 +28,10 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.0.0
+// version 1.0.1
 // --------------------------------------------------
+
+const TOOL_VERSION = "1.0.1";
 
 // ---------------- Config ----------------
 // All of the CLI's tunable parameters live in this block so the rest of the
@@ -110,7 +112,7 @@ const COLORS = ENABLE_COLOR
       success: "\x1b[32m",
       warn: "\x1b[33m",
       error: "\x1b[31m",
-      label: "\x1b[35m",
+      label: "\x1b[96m",
       muted: "\x1b[90m",
     }
   : {
@@ -1087,6 +1089,9 @@ function describeTokenCatalogSource() {
 function printStartupBanner() {
   console.log(paint(ASCII_BANNER, "label"));
   console.log(
+    paint(`Jupiter Swap Tool v${TOOL_VERSION} — made by zayd / cold`, "label")
+  );
+  console.log(
     paint(
       `Loaded ${TOKEN_CATALOG.length} tokens from ${describeTokenCatalogSource()}.`,
       "muted"
@@ -1144,7 +1149,9 @@ function loadDisableStateFromDisk() {
       return { disabledWallets: [], forceResetActive: false, lastComputedAt: null };
     }
     const disabledWallets = Array.isArray(parsed.disabledWallets)
-      ? parsed.disabledWallets.filter((item) => typeof item === "string")
+      ? parsed.disabledWallets
+          .filter((item) => typeof item === "string")
+          .filter((item) => item !== "crew_1.json")
       : [];
     const forceResetActive = parsed.forceResetActive === true;
     const lastComputedAt =
@@ -1157,6 +1164,7 @@ function loadDisableStateFromDisk() {
 
 let disableState = loadDisableStateFromDisk();
 const DISABLED_WALLETS = new Set(disableState.disabledWallets || []);
+DISABLED_WALLETS.delete("crew_1.json");
 
 function persistDisableState() {
   const payload = {
@@ -1177,6 +1185,7 @@ function persistDisableState() {
 }
 
 function isWalletDisabledByGuard(walletName) {
+  if (walletName === "crew_1.json") return false;
   return DISABLED_WALLETS.has(walletName);
 }
 
@@ -1203,7 +1212,7 @@ async function refreshWalletDisableStatus(options = {}) {
       await balanceRpcDelay();
       const lamports = BigInt(await getSolBalance(connection, wallet.kp.publicKey));
       lamportsMap.set(wallet.name, lamports);
-      if (lamports < WALLET_DISABLE_THRESHOLD_LAMPORTS) {
+      if (wallet.name !== "crew_1.json" && lamports < WALLET_DISABLE_THRESHOLD_LAMPORTS) {
         newDisabled.push(wallet.name);
       }
     } catch (err) {
