@@ -19,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf 'Jupiter Swap Tool v1.0.2 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.1.1 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC
@@ -428,6 +428,123 @@ wallet_menu() {
   done
 }
 
+lend_menu() {
+  while true; do
+    echo
+    echo "Jupiter Lend (beta):"
+    echo "  1  -> list earn tokens (refresh)"
+    echo "  2  -> earn deposit"
+    echo "  3  -> earn withdraw"
+    echo "  4  -> borrow open position"
+    echo "  5  -> borrow repay"
+    echo "  6  -> borrow close"
+    echo "  7  -> earn positions"
+    echo "  8  -> borrow positions"
+    echo "  b  -> back"
+    read -r -p "lend> " LEND_OPT
+    LEND_OPT_LOWER=$(printf '%s' "$LEND_OPT" | tr '[:upper:]' '[:lower:]')
+    case "$LEND_OPT_LOWER" in
+      ""|b)
+        break
+        ;;
+      1)
+        run_cli_command "Lend earn tokens" node cli_trader.js lend earn tokens --refresh
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      2)
+        echo "Leave fields blank to target every active wallet/token and auto-max amount."
+        read -r -p "Wallet file (blank = all wallets): " LEND_WALLET
+        read -r -p "Deposit mint or symbol (blank = eligible tokens): " LEND_MINT
+        read -r -p "Amount (decimal, blank = max spendable): " LEND_AMOUNT
+        if [[ -z "$LEND_WALLET" ]]; then LEND_WALLET="*"; fi
+        if [[ -z "$LEND_MINT" ]]; then LEND_MINT="*"; fi
+        if [[ -z "$LEND_AMOUNT" ]]; then LEND_AMOUNT="*"; fi
+        run_cli_command "Lend earn deposit" node cli_trader.js lend earn deposit "$LEND_WALLET" "$LEND_MINT" "$LEND_AMOUNT"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      3)
+        echo "Leave fields blank to auto-select share tokens and withdraw full balance."
+        read -r -p "Wallet file (blank = all wallets): " LEND_WALLET
+        read -r -p "Withdraw mint or symbol (blank = share tokens): " LEND_MINT
+        read -r -p "Amount (decimal, blank = max available): " LEND_AMOUNT
+        if [[ -z "$LEND_WALLET" ]]; then LEND_WALLET="*"; fi
+        if [[ -z "$LEND_MINT" ]]; then LEND_MINT="*"; fi
+        if [[ -z "$LEND_AMOUNT" ]]; then LEND_AMOUNT="*"; fi
+        run_cli_command "Lend earn withdraw" node cli_trader.js lend earn withdraw "$LEND_WALLET" "$LEND_MINT" "$LEND_AMOUNT"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      4)
+        read -r -p "Wallet file (collateral owner): " LEND_WALLET
+        read -r -p "Collateral mint or symbol: " LEND_COLLATERAL
+        read -r -p "Borrow mint or symbol: " LEND_BORROW
+        read -r -p "Collateral amount (decimal): " LEND_COLLATERAL_AMT
+        read -r -p "Borrow amount (decimal): " LEND_BORROW_AMT
+        if [[ -z "$LEND_WALLET" || -z "$LEND_COLLATERAL" || -z "$LEND_BORROW" || -z "$LEND_COLLATERAL_AMT" || -z "$LEND_BORROW_AMT" ]]; then
+          echo "Missing inputs; aborting."
+          continue
+        fi
+        run_cli_command "Lend borrow open" node cli_trader.js lend borrow open "$LEND_WALLET" "$LEND_COLLATERAL" "$LEND_BORROW" "$LEND_COLLATERAL_AMT" "$LEND_BORROW_AMT"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      5)
+        read -r -p "Wallet file: " LEND_WALLET
+        read -r -p "Borrow mint or symbol: " LEND_BORROW
+        read -r -p "Repay amount (decimal): " LEND_REPAY
+        read -r -p "Position ID (optional): " LEND_POSITION
+        if [[ -z "$LEND_WALLET" || -z "$LEND_BORROW" || -z "$LEND_REPAY" ]]; then
+          echo "Missing inputs; aborting."
+          continue
+        fi
+        if [[ -n "$LEND_POSITION" ]]; then
+          run_cli_command "Lend borrow repay" node cli_trader.js lend borrow repay "$LEND_WALLET" "$LEND_BORROW" "$LEND_REPAY" --position "$LEND_POSITION"
+        else
+          run_cli_command "Lend borrow repay" node cli_trader.js lend borrow repay "$LEND_WALLET" "$LEND_BORROW" "$LEND_REPAY"
+        fi
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      6)
+        read -r -p "Wallet file: " LEND_WALLET
+        read -r -p "Position ID to close: " LEND_POSITION
+        if [[ -z "$LEND_WALLET" || -z "$LEND_POSITION" ]]; then
+          echo "Missing inputs; aborting."
+          continue
+        fi
+        run_cli_command "Lend borrow close" node cli_trader.js lend borrow close "$LEND_WALLET" "$LEND_POSITION"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      7)
+        read -r -p "Wallet identifiers (comma separated): " LEND_IDS
+        if [[ -z "$LEND_IDS" ]]; then
+          echo "No identifiers supplied."
+          continue
+        fi
+        run_cli_command "Lend earn positions" node cli_trader.js lend earn positions "$LEND_IDS"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      8)
+        read -r -p "Wallet identifiers (comma separated): " LEND_IDS
+        if [[ -z "$LEND_IDS" ]]; then
+          echo "No identifiers supplied."
+          continue
+        fi
+        run_cli_command "Lend borrow positions" node cli_trader.js lend borrow positions "$LEND_IDS"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      *)
+        echo "Unknown option: $LEND_OPT"
+        ;;
+    esac
+  done
+}
+
 advanced_menu() {
   while true; do
     echo
@@ -438,6 +555,7 @@ advanced_menu() {
     echo "  4  -> crew_1 interval cycle"
     echo "  5  -> sweep balances into wBTC / cbBTC / wETH"
     echo "  6  -> SOL → USDC → POPCAT lap"
+    echo "  7  -> Jupiter Lend (earn / borrow beta)"
     echo "  b  -> back"
     read -r -p "advanced> " ADV_OPT
     ADV_OPT_LOWER=$(printf '%s' "$ADV_OPT" | tr '[:upper:]' '[:lower:]')
@@ -550,6 +668,10 @@ advanced_menu() {
       6)
         run_cli_command "SOL → USDC → POPCAT lap" node cli_trader.js sol-usdc-popcat
         read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      7)
+        lend_menu
         update_launcher_state
         ;;
       *)

@@ -7,3 +7,15 @@
 - Refactored startup resource checks to eliminate duplicate logic and added context comments for future contributors.
 - crew_1.json guard override hardened across load/refresh cycles to guarantee it stays active regardless of balance.
 - Applied consistent cyan styling to the launcher ASCII banner and tightened CLI color usage for readability.
+- Buckshot pre-planning landed (wallet allocations computed before swaps). Roadmap for extending the same pattern to Long Circle and BTC/ETH sweep documented in README + ARCHITECTURE_PLAN.
+- Introduced optional timing instrumentation (`JUPITER_SWAP_TOOL_TIMING=1`) for Buckshot, Long Circle, and BTC/ETH sweep to separate planning vs execution durations.
+
+## [1.1.0] 2025-10-21
+- Swaps now use Jupiter Ultra by default (`https://api.jup.ag/ultra/91233f8d-d064-48c7-a97a-87b5d4d8a511`; override via `JUPITER_ULTRA_API_KEY`) with logging of client order id, expected out amount, payload snippets, and execution signatures. Legacy Lite quote/swap remains available via `JUPITER_SWAP_ENGINE=lite`.
+- Swapped token discovery to Jupiter Tokens API v2 and price lookups to Price API v3; added `tokens --refresh` to pull the latest catalog.
+- Scaffolded Jupiter Lend (Earn/Borrow) CLI commands plus launcher menu with verbose API logging so we can iterate against the beta endpoints.
+- Extended aggregation so donors pay the previous wallet in descending order, keeping per-wallet gas reserves intact.
+
+## [1.1.1] 2025-10-21
+- Lend earn deposit/withdraw now auto-select eligible base assets or share tokens when you pass `*`, defaulting to the max spendable balance per wallet while leaving a SOL reserve for rent/gas (and wrapping SOL as needed).
+- Launcher lend prompts accept blank inputs to trigger the wildcard behaviour so operators can fan actions across every active wallet without typing paths or amounts.
