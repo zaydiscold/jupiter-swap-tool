@@ -40,6 +40,8 @@ const TOOL_VERSION = "1.1.2";
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
@@ -59,7 +61,6 @@ const PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS =
 const PERPS_MARKET_CACHE_PATH =
   process.env.PERPS_MARKET_CACHE_PATH ||
   path.resolve(SCRIPT_DIR, "perps/market_cache.json");
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RPC_LIST_FILE =
   process.env.RPC_LIST_FILE || path.resolve(SCRIPT_DIR, "rpc_endpoints.txt");
 let RPC_ENDPOINTS_FILE_USED = null;
