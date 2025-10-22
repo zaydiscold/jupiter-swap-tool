@@ -106,7 +106,10 @@ function estimateStepCostLamports(step) {
 }
 
 export function truncatePlanToBudget(planSteps, solBalanceLamports) {
-  const balanceLamports = BigInt(solBalanceLamports ?? 0n);
+  const balanceLamports =
+    typeof solBalanceLamports === "bigint"
+      ? solBalanceLamports
+      : BigInt(solBalanceLamports ?? 0);
   if (balanceLamports <= WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS) {
     return [];
   }
