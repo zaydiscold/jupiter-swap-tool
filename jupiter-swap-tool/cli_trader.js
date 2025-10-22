@@ -2,7 +2,7 @@
 
 import fs from "fs";
 import path from "path";
-import { fileURLToPath, pathToFileURL } from "url";
+import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 import bs58 from "bs58";
 import readline from "readline";
@@ -44,9 +44,17 @@ const IS_MAIN_EXECUTION = (() => {
   const entry = process?.argv?.[1];
   if (!entry) return false;
   try {
-    return import.meta.url === pathToFileURL(entry).href;
+    const currentRealPath = fs.realpathSync(fileURLToPath(import.meta.url));
+    const entryRealPath = fs.realpathSync(entry);
+    return currentRealPath === entryRealPath;
   } catch (err) {
-    return false;
+    try {
+      const currentPath = fileURLToPath(import.meta.url);
+      const entryPath = path.resolve(entry);
+      return currentPath === entryPath;
+    } catch (nestedErr) {
+      return false;
+    }
   }
 })();
 
