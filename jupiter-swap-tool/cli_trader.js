@@ -40,8 +40,41 @@ const TOOL_VERSION = "1.1.2";
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+// Normalise a filesystem path for equality comparisons that tolerate symlinks.
+const toComparablePath = (rawPath) => {
+  if (!rawPath) return null;
+  const valueAsString =
+    typeof rawPath === "string" ? rawPath : String(rawPath ?? "");
+  const normalizedInput = path.resolve(
+    valueAsString.startsWith("file://") ? fileURLToPath(valueAsString) : valueAsString
+  );
+  try {
+    return path.normalize(fs.realpathSync(normalizedInput));
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
+      return path.normalize(normalizedInput);
+    }
+    return path.normalize(normalizedInput);
+  }
+};
+
+const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_COMPARABLE_PATH =
+  toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
+
+const IS_MAIN_EXECUTION = (() => {
+  const entry = process?.argv?.[1];
+  if (!entry) return false;
+  const entryComparablePath = toComparablePath(entry);
+  if (!entryComparablePath || !SCRIPT_COMPARABLE_PATH) {
+    return false;
+  }
+  return entryComparablePath === SCRIPT_COMPARABLE_PATH;
+})();
+
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
 const JUPITER_PERPS_PROGRAM_ID =
   process.env.JUPITER_PERPS_PROGRAM_ID || DEFAULT_PERPS_PROGRAM_ID;
@@ -617,7 +650,9 @@ async function refreshTokenCatalogFromApi(options = {}) {
   return tokenCatalogRefreshPromise;
 }
 
-refreshTokenCatalogFromApi().catch(() => {});
+if (IS_MAIN_EXECUTION) {
+  refreshTokenCatalogFromApi().catch(() => {});
+}
 
 function tokenBySymbol(symbol) {
   if (!symbol) return null;
@@ -8573,4 +8608,8 @@ async function main() {
   process.exit(0);
 }
 
-main();
+if (IS_MAIN_EXECUTION) {
+  main();
+}
+
+export { listWallets, ensureAtaForMint, ensureWrappedSolBalance };
