@@ -1,4 +1,4 @@
-# Jupiter Swap Tool CLI (v1.1.1)
+# Jupiter Swap Tool CLI (v1.1.2)
 
 ## Getting Started
 1. Install Node.js 18+ and clone the repo.
@@ -130,6 +130,7 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 - `force-reset-wallets` – clear the wallet guard so every wallet can run swaps again until the next `balances` call recomputes statuses.
 - `wallet-guard-status [--refresh]` – print the current guard summary (active/total/disabled). Pass `--refresh` to force an immediate balance check.
 - `test-rpcs [all|index|match|url]` – probe one or more RPC endpoints (as listed in rotation) and report latency, version, and blockhash timings. Use a numeric index (1-based), a substring match, a full URL, or leave blank for all. Append `--swap --confirm` (optionally with `--loops N`, `--delay MS`, `--amount X`) to run an on-chain SOL→USDC→SOL stress test using `crew_1.json`.
+- `test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit]` – dry-run a Jupiter Ultra order (defaults to SOL→USDC, 0.001 SOL) to confirm the configured API key works. The transaction is decoded but not broadcast unless you include `--submit`, in which case it signs with the chosen wallet, sends via Ultra’s execute endpoint, and confirms on your active RPC.
 - `fund-all <fromFile> <lamportsEach>` – send the same lamport amount from one wallet to all others.
 - `redistribute <walletFile>` – evenly redistribute SOL from the chosen wallet across the whole set, leaving at least `GAS_RESERVE_LAMPORTS` and skipping dust transfers below `MIN_TRANSFER_LAMPORTS`.
 - `fund <from> <to> <lamports>` / `send <from> <to> <lamports>` – simple SOL transfer between two local wallets.
@@ -144,7 +145,8 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 - `long-circle [extra|primary-only]` – run an extended multi-hop route that now includes SOL/USDC/POPCAT/PUMP/PENGU/FART/USELESS/WIF/PFP plus wBTC, cbBTC, and wETH. In `random` mode each wallet receives its own shuffled subset of segments and per-swap random amounts; deterministic runs execute the full cycle using whole balances. Pass `extra` to append an additional randomized SOL-out path (prompted automatically by the launcher).
 - `sweep-to-btc-eth` – sweep every non-SOL holding back into SOL, then split the available SOL across wBTC, cbBTC, and wETH (respecting rent/gas guardrails and using per-wallet random weights when the session is in `random`).
 - `reclaim-sol` – close all zero-balance associated token accounts for every wallet (legacy SPL + Token-2022). Accounts with withheld transfer fees remaining are skipped with an explanatory warning until the mint authority harvests the fees. Alias: `close-token-accounts`.
-- `lend earn …` / `lend borrow …` – interact with Jupiter Lend (Earn/Borrow beta). Examples: `lend earn tokens`, `lend earn deposit crew_1.json SOL 0.1`, `lend borrow open crew_1.json SOL USDC 1 0.5`. Passing `*` for the wallet, mint, or amount fans out across every active wallet, filters to eligible base assets/share tokens, and defaults to the maximum spendable balance (SOL keeps a rent/fee reserve automatically). Responses log status codes, request IDs, and payloads to help debug the still-beta endpoints.
+- `lend earn …` / `lend borrow …` – interact with Jupiter Lend (Earn/Borrow beta). Examples: `lend earn tokens`, `lend earn deposit crew_1.json SOL 0.1`, `lend borrow open crew_1.json SOL USDC 1 0.5`. Passing `*` for the wallet, mint, or amount fans out across every active wallet, filters to eligible base assets/share tokens, and defaults to the maximum spendable balance (SOL keeps a rent/fee reserve automatically). Responses log status codes, request IDs, and payloads to help debug the still-beta endpoints. Use `lend borrow close <wallet> *` (or leave the launcher prompt blank) to close every borrow position for a wallet without hunting IDs. Deposits/withdrawals auto-submit returned transactions, auto-create missing ATAs, subtract a ~0.0022 SOL wrap buffer, and back off the deposit amount if the wallet is short on SOL; wallets with <0.005 SOL of headroom are skipped with guidance to top-up. Use `--no-send` to dry-run only.
+- `lend overview` – pull earn positions, earnings, and borrow positions for every discovered wallet in a single call.
 - `tokens --refresh` – force-refresh the token catalog via Jupiter Tokens API v2 before printing (fallback/local entries remain merged in).
 
 All swap commands print:

@@ -19,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf 'Jupiter Swap Tool v1.1.1 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.1.2 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC
@@ -303,6 +303,7 @@ print_hotkeys() {
   echo "  6  -> swap SOL -> USDC (default amount)"
   echo "  7  -> buckshot mode (spread + interactive token rotation)"
   echo "  8  -> sweep all token balances -> SOL"
+  echo "  t  -> test utilities (RPC / Ultra checks)"
   echo "  9  -> advanced trade tools"
   echo "  0  -> quit"
   echo "(Use hotkey 0 to quit)"
@@ -428,6 +429,129 @@ wallet_menu() {
   done
 }
 
+rpc_tests_menu() {
+  while true; do
+    echo
+    echo "RPC endpoint diagnostics:"
+    echo "  1  -> test all endpoints"
+    echo "  2  -> test by index (1-based)"
+    echo "  3  -> test by substring match"
+    echo "  4  -> test a custom URL"
+    echo "  5  -> swap stress test (requires confirmation)"
+    echo "  b  -> back"
+    read -r -p "rpc-test option> " RPC_OPT
+    RPC_OPT_LOWER=$(printf '%s' "$RPC_OPT" | tr '[:upper:]' '[:lower:]')
+    case "$RPC_OPT_LOWER" in
+      ""|b)
+        break
+        ;;
+      1)
+        run_cli_command "RPC test: all endpoints" node cli_trader.js test-rpcs all
+        update_launcher_state
+        ;;
+      2)
+        read -r -p "Enter 1-based index: " RPC_INDEX
+        if [[ ! "$RPC_INDEX" =~ ^[0-9]+$ ]] || [[ "$RPC_INDEX" -le 0 ]]; then
+          echo "Invalid index."
+          continue
+        fi
+        run_cli_command "RPC test: index $RPC_INDEX" node cli_trader.js test-rpcs "$RPC_INDEX"
+        update_launcher_state
+        ;;
+      3)
+        read -r -p "Substring to match: " RPC_MATCH
+        if [[ -z "$RPC_MATCH" ]]; then
+          echo "No substring provided."
+          continue
+        fi
+        run_cli_command "RPC test: match \"$RPC_MATCH\"" node cli_trader.js test-rpcs "$RPC_MATCH"
+        update_launcher_state
+        ;;
+      4)
+        read -r -p "Full RPC URL: " RPC_URL_CUSTOM
+        if [[ -z "$RPC_URL_CUSTOM" ]]; then
+          echo "No URL provided."
+          continue
+        fi
+        run_cli_command "RPC test: custom URL" node cli_trader.js test-rpcs "$RPC_URL_CUSTOM"
+        update_launcher_state
+        ;;
+      5)
+        read -r -p "Amount in SOL per round [0.001]: " RPC_SWAP_AMOUNT
+        RPC_SWAP_AMOUNT=${RPC_SWAP_AMOUNT:-0.001}
+        read -r -p "Number of rounds [10]: " RPC_SWAP_LOOPS
+        RPC_SWAP_LOOPS=${RPC_SWAP_LOOPS:-10}
+        read -r -p "Delay between rounds in ms [1000]: " RPC_SWAP_DELAY
+        RPC_SWAP_DELAY=${RPC_SWAP_DELAY:-1000}
+        read -r -p "This will perform live SOL→USDC→SOL swaps. Continue? (y/N): " RPC_SWAP_CONFIRM
+        RPC_SWAP_CONFIRM=$(printf '%s' "$RPC_SWAP_CONFIRM" | tr '[:upper:]' '[:lower:]')
+        if [[ "$RPC_SWAP_CONFIRM" != "y" && "$RPC_SWAP_CONFIRM" != "yes" ]]; then
+          echo "Cancelled swap stress test."
+          continue
+        fi
+        run_cli_command "RPC swap stress test" \
+          node cli_trader.js test-rpcs all --swap --confirm --amount "$RPC_SWAP_AMOUNT" --loops "$RPC_SWAP_LOOPS" --delay "$RPC_SWAP_DELAY"
+        update_launcher_state
+        ;;
+      *)
+        echo "Unknown option: $RPC_OPT"
+        ;;
+    esac
+    read -p "Press Enter to continue..." _
+  done
+}
+
+test_menu() {
+  while true; do
+    echo
+    echo "Test utilities:"
+    echo "  1  -> RPC endpoint diagnostics"
+    echo "  2  -> Ultra API swap check"
+    echo "  b  -> back"
+    read -r -p "test> " TEST_OPT
+    TEST_OPT_LOWER=$(printf '%s' "$TEST_OPT" | tr '[:upper:]' '[:lower:]')
+    case "$TEST_OPT_LOWER" in
+      ""|b)
+        break
+        ;;
+      1)
+        rpc_tests_menu
+        ;;
+      2)
+        echo "Leave fields blank to use defaults (crew_1.json, SOL → USDC, 0.001 SOL, dry run)."
+        read -r -p "Wallet file: " TEST_WALLET
+        read -r -p "Input mint or symbol: " TEST_INPUT
+        read -r -p "Output mint or symbol: " TEST_OUTPUT
+        read -r -p "Amount (decimal SOL units): " TEST_AMOUNT
+        read -r -p "Submit signed swap on-chain? (y/N): " TEST_SUBMIT
+        TEST_SUBMIT=$(printf '%s' "$TEST_SUBMIT" | tr '[:upper:]' '[:lower:]')
+        cmd=(node cli_trader.js test-ultra)
+        if [[ -n "$TEST_WALLET" ]]; then
+          cmd+=(--wallet "$TEST_WALLET")
+        fi
+        if [[ -n "$TEST_INPUT" ]]; then
+          cmd+=(--input "$TEST_INPUT")
+        fi
+        if [[ -n "$TEST_OUTPUT" ]]; then
+          cmd+=(--output "$TEST_OUTPUT")
+        fi
+        if [[ -n "$TEST_AMOUNT" ]]; then
+          cmd+=(--amount "$TEST_AMOUNT")
+        fi
+        if [[ "$TEST_SUBMIT" == "y" || "$TEST_SUBMIT" == "yes" ]]; then
+          cmd+=(--submit)
+        fi
+        run_cli_command "Ultra API swap test" "${cmd[@]}"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      *)
+        echo "Unknown option: $TEST_OPT"
+        ;;
+    esac
+  done
+}
+
 lend_menu() {
   while true; do
     echo
@@ -440,6 +564,7 @@ lend_menu() {
     echo "  6  -> borrow close"
     echo "  7  -> earn positions"
     echo "  8  -> borrow positions"
+    echo "  9  -> overview (earn+borrow all wallets)"
     echo "  b  -> back"
     read -r -p "lend> " LEND_OPT
     LEND_OPT_LOWER=$(printf '%s' "$LEND_OPT" | tr '[:upper:]' '[:lower:]')
@@ -509,32 +634,38 @@ lend_menu() {
         ;;
       6)
         read -r -p "Wallet file: " LEND_WALLET
-        read -r -p "Position ID to close: " LEND_POSITION
-        if [[ -z "$LEND_WALLET" || -z "$LEND_POSITION" ]]; then
+        read -r -p "Position ID to close (blank = all): " LEND_POSITION
+        if [[ -z "$LEND_WALLET" ]]; then
           echo "Missing inputs; aborting."
           continue
+        fi
+        if [[ -z "$LEND_POSITION" ]]; then
+          LEND_POSITION="*"
         fi
         run_cli_command "Lend borrow close" node cli_trader.js lend borrow close "$LEND_WALLET" "$LEND_POSITION"
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       7)
-        read -r -p "Wallet identifiers (comma separated): " LEND_IDS
+        read -r -p "Wallet identifiers (blank = all wallets): " LEND_IDS
         if [[ -z "$LEND_IDS" ]]; then
-          echo "No identifiers supplied."
-          continue
+          LEND_IDS="*"
         fi
         run_cli_command "Lend earn positions" node cli_trader.js lend earn positions "$LEND_IDS"
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       8)
-        read -r -p "Wallet identifiers (comma separated): " LEND_IDS
+        read -r -p "Wallet identifiers (blank = all wallets): " LEND_IDS
         if [[ -z "$LEND_IDS" ]]; then
-          echo "No identifiers supplied."
-          continue
+          LEND_IDS="*"
         fi
         run_cli_command "Lend borrow positions" node cli_trader.js lend borrow positions "$LEND_IDS"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      9)
+        run_cli_command "Lend overview (all wallets)" node cli_trader.js lend overview
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
@@ -551,7 +682,7 @@ advanced_menu() {
     echo "Advanced trade tools:"
     echo "  1  -> target loop (paste mint, 'sol' to flatten, 'exit' to stop)"
     echo "  2  -> long circle swap"
-    echo "  3  -> RPC endpoint tests"
+    echo "  3  -> test utilities (RPC / Ultra)"
     echo "  4  -> crew_1 interval cycle"
     echo "  5  -> sweep balances into wBTC / cbBTC / wETH"
     echo "  6  -> SOL → USDC → POPCAT lap"
@@ -585,75 +716,8 @@ advanced_menu() {
         update_launcher_state
         ;;
       3)
-        while true; do
-          echo
-          echo "RPC endpoint tests:"
-          echo "  1  -> test all endpoints"
-          echo "  2  -> test by index (1-based)"
-          echo "  3  -> test by substring match"
-          echo "  4  -> test a custom URL"
-          echo "  5  -> swap stress test (requires confirmation)"
-          echo "  b  -> back"
-          read -r -p "rpc-test option> " RPC_OPT
-          RPC_OPT_LOWER=$(printf '%s' "$RPC_OPT" | tr '[:upper:]' '[:lower:]')
-          case "$RPC_OPT_LOWER" in
-            ""|b)
-              break
-              ;;
-            1)
-              run_cli_command "RPC test: all endpoints" node cli_trader.js test-rpcs all
-              update_launcher_state
-              ;;
-            2)
-              read -r -p "Enter 1-based index: " RPC_INDEX
-              if [[ ! "$RPC_INDEX" =~ ^[0-9]+$ ]] || [[ "$RPC_INDEX" -le 0 ]]; then
-                echo "Invalid index."
-                continue
-              fi
-              run_cli_command "RPC test: index $RPC_INDEX" node cli_trader.js test-rpcs "$RPC_INDEX"
-              update_launcher_state
-              ;;
-            3)
-              read -r -p "Substring to match: " RPC_MATCH
-              if [[ -z "$RPC_MATCH" ]]; then
-                echo "No substring provided."
-                continue
-              fi
-              run_cli_command "RPC test: match \"$RPC_MATCH\"" node cli_trader.js test-rpcs "$RPC_MATCH"
-              update_launcher_state
-              ;;
-            4)
-              read -r -p "Full RPC URL: " RPC_URL_CUSTOM
-              if [[ -z "$RPC_URL_CUSTOM" ]]; then
-                echo "No URL provided."
-                continue
-              fi
-              run_cli_command "RPC test: custom URL" node cli_trader.js test-rpcs "$RPC_URL_CUSTOM"
-              update_launcher_state
-              ;;
-            5)
-              read -r -p "Amount in SOL per round [0.001]: " RPC_SWAP_AMOUNT
-              RPC_SWAP_AMOUNT=${RPC_SWAP_AMOUNT:-0.001}
-              read -r -p "Number of rounds [10]: " RPC_SWAP_LOOPS
-              RPC_SWAP_LOOPS=${RPC_SWAP_LOOPS:-10}
-              read -r -p "Delay between rounds in ms [1000]: " RPC_SWAP_DELAY
-              RPC_SWAP_DELAY=${RPC_SWAP_DELAY:-1000}
-              read -r -p "This will perform live SOL→USDC→SOL swaps. Continue? (y/N): " RPC_SWAP_CONFIRM
-              RPC_SWAP_CONFIRM=$(printf '%s' "$RPC_SWAP_CONFIRM" | tr '[:upper:]' '[:lower:]')
-              if [[ "$RPC_SWAP_CONFIRM" != "y" && "$RPC_SWAP_CONFIRM" != "yes" ]]; then
-                echo "Cancelled swap stress test."
-                continue
-              fi
-              run_cli_command "RPC swap stress test" \
-                node cli_trader.js test-rpcs all --swap --confirm --amount "$RPC_SWAP_AMOUNT" --loops "$RPC_SWAP_LOOPS" --delay "$RPC_SWAP_DELAY"
-              update_launcher_state
-              ;;
-            *)
-              echo "Unknown option: $RPC_OPT"
-              ;;
-          esac
-          read -p "Press Enter to continue..." _
-        done
+        test_menu
+        update_launcher_state
         ;;
       4)
         node cli_trader.js crew1-cycle
@@ -754,6 +818,11 @@ while true; do
     8|sweepall|SWEEPALL)
       EXEC_DESC="Sweep all token balances -> SOL"
       EXEC_ARGS=(sweep-all)
+      ;;
+    t|T|test|TEST|tests|TESTS)
+      test_menu
+      refresh_caches_after_command
+      continue
       ;;
     9|advanced|ADVANCED|s|S|sol2custom|SOL2CUSTOM|l|L|longcircle|LONGCIRCLE|r|R|rpc|RPC|c|C|crew1|CREW1|b|B|btc|BTC|btceth|BTCETH)
       advanced_menu

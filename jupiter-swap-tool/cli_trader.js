@@ -23,15 +23,17 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
   getMint,
+  MintLayout,
+  createSyncNativeInstruction,
   closeAccount,
 } from "@solana/spl-token";
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.1.1
+// version 1.1.2
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.1.1";
+const TOOL_VERSION = "1.1.2";
 
 // ---------------- Config ----------------
 // All of the CLI's tunable parameters live in this block so the rest of the
@@ -92,6 +94,12 @@ const GENERAL_SIMULATION_REDUCTION_BPS = process.env.GENERAL_SIMULATION_REDUCTIO
 const MIN_SOL_PER_SWAP_LAMPORTS = process.env.MIN_SOL_PER_SWAP_LAMPORTS
   ? BigInt(process.env.MIN_SOL_PER_SWAP_LAMPORTS)
   : BigInt(10_000_000); // default ~0.01 SOL to keep room for rent/fees
+const MIN_LEND_SOL_DEPOSIT_LAMPORTS = process.env.MIN_LEND_SOL_DEPOSIT_LAMPORTS
+  ? BigInt(process.env.MIN_LEND_SOL_DEPOSIT_LAMPORTS)
+  : BigInt(5_000_000); // ~0.005 SOL minimum deposit to avoid dust / rent issues
+const LEND_SOL_WRAP_BUFFER_LAMPORTS = process.env.LEND_SOL_WRAP_BUFFER_LAMPORTS
+  ? BigInt(process.env.LEND_SOL_WRAP_BUFFER_LAMPORTS)
+  : BigInt(2_200_000); // ~0.0022 SOL to cover wrap + ATA rent/fees
 const GAS_RESERVE_LAMPORTS = process.env.GAS_RESERVE_LAMPORTS
   ? BigInt(process.env.GAS_RESERVE_LAMPORTS)
   : BigInt(1_000_000); // default reserve ~0.001 SOL
@@ -104,6 +112,36 @@ const JUPITER_SOL_RETRY_DELTA_LAMPORTS = process.env.JUPITER_SOL_RETRY_DELTA_LAM
 const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
   ? Math.max(0, parseInt(process.env.JUPITER_SOL_MAX_RETRIES, 10) || 0)
   : 3;
+const LEND_SOL_BASE_PERCENT = BigInt(
+  process.env.LEND_SOL_BASE_PERCENT
+    ? Math.min(
+        10000,
+        Math.max(1000, parseInt(process.env.LEND_SOL_BASE_PERCENT, 10) || 7000)
+      )
+    : 7000
+);
+const LEND_SOL_RETRY_DECREMENT_PERCENT = BigInt(
+  process.env.LEND_SOL_RETRY_DECREMENT_PERCENT
+    ? Math.min(
+        5000,
+        Math.max(
+          250,
+          parseInt(process.env.LEND_SOL_RETRY_DECREMENT_PERCENT, 10) || 1500
+        )
+      )
+    : 1500
+);
+const LEND_SOL_MIN_PERCENT = BigInt(
+  process.env.LEND_SOL_MIN_PERCENT
+    ? Math.min(
+        9000,
+        Math.max(
+          500,
+          parseInt(process.env.LEND_SOL_MIN_PERCENT, 10) || 2000
+        )
+      )
+    : 2000
+);
 const MAX_SLIPPAGE_RETRIES = process.env.MAX_SLIPPAGE_RETRIES
   ? Math.max(1, parseInt(process.env.MAX_SLIPPAGE_RETRIES, 10) || 1)
   : 5;
@@ -1164,7 +1202,7 @@ async function handleLendCommand(args) {
   const categoryRaw = args[0];
   if (!categoryRaw) {
     console.log(
-      "lend usage: lend <earn|borrow> <action> [...options]"
+      "lend usage: lend <earn|borrow> <action> [...options] | lend overview"
     );
     return;
   }
@@ -1175,6 +1213,10 @@ async function handleLendCommand(args) {
     )
   );
   const category = categoryRaw.toLowerCase();
+  if (category === "overview" || category === "snapshot") {
+    await lendOverviewAllWallets();
+    return;
+  }
   const rest = args.slice(1);
   if (category === "earn") {
     await handleLendEarnCommand(rest);
@@ -1281,6 +1323,30 @@ async function lendEarnPositions(args) {
     throw new Error("lend earn positions usage: lend earn positions <walletName|pubkey>[,...]");
   }
   const identifiers = resolveWalletIdentifiers(input);
+  const walletNameMap = new Map(
+    identifiers.map((entry) => [entry.pubkey, entry.name || entry.pubkey])
+  );
+  if (needsAllWallets) {
+    console.log(
+      paint(
+        `  Targeting all ${identifiers.length} wallet(s) for positions.`,
+        "muted"
+      )
+    );
+  } else if (identifiers.length > 1) {
+    console.log(
+      paint(
+        `  Targeting ${identifiers.length} wallet(s) for positions.`,
+        "muted"
+      )
+    );
+  }
+  const scopeNames = identifiers
+    .map((entry) => entry.name || entry.pubkey)
+    .filter(Boolean);
+  if (scopeNames.length > 0 && scopeNames.length <= 5) {
+    console.log(paint(`  Wallet scope: ${scopeNames.join(", ")}`, "muted"));
+  }
   try {
     const result = await lendEarnRequest({
       path: "positions",
@@ -1288,6 +1354,47 @@ async function lendEarnPositions(args) {
       query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
     });
     logLendApiResult("earn positions", result);
+    const entries = extractIterableFromLendData(result.data) || [];
+    if (entries.length === 0) {
+      console.log(
+        paint(
+          "  No earn positions found for the requested wallet(s).",
+          "muted"
+        )
+      );
+    } else {
+      const grouped = new Map();
+      for (const entry of entries) {
+        const ownerKey = resolvePositionOwner(entry) || "unknown";
+        const label = walletNameMap.get(ownerKey) || ownerKey;
+        if (!grouped.has(label)) grouped.set(label, []);
+        grouped.get(label).push(entry);
+      }
+      console.log(
+        paint(
+          `  Found ${entries.length} position(s) across ${grouped.size} wallet(s).`,
+          "info"
+        )
+      );
+      for (const [label, list] of grouped.entries()) {
+        const preview = list
+          .slice(0, 3)
+          .map((entry) => formatEarnPositionSnippet(entry))
+          .join("; ");
+        let line = `  ${label}: ${list.length} position(s)`;
+        if (preview) {
+          line += ` — ${preview}`;
+          if (list.length > 3) line += " …";
+        }
+        console.log(paint(line, "muted"));
+      }
+      console.log(
+        paint(
+          "  Tip: run 'lend overview' for combined earnings/borrow details per wallet.",
+          "muted"
+        )
+      );
+    }
   } catch (err) {
     console.error(paint("Lend earn positions request failed:", "error"), err.message);
   }
@@ -1307,6 +1414,27 @@ async function lendEarnEarnings(args) {
     throw new Error("lend earn earnings usage: lend earn earnings <walletName|pubkey>[,...]");
   }
   const identifiers = resolveWalletIdentifiers(input);
+  if (needsAllWallets) {
+    console.log(
+      paint(
+        `  Targeting all ${identifiers.length} wallet(s) for earnings.`,
+        "muted"
+      )
+    );
+  } else if (identifiers.length > 1) {
+    console.log(
+      paint(
+        `  Targeting ${identifiers.length} wallet(s) for earnings.`,
+        "muted"
+      )
+    );
+  }
+  const earningScope = identifiers
+    .map((entry) => entry.name || entry.pubkey)
+    .filter(Boolean);
+  if (earningScope.length > 0 && earningScope.length <= 5) {
+    console.log(paint(`  Wallet scope: ${earningScope.join(", ")}`, "muted"));
+  }
   try {
     const result = await lendEarnRequest({
       path: "earnings",
@@ -1316,6 +1444,653 @@ async function lendEarnEarnings(args) {
     logLendApiResult("earn earnings", result);
   } catch (err) {
     console.error(paint("Lend earn earnings request failed:", "error"), err.message);
+  }
+}
+
+function normalizeWalletIdentifier(value) {
+  if (!value) return null;
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value instanceof PublicKey) {
+    return value.toBase58();
+  }
+  if (typeof value === "object") {
+    if (typeof value.toBase58 === "function") {
+      try {
+        return value.toBase58();
+      } catch (_) {}
+    }
+    if (typeof value.pubkey === "string") return value.pubkey;
+    if (value.pubkey) return normalizeWalletIdentifier(value.pubkey);
+    if (typeof value.wallet === "string") return value.wallet;
+    if (value.wallet) return normalizeWalletIdentifier(value.wallet);
+    if (typeof value.owner === "string") return value.owner;
+    if (value.owner) return normalizeWalletIdentifier(value.owner);
+    if (typeof value.address === "string") return value.address;
+    if (value.address) return normalizeWalletIdentifier(value.address);
+  }
+  try {
+    const stringified = value.toString();
+    if (stringified && stringified !== "[object Object]") {
+      return stringified;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function extractIterableFromLendData(data) {
+  if (!data) return null;
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.positions)) return data.positions;
+  if (Array.isArray(data.entries)) return data.entries;
+  if (Array.isArray(data.items)) return data.items;
+  if (Array.isArray(data.data)) return data.data;
+  return null;
+}
+
+function summariseLendEntries(result, walletNameMap, { label }) {
+  if (!result || !result.ok) return;
+  const iterable = extractIterableFromLendData(result.data);
+  if (!Array.isArray(iterable) || iterable.length === 0) {
+    console.log(paint(`  ${label}: no entries returned.`, "muted"));
+    return;
+  }
+  const counts = new Map();
+  for (const entry of iterable) {
+    const walletKey = resolvePositionOwner(entry);
+    if (!walletKey) continue;
+    const labelName = walletNameMap.get(walletKey) || walletKey;
+    counts.set(labelName, (counts.get(labelName) || 0) + 1);
+  }
+  console.log(
+    paint(
+      `  ${label}: ${iterable.length} entr${iterable.length === 1 ? "y" : "ies"} across ${counts.size || 0} wallet(s).`,
+      "muted"
+    )
+  );
+  if (counts.size > 0 && counts.size <= 10) {
+    const sorted = Array.from(counts.entries()).sort((a, b) =>
+      a[0].localeCompare(b[0])
+    );
+    for (const [walletLabel, count] of sorted) {
+      console.log(
+        paint(
+          `    ${walletLabel}: ${count} entr${count === 1 ? "y" : "ies"}`,
+          "muted"
+        )
+      );
+    }
+  }
+}
+
+function resolvePositionOwner(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const candidates = [
+    entry,
+    entry.wallet,
+    entry.owner,
+    entry.walletAddress,
+    entry.walletPubkey,
+    entry.borrower,
+    entry.accountOwner,
+    entry.user,
+    entry.userPubkey,
+    entry.pubkey,
+  ];
+  for (const candidate of candidates) {
+    const resolved = normalizeWalletIdentifier(candidate);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+function collectBorrowPositionIds(entries, walletPubkey = null) {
+  if (!Array.isArray(entries)) return [];
+  const ids = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const owner = resolvePositionOwner(entry);
+    if (walletPubkey && owner && owner !== walletPubkey) continue;
+    const candidates = [
+      entry.positionId,
+      entry.id,
+      entry.positionAccount,
+      entry.account,
+      entry.publicKey,
+      entry.pubkey,
+      entry.position?.id,
+      entry.position?.positionId,
+      entry.position?.account,
+      entry.position?.publicKey,
+      entry.depositAccount,
+    ];
+    const match = candidates.find(
+      (value) => typeof value === "string" && value.trim().length > 0
+    );
+    if (match) {
+      ids.push(match.trim());
+      continue;
+    }
+    if (Array.isArray(entry.positions)) {
+      for (const nested of entry.positions) {
+        const nestedCandidates = [
+          nested?.positionId,
+          nested?.id,
+          nested?.account,
+          nested?.publicKey,
+        ];
+        const nestedMatch = nestedCandidates.find(
+          (value) => typeof value === "string" && value.trim().length > 0
+        );
+        if (nestedMatch) {
+          ids.push(nestedMatch.trim());
+        }
+      }
+    }
+  }
+  return Array.from(new Set(ids));
+}
+
+function isLikelyBase64Transaction(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (trimmed.length < 80) return false;
+  if (!/^[A-Za-z0-9+/=]+$/.test(trimmed)) return false;
+  try {
+    const buf = Buffer.from(trimmed, "base64");
+    return buf.length > 32;
+  } catch (_) {
+    return false;
+  }
+}
+
+function extractTransactionsFromLendResponse(data) {
+  const collected = [];
+  const seen = new Set();
+  const pushTx = (str) => {
+    if (!isLikelyBase64Transaction(str)) return;
+    const id = str.slice(0, 32);
+    if (seen.has(id)) return;
+    seen.add(id);
+    collected.push(str);
+  };
+  const scan = (value, keyHint = "") => {
+    if (!value) return;
+    if (typeof value === "string") {
+      if (/transaction/i.test(keyHint) || isLikelyBase64Transaction(value)) {
+        pushTx(value);
+      }
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const element of value) {
+        scan(element, keyHint);
+      }
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [key, val] of Object.entries(value)) {
+        if (typeof val === "string") {
+          if (/transaction/i.test(key)) {
+            pushTx(val);
+          } else {
+            scan(val, key);
+          }
+        } else {
+          scan(val, key);
+        }
+      }
+    }
+  };
+  scan(data, "");
+  return collected;
+}
+
+function formatNumericish(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return null;
+    return trimmed;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value.toString();
+  }
+  if (typeof value === "bigint") {
+    return value.toString();
+  }
+  if (typeof value === "object") {
+    if (typeof value.uiAmountString === "string") return value.uiAmountString;
+    if (typeof value.uiAmount === "number") return value.uiAmount.toString();
+    if (typeof value.amount === "string") return value.amount;
+    if (typeof value.amount === "number") return value.amount.toString();
+  }
+  try {
+    const json = JSON.stringify(value);
+    if (json.length <= 60) return json;
+  } catch (_) {}
+  return null;
+}
+
+function formatEarnPositionSnippet(entry) {
+  const amountCandidate = findInObject(entry, [
+    "balance.uiAmountString",
+    "balance.uiAmount",
+    "balance.amount",
+    "balance",
+    "amount.uiAmountString",
+    "amount.uiAmount",
+    "amount.amount",
+    "amount",
+    "shares.uiAmountString",
+    "shares.amount",
+    "shares",
+    "principal.uiAmountString",
+    "principal.amount",
+    "principal",
+    "depositedAmount.uiAmountString",
+    "depositedAmount.amount",
+    "depositedAmount",
+    "value",
+    "usdValue",
+  ]);
+  const amountStr = formatNumericish(amountCandidate);
+  const rawSymbol = findInObject(entry, [
+    "assetSymbol",
+    "tokenSymbol",
+    "depositSymbol",
+    "symbol",
+    "sharesSymbol",
+    "asset.symbol",
+    "token.symbol",
+  ]);
+  let symbolStr = formatNumericish(rawSymbol);
+  if (!symbolStr) {
+    const mint = findInObject(entry, [
+      "asset",
+      "depositMint",
+      "mint",
+      "tokenMint",
+      "shareMint",
+    ]);
+    if (typeof mint === "string" && mint.trim()) {
+      symbolStr = symbolForMint(mint.trim());
+    }
+  }
+  if (!symbolStr) symbolStr = "share";
+  if (amountStr) {
+    return `${symbolStr} ≈ ${amountStr}`;
+  }
+  return symbolStr;
+}
+
+async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, { label } = {}) {
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    wallet.kp.publicKey,
+    false,
+    tokenProgram,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const info = await connection.getAccountInfo(ata);
+  if (info) return false;
+  const ix = createAssociatedTokenAccountInstruction(
+    wallet.kp.publicKey,
+    ata,
+    wallet.kp.publicKey,
+    mintPubkey,
+    tokenProgram,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const tx = new Transaction().add(ix);
+  tx.feePayer = wallet.kp.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.sign(wallet.kp);
+  const sig = await connection.sendRawTransaction(tx.serialize());
+  await connection.confirmTransaction(sig, "confirmed");
+  const mintLabel = symbolForMint(mintPubkey.toBase58());
+  const contextLabel = label ? `${label}:` : "";
+  console.log(
+    paint(
+      `  ${contextLabel} created ATA ${ata.toBase58()} for mint ${mintLabel}.`,
+      "muted"
+    )
+  );
+  return true;
+}
+
+async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
+  if (!txBase64) return 0;
+  let message;
+  const buf = Buffer.from(txBase64, "base64");
+  try {
+    const vtx = VersionedTransaction.deserialize(buf);
+    message = vtx.message;
+  } catch (err) {
+    try {
+      const legacyTx = Transaction.from(buf);
+      message = legacyTx.compileMessage();
+    } catch (_) {
+      return 0;
+    }
+  }
+  let accountKeys = [];
+  if (typeof message.getAccountKeys === "function") {
+    const keyStruct = message.getAccountKeys();
+    accountKeys = [
+      ...(keyStruct?.staticAccountKeys || []),
+      ...((keyStruct?.accountKeysFromLookups && keyStruct.accountKeysFromLookups.readonly) || []),
+      ...((keyStruct?.accountKeysFromLookups && keyStruct.accountKeysFromLookups.writable) || []),
+    ];
+  } else if (Array.isArray(message.accountKeys)) {
+    accountKeys = [...message.accountKeys];
+  }
+  if (!accountKeys.length) return 0;
+
+  const infos = await connection.getMultipleAccountsInfo(accountKeys);
+  const infoMap = new Map();
+  accountKeys.forEach((key, idx) => {
+    infoMap.set(key.toBase58(), infos[idx] || null);
+  });
+
+  const mintCandidates = [];
+  for (let i = 0; i < accountKeys.length; i += 1) {
+    const info = infos[i];
+    if (!info) continue;
+    const owner = info.owner;
+    const isTokenProgram = owner.equals(TOKEN_PROGRAM_ID) || owner.equals(TOKEN_2022_PROGRAM_ID);
+    if (!isTokenProgram) continue;
+    const dataLen = info.data?.length || 0;
+    if (dataLen === MintLayout.span || (owner.equals(TOKEN_2022_PROGRAM_ID) && dataLen >= MintLayout.span)) {
+      mintCandidates.push({
+        mint: accountKeys[i],
+        programId: owner,
+      });
+    }
+  }
+  if (!mintCandidates.length) return 0;
+
+  const missing = [];
+  for (const candidate of mintCandidates) {
+    const tokenProgram = candidate.programId.equals(TOKEN_2022_PROGRAM_ID)
+      ? TOKEN_2022_PROGRAM_ID
+      : TOKEN_PROGRAM_ID;
+    const ata = await getAssociatedTokenAddress(
+      candidate.mint,
+      wallet.kp.publicKey,
+      false,
+      tokenProgram,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    );
+    let ataInfo = infoMap.get(ata.toBase58());
+    if (!ataInfo) {
+      ataInfo = await connection.getAccountInfo(ata);
+    }
+    if (!ataInfo) {
+      missing.push({ mint: candidate.mint, programId: tokenProgram, ata });
+    }
+  }
+
+  if (missing.length === 0) return 0;
+  console.log(
+    paint(
+      `  Preparing ${missing.length} associated token account(s) for ${label}.`,
+      "muted"
+    )
+  );
+  let createdTotal = 0;
+  for (const entry of missing) {
+    try {
+      const created = await ensureAtaForMint(connection, wallet, entry.mint, entry.programId, { label });
+      if (created) {
+        createdTotal += 1;
+      }
+    } catch (err) {
+      console.error(
+        paint(
+          `  Failed to create ATA for mint ${entry.mint.toBase58()}:`,
+          "error"
+        ),
+        err.message || err
+      );
+    }
+  }
+  return createdTotal;
+}
+
+async function ensureWrappedSolBalance(
+  connection,
+  wallet,
+  requiredLamports,
+  existingLamportsOverride = null
+) {
+  if (requiredLamports <= 0n) return;
+  const mintPubkey = new PublicKey(SOL_MINT);
+  const tokenProgram = TOKEN_PROGRAM_ID;
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    wallet.kp.publicKey,
+    false,
+    tokenProgram,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  try {
+    await ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, {
+      label: "wrap",
+    });
+  } catch (err) {
+    console.error(
+      paint(
+        `  Failed to ensure SOL ATA for ${wallet.name}:`,
+        "error"
+      ),
+      err.message || err
+    );
+    throw err;
+  }
+  let existingLamports = 0n;
+  if (typeof existingLamportsOverride === "bigint") {
+    existingLamports = existingLamportsOverride;
+  } else {
+    try {
+      const balanceInfo = await connection.getTokenAccountBalance(ata);
+      existingLamports = BigInt(balanceInfo?.value?.amount ?? "0");
+    } catch (_) {}
+  }
+  if (existingLamports >= requiredLamports) return;
+  const lamportsToWrap = requiredLamports - existingLamports;
+  const humanAmount = formatBaseUnits(lamportsToWrap, 9);
+  console.log(
+    paint(
+      `  Wrapping ${humanAmount} SOL into wSOL for ${wallet.name} (existing ${formatBaseUnits(existingLamports, 9)} wSOL).`,
+      "muted"
+    )
+  );
+  const tx = new Transaction().add(
+    SystemProgram.transfer({
+      fromPubkey: wallet.kp.publicKey,
+      toPubkey: ata,
+      lamports: Number(lamportsToWrap),
+    }),
+    createSyncNativeInstruction(ata, TOKEN_PROGRAM_ID)
+  );
+  tx.feePayer = wallet.kp.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.sign(wallet.kp);
+  const sig = await connection.sendRawTransaction(tx.serialize());
+  await connection.confirmTransaction(sig, "confirmed");
+  console.log(
+    paint(
+      `  Wrapped ${humanAmount} SOL for ${wallet.name} — tx ${sig}`,
+      "success"
+    )
+  );
+}
+
+async function getWrappedSolAccountInfo(connection, ownerPubkey) {
+  const mintPubkey = new PublicKey(SOL_MINT);
+  const tokenProgram = TOKEN_PROGRAM_ID;
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    ownerPubkey,
+    false,
+    tokenProgram,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const info = await connection.getAccountInfo(ata);
+  if (!info) {
+    return { ata, exists: false, lamports: 0n };
+  }
+  let lamports = 0n;
+  try {
+    const balanceInfo = await connection.getTokenAccountBalance(ata);
+    lamports = BigInt(balanceInfo?.value?.amount ?? "0");
+  } catch (_) {}
+  return { ata, exists: true, lamports };
+}
+
+async function autoUnwrapWrappedSol(
+  connection,
+  wallet,
+  { minLamports = 0n, reason = "unwrap wSOL" } = {}
+) {
+  const { ata, exists, lamports } = await getWrappedSolAccountInfo(
+    connection,
+    wallet.kp.publicKey
+  );
+  if (!exists || lamports <= minLamports) {
+    return false;
+  }
+  const humanAmount = formatBaseUnits(lamports, 9);
+  console.log(
+    paint(
+      `  ${reason}: unwrapping ${humanAmount} SOL for ${wallet.name}.`,
+      "muted"
+    )
+  );
+  try {
+    const sig = await closeAccount(
+      connection,
+      wallet.kp,
+      ata,
+      wallet.kp.publicKey,
+      wallet.kp,
+      [],
+      undefined,
+      TOKEN_PROGRAM_ID
+    );
+    console.log(
+      paint(
+        `  Unwrapped ${humanAmount} SOL for ${wallet.name} — tx ${sig}`,
+        "success"
+      )
+    );
+  } catch (err) {
+    console.error(
+      paint(
+        `  Failed to unwrap wSOL for ${wallet.name}:`,
+        "error"
+      ),
+      err.message || err
+    );
+    throw err;
+  }
+  return true;
+}
+
+async function getSolAndWrappedSolBalances(connection, wallet) {
+  const solLamports = BigInt(
+    await getSolBalance(connection, wallet.kp.publicKey)
+  );
+  const { lamports: wsolLamports } = await getWrappedSolAccountInfo(
+    connection,
+    wallet.kp.publicKey
+  );
+  return {
+    solLamports,
+    wsolLamports,
+  };
+}
+
+async function lendOverviewAllWallets() {
+  const wallets = listWallets();
+  if (!wallets.length) {
+    console.log(
+      paint("Lend overview aborted: no wallets found in keypairs directory.", "warn")
+    );
+    return;
+  }
+  const identifiers = wallets.map((wallet) => ({
+    name: wallet.name,
+    pubkey: wallet.kp.publicKey.toBase58(),
+  }));
+  const walletNameMap = new Map(
+    identifiers.map((entry) => [entry.pubkey, entry.name])
+  );
+  console.log(
+    paint(
+      `Lend overview across ${identifiers.length} wallet(s).`,
+      "label"
+    )
+  );
+  if (identifiers.length <= 10) {
+    console.log(
+      paint(
+        `  wallets: ${identifiers.map((entry) => entry.name).join(", ")}`,
+        "muted"
+      )
+    );
+  }
+  const walletCsv = identifiers.map((entry) => entry.pubkey).join(",");
+  const sections = [
+    {
+      label: "earn positions",
+      runner: () =>
+        lendEarnRequest({
+          path: "positions",
+          method: "GET",
+          query: { wallets: walletCsv },
+        }),
+      summaryLabel: "earn positions",
+    },
+    {
+      label: "earn earnings",
+      runner: () =>
+        lendEarnRequest({
+          path: "earnings",
+          method: "GET",
+          query: { wallets: walletCsv },
+        }),
+      summaryLabel: "earn earnings",
+    },
+    {
+      label: "borrow positions",
+      runner: () =>
+        lendBorrowRequest({
+          path: "positions",
+          method: "GET",
+          query: { wallets: walletCsv },
+        }),
+      summaryLabel: "borrow positions",
+    },
+  ];
+  for (const section of sections) {
+    console.log(paint(`\n=== ${section.label} ===`, "label"));
+    try {
+      const result = await section.runner();
+      logLendApiResult(section.label, result);
+      summariseLendEntries(result, walletNameMap, {
+        label: section.summaryLabel,
+      });
+    } catch (err) {
+      console.error(
+        paint(`${section.label} request failed:`, "error"),
+        err.message || err
+      );
+    }
   }
 }
 
@@ -1450,19 +2225,99 @@ async function lendEarnTransferLike(action, args, { valueField }) {
   const rawAmount = options.raw === true || options.raw === "true";
   const field = options.field || valueField;
   const extra = parseJsonOption(options.extra, "--extra");
-  const ignoreKeys = new Set(["raw", "field", "extra"]);
+  const skipSendFlag =
+    options["no-send"] === true ||
+    options["no-send"] === "true" ||
+    options["no_send"] === true ||
+    options["no_send"] === "true" ||
+    options.dry === true ||
+    options.dry === "true" ||
+    options["dry-run"] === true ||
+    options["dry-run"] === "true" ||
+    options["dry_run"] === true ||
+    options["dry_run"] === "true";
+  const ignoreKeys = new Set([
+    "raw",
+    "field",
+    "extra",
+    "no-send",
+    "no_send",
+    "dry",
+    "dry-run",
+    "dry_run",
+  ]);
+  const isInstructionRequest = action.endsWith("-instructions");
   const normalizedAction = action.replace(/-instructions$/, "");
   const usesBaseAssets =
     normalizedAction === "deposit" || normalizedAction === "mint";
   const usesShareTokens =
     normalizedAction === "withdraw" || normalizedAction === "redeem";
 
-  const wallets = walletArg === "*" ? listWallets() : [findWalletByName(walletArg)];
-
+  let wallets;
+  if (walletArg === "*") {
+    wallets = listWallets();
+    if (!wallets.length) {
+      console.log(
+        paint(
+          `  No wallets found in ${KEYPAIR_DIR}; skipping ${normalizedAction}.`,
+          "warn"
+        )
+      );
+      return;
+    }
+    const walletWord = wallets.length === 1 ? "wallet" : "wallets";
+    console.log(
+      paint(
+        `  Targeting ${wallets.length} ${walletWord} for ${normalizedAction}.`,
+        "muted"
+      )
+    );
+  } else {
+    const targetWallet = findWalletByName(walletArg);
+    wallets = [targetWallet];
+    console.log(
+      paint(
+        `  Targeting wallet ${targetWallet.name} for ${normalizedAction}.`,
+        "muted"
+      )
+    );
+  }
   const tokenFilterRecord = mintArg !== "*" ? await resolveTokenRecord(mintArg) : null;
   if (mintArg !== "*" && !tokenFilterRecord) {
     throw new Error(`Token ${mintArg} not found in catalog (try running 'tokens --refresh')`);
   }
+  const tokenFilterLabel = (() => {
+    if (mintArg === "*") {
+      if (usesBaseAssets) {
+        const baseSymbols = Array.from(LEND_BASE_ASSET_MINTS).map((mint) =>
+          symbolForMint(mint)
+        );
+        const uniqueSymbols = [...new Set(baseSymbols.filter(Boolean))];
+        return uniqueSymbols.length
+          ? `eligible base assets (${uniqueSymbols.join("/")})`
+          : "eligible base assets";
+      }
+      if (usesShareTokens) {
+        return "all Jupiter lend share tokens (JL-*)";
+      }
+      return "all tokens with balances";
+    }
+    if (tokenFilterRecord?.symbol) {
+      return `${tokenFilterRecord.symbol}`;
+    }
+    return mintArg;
+  })();
+  console.log(paint(`  Token filter: ${tokenFilterLabel}`, "muted"));
+  const amountLabel = (() => {
+    if (amountArg === "*") {
+      const scope = usesBaseAssets
+        ? "max spendable per wallet"
+        : "full available balance per wallet";
+      return rawAmount ? `${scope} (raw units)` : scope;
+    }
+    return rawAmount ? `${amountArg} (raw units)` : amountArg;
+  })();
+  console.log(paint(`  Amount: ${amountLabel}`, "muted"));
 
   for (const wallet of wallets) {
     const balances = await loadWalletTokenBalances(wallet);
@@ -1498,126 +2353,356 @@ async function lendEarnTransferLike(action, args, { valueField }) {
       continue;
     }
 
+    let walletHadSuccess = false;
+    let wrapConnection = null;
+
     for (const balance of filteredBalances) {
-      let displayAmount = amountArg === "*" ? (usesBaseAssets ? balance.spendableDecimal : balance.amountDecimal) : amountArg;
-      if (!displayAmount || /^0(?:\.0+)?$/.test(displayAmount)) {
-        if (amountArg === "*" && usesBaseAssets) {
+      let currentBalance = balance;
+      let succeeded = false;
+      for (let attempt = 0; attempt < 3 && currentBalance; attempt += 1) {
+        let displayAmount =
+          amountArg === "*"
+            ? usesBaseAssets
+              ? currentBalance.spendableDecimal
+              : currentBalance.amountDecimal
+            : amountArg;
+        if (!displayAmount || /^0(?:\.0+)?$/.test(displayAmount)) {
+          if (amountArg === "*" && usesBaseAssets) {
+            console.log(
+              paint(
+                `  Skipping ${wallet.name}: no spendable balance for ${currentBalance.tokenRecord.symbol}.`,
+                "muted"
+              )
+            );
+          }
+          break;
+        }
+
+        let baseAmount;
+        if (amountArg === "*") {
+          const targetRaw = usesBaseAssets
+            ? currentBalance.spendableRaw ?? currentBalance.amountRaw
+            : currentBalance.amountRaw;
+          let targetRawBigInt =
+            typeof targetRaw === "bigint" ? targetRaw : BigInt(targetRaw ?? 0);
+          if (targetRawBigInt <= 0n) {
+            if (usesBaseAssets) {
+              console.log(
+                paint(
+                  `  Skipping ${wallet.name}: spendable balance for ${currentBalance.tokenRecord.symbol} is zero after reserves.`,
+                  "muted"
+                )
+              );
+            }
+            break;
+          }
+          if (usesBaseAssets && !rawAmount) {
+            if (targetRawBigInt <= LEND_SOL_WRAP_BUFFER_LAMPORTS) {
+              console.log(
+                paint(
+                  `  Skipping ${wallet.name}: spendable SOL ${formatBaseUnits(targetRawBigInt, currentBalance.decimals)} is below the wrap buffer (${formatBaseUnits(LEND_SOL_WRAP_BUFFER_LAMPORTS, currentBalance.decimals)}).`,
+                  "muted"
+                )
+              );
+              break;
+            }
+            targetRawBigInt -= LEND_SOL_WRAP_BUFFER_LAMPORTS;
+          }
+          if (usesBaseAssets && targetRawBigInt < MIN_LEND_SOL_DEPOSIT_LAMPORTS) {
+            console.log(
+              paint(
+                `  Skipping ${wallet.name}: spendable SOL (${formatBaseUnits(targetRawBigInt, currentBalance.decimals)} SOL) is below the minimum deposit threshold (${formatBaseUnits(MIN_LEND_SOL_DEPOSIT_LAMPORTS, currentBalance.decimals)} SOL).`,
+                "muted"
+              )
+            );
+            break;
+          }
+          if (usesBaseAssets && !rawAmount) {
+            let percent =
+              LEND_SOL_BASE_PERCENT -
+              BigInt(attempt) * LEND_SOL_RETRY_DECREMENT_PERCENT;
+            if (percent < LEND_SOL_MIN_PERCENT) percent = LEND_SOL_MIN_PERCENT;
+            targetRawBigInt = (targetRawBigInt * percent) / 10000n;
+          }
+          if (targetRawBigInt <= 0n) {
+            break;
+          }
+          baseAmount = targetRawBigInt.toString();
+          const human = formatBaseUnits(targetRawBigInt, currentBalance.decimals);
+          displayAmount = rawAmount ? baseAmount : human;
+        } else {
+          baseAmount = rawAmount
+            ? displayAmount
+            : decimalToBaseUnits(displayAmount, currentBalance.decimals).toString();
+        }
+
+        const baseAmountBigInt = BigInt(baseAmount);
+        if (baseAmountBigInt <= 0n) {
+          break;
+        }
+
+        if (
+          usesBaseAssets &&
+          currentBalance.isSolLike &&
+          !skipSendFlag &&
+          !isInstructionRequest
+        ) {
+          let wrapFailed = false;
+          try {
+            if (!wrapConnection) {
+              wrapConnection = createRpcConnection("confirmed");
+            }
+            const { lamports: existingWsolLamports } =
+              await getWrappedSolAccountInfo(wrapConnection, wallet.kp.publicKey);
+            await ensureWrappedSolBalance(
+              wrapConnection,
+              wallet,
+              baseAmountBigInt,
+              existingWsolLamports
+            );
+          } catch (wrapErr) {
+            console.error(
+              paint(
+                `  ${normalizedAction} abort: failed to wrap SOL for ${wallet.name}:`,
+                "error"
+              ),
+              wrapErr.message || wrapErr
+            );
+            wrapFailed = true;
+          }
+          if (wrapFailed) {
+            break;
+          }
+        }
+
+        const body = {
+          wallet: wallet.kp.publicKey.toBase58(),
+          tokenMint: currentBalance.tokenRecord.mint,
+          tokenSymbol: currentBalance.tokenRecord.symbol,
+          amountInput: displayAmount,
+          amountDecimals: currentBalance.decimals,
+          [field]: baseAmount,
+          ...extra,
+        };
+        for (const [key, value] of Object.entries(options)) {
+          if (ignoreKeys.has(key)) continue;
+          body[key] = value;
+        }
+
+        if (body.asset === undefined) {
+          body.asset = currentBalance.tokenRecord.mint;
+        }
+        if (body.assetSymbol === undefined && currentBalance.tokenRecord.symbol) {
+          body.assetSymbol = currentBalance.tokenRecord.symbol;
+        }
+        if (body.signer === undefined) {
+          body.signer = wallet.kp.publicKey.toBase58();
+        }
+
+        if (amountArg === "*") {
+          const humanAmount = rawAmount
+            ? `${displayAmount} (raw)`
+            : displayAmount;
+          const symbol =
+            currentBalance.tokenRecord.symbol || symbolForMint(currentBalance.tokenRecord.mint);
           console.log(
             paint(
-              `  Skipping ${wallet.name}: no spendable balance for ${balance.tokenRecord.symbol}.`,
-              "muted"
+              `  plan → ${wallet.name}: ${normalizedAction} ${humanAmount} ${symbol}`,
+              "info"
             )
           );
-        }
-        continue;
-      }
-
-      let baseAmount;
-      if (amountArg === "*") {
-        const targetRaw = usesBaseAssets
-          ? balance.spendableRaw ?? balance.amountRaw
-          : balance.amountRaw;
-        const targetRawBigInt =
-          typeof targetRaw === "bigint" ? targetRaw : BigInt(targetRaw ?? 0);
-        if (targetRawBigInt <= 0n) {
-          if (usesBaseAssets) {
-            console.log(
-              paint(
-                `  Skipping ${wallet.name}: spendable balance for ${balance.tokenRecord.symbol} is zero after reserves.`,
-                "muted"
-              )
-            );
-          }
-          continue;
-        }
-        baseAmount = targetRawBigInt.toString();
-        if (rawAmount) {
-          displayAmount = baseAmount;
-        } else {
-          if (!displayAmount || /^0(?:\.0+)?$/.test(displayAmount)) {
-            displayAmount = formatBaseUnits(targetRawBigInt, balance.decimals);
+          if (usesBaseAssets && currentBalance.isSolLike) {
+            const reserveLamports =
+              typeof currentBalance.reserveLamports === "bigint"
+                ? currentBalance.reserveLamports
+                : BigInt(currentBalance.reserveLamports ?? 0);
+            if (reserveLamports > 0n) {
+              console.log(
+                paint(
+                  `    retaining ${formatBaseUnits(reserveLamports, 9)} SOL for rent/fees${currentBalance.requiresAtaCreation ? " (ATA)" : ""}`,
+                  "muted"
+                )
+              );
+            }
           }
         }
-      } else {
-        if (rawAmount) {
-          baseAmount = displayAmount;
-        } else {
-          baseAmount = decimalToBaseUnits(displayAmount, balance.decimals).toString();
-        }
-      }
 
-      if (BigInt(baseAmount) <= 0n) {
-        continue;
-      }
-
-      const body = {
-        wallet: wallet.kp.publicKey.toBase58(),
-        tokenMint: balance.tokenRecord.mint,
-        tokenSymbol: balance.tokenRecord.symbol,
-        amountInput: displayAmount,
-        amountDecimals: balance.decimals,
-        [field]: baseAmount,
-        ...extra,
-      };
-      for (const [key, value] of Object.entries(options)) {
-        if (ignoreKeys.has(key)) continue;
-        body[key] = value;
-      }
-
-      if (body.asset === undefined) {
-        body.asset = balance.tokenRecord.mint;
-      }
-      if (body.assetSymbol === undefined && balance.tokenRecord.symbol) {
-        body.assetSymbol = balance.tokenRecord.symbol;
-      }
-      if (body.signer === undefined) {
-        body.signer = wallet.kp.publicKey.toBase58();
-      }
-
-      if (amountArg === "*") {
-        const humanAmount = rawAmount
-          ? `${displayAmount} (raw)`
-          : displayAmount;
-        const symbol =
-          balance.tokenRecord.symbol || symbolForMint(balance.tokenRecord.mint);
         console.log(
           paint(
-            `  plan → ${wallet.name}: ${normalizedAction} ${humanAmount} ${symbol}`,
-            "info"
-          )
+            `  request payload (${action}) → ${wallet.name}`,
+            "muted"
+          ),
+          JSON.stringify(body, null, 2)
         );
-        if (usesBaseAssets && balance.isSolLike) {
-          const reserveLamports =
-            typeof balance.reserveLamports === "bigint"
-              ? balance.reserveLamports
-              : BigInt(balance.reserveLamports ?? 0);
-          if (reserveLamports > 0n) {
+
+        let ataRetryNeeded = false;
+        try {
+          const result = await lendEarnRequest({
+            path: action,
+            method: "POST",
+            body,
+          });
+          logLendApiResult(`earn ${action}`, result);
+          if (!skipSendFlag && !isInstructionRequest) {
+            const transactions = extractTransactionsFromLendResponse(result.data);
+            if (transactions.length > 0) {
+              console.log(
+                paint(
+                  `  Submitting ${transactions.length} transaction(s) for ${wallet.name}.`,
+                  "info"
+                )
+              );
+              const connection = createRpcConnection("confirmed");
+              for (let i = 0; i < transactions.length; i += 1) {
+                const txBase64 = transactions[i];
+                const createdCount = await ensureAtasForTransaction({
+                  connection,
+                  wallet,
+                  txBase64,
+                  label: normalizedAction,
+                });
+                if (createdCount > 0) {
+                  ataRetryNeeded = true;
+                  break;
+                }
+                try {
+                  await submitSignedSolanaTransaction(connection, wallet, txBase64, {
+                    label: normalizedAction,
+                    index: i,
+                    total: transactions.length,
+                  });
+                } catch (sendErr) {
+                  console.error(
+                    paint(
+                      `  Failed to submit transaction ${i + 1}/${transactions.length} for ${wallet.name}:`,
+                      "error"
+                    ),
+                    sendErr.message || sendErr
+                  );
+                  throw sendErr;
+                }
+                await delay(DELAY_BETWEEN_CALLS_MS);
+              }
+            }
+          }
+
+          if (ataRetryNeeded) {
             console.log(
               paint(
-                `    retaining ${formatBaseUnits(reserveLamports, 9)} SOL for rent/fees${balance.requiresAtaCreation ? " (ATA)" : ""}`,
+                "  Associated token account(s) created; recalculating deposit...",
                 "muted"
               )
             );
+            await delay(DELAY_BETWEEN_CALLS_MS);
+            const refreshedBalances = await loadWalletTokenBalances(wallet);
+            currentBalance = refreshedBalances.find(
+              (entry) => entry.tokenRecord.mint === balance.tokenRecord.mint
+            );
+            if (!currentBalance) {
+              console.warn(
+                paint(
+                  `  Unable to refresh balances for ${wallet.name}; deposit aborted.`,
+                  "warn"
+                )
+              );
+              break;
+            }
+            continue;
           }
+
+          succeeded = true;
+          break;
+        } catch (err) {
+          const errMessage = err?.message || String(err);
+          if (
+            attempt < 4 &&
+            /insufficient funds/i.test(errMessage) &&
+            usesBaseAssets &&
+            typeof currentBalance.spendableRaw !== "undefined"
+          ) {
+            const currentRaw =
+              typeof currentBalance.spendableRaw === "bigint"
+                ? currentBalance.spendableRaw
+                : BigInt(currentBalance.spendableRaw ?? 0);
+            if (currentRaw <= MIN_LEND_SOL_DEPOSIT_LAMPORTS) {
+              console.warn(
+                paint(
+                  `  ${normalizedAction} failed: spendable SOL ${formatBaseUnits(currentRaw, currentBalance.decimals)} < minimum ${formatBaseUnits(MIN_LEND_SOL_DEPOSIT_LAMPORTS, currentBalance.decimals)} SOL. Top up the wallet before retrying.`,
+                  "warn"
+                )
+              );
+              break;
+            }
+            let percent =
+              LEND_SOL_BASE_PERCENT -
+              BigInt(attempt + 1) * LEND_SOL_RETRY_DECREMENT_PERCENT;
+            if (percent < LEND_SOL_MIN_PERCENT) percent = LEND_SOL_MIN_PERCENT;
+            let adjustedRaw = (currentRaw * percent) / 10000n;
+            if (adjustedRaw <= LEND_SOL_WRAP_BUFFER_LAMPORTS) {
+              console.warn(
+                paint(
+                  `  ${normalizedAction} failed: adjusted amount ${formatBaseUnits(adjustedRaw, currentBalance.decimals)} SOL leaves no room for wrap buffer (${formatBaseUnits(LEND_SOL_WRAP_BUFFER_LAMPORTS, currentBalance.decimals)} SOL).`,
+                  "warn"
+                )
+              );
+              break;
+            }
+            adjustedRaw -= LEND_SOL_WRAP_BUFFER_LAMPORTS;
+            if (adjustedRaw > 0n) {
+              currentBalance = {
+                ...currentBalance,
+                spendableRaw: adjustedRaw,
+                spendableDecimal: formatBaseUnits(adjustedRaw, currentBalance.decimals),
+              };
+              console.warn(
+                paint(
+                  `  Retry ${attempt + 1}: reducing deposit amount after insufficient funds error (leaving additional buffer).`,
+                  "warn"
+                )
+              );
+              continue;
+            }
+          }
+          console.error(
+            paint(`Lend earn ${action} request failed for ${wallet.name}:`, "error"),
+            errMessage
+          );
+          break;
         }
       }
 
-      console.log(
-        paint(
-          `  request payload (${action}) → ${wallet.name}`,
-          "muted"
-        ),
-        JSON.stringify(body, null, 2)
-      );
+      if (!succeeded) {
+        console.warn(
+          paint(
+            `  ${normalizedAction} skipped for ${wallet.name}; see logs above.`,
+            "warn"
+          )
+        );
+      } else {
+        walletHadSuccess = true;
+      }
+    }
+
+    if (
+      walletHadSuccess &&
+      !skipSendFlag &&
+      !isInstructionRequest &&
+      (normalizedAction === "withdraw" || normalizedAction === "redeem")
+    ) {
+      const unwrapConnection =
+        wrapConnection || createRpcConnection("confirmed");
       try {
-        const result = await lendEarnRequest({
-          path: action,
-          method: "POST",
-          body,
+        await autoUnwrapWrappedSol(unwrapConnection, wallet, {
+          minLamports: 0n,
+          reason: `${normalizedAction} cleanup`,
         });
-        logLendApiResult(`earn ${action}`, result);
       } catch (err) {
-        console.error(paint(`Lend earn ${action} request failed for ${wallet.name}:`, "error"), err.message);
+        console.warn(
+          paint(
+            `  ${normalizedAction} cleanup: failed to auto-unwrap wSOL for ${wallet.name} — ${err.message || err}`,
+            "warn"
+          )
+        );
       }
     }
   }
@@ -1685,6 +2770,27 @@ async function lendBorrowPositions(args) {
     throw new Error("lend borrow positions usage: lend borrow positions <walletName|pubkey>[,...]");
   }
   const identifiers = resolveWalletIdentifiers(input);
+  if (needsAllWallets) {
+    console.log(
+      paint(
+        `  Targeting all ${identifiers.length} wallet(s) for borrow positions.`,
+        "muted"
+      )
+    );
+  } else if (identifiers.length > 1) {
+    console.log(
+      paint(
+        `  Targeting ${identifiers.length} wallet(s) for borrow positions.`,
+        "muted"
+      )
+    );
+  }
+  const borrowScope = identifiers
+    .map((entry) => entry.name || entry.pubkey)
+    .filter(Boolean);
+  if (borrowScope.length > 0 && borrowScope.length <= 5) {
+    console.log(paint(`  Wallet scope: ${borrowScope.join(", ")}`, "muted"));
+  }
   try {
     const result = await lendBorrowRequest({
       path: "positions",
@@ -1810,37 +2916,121 @@ async function lendBorrowRepay(args) {
 
 async function lendBorrowClose(args) {
   const walletName = args[0];
-  const positionId = args[1];
-  if (!walletName || !positionId) {
-    throw new Error("lend borrow close usage: lend borrow close <walletFile> <positionId> [--extra '{...}']");
+  if (!walletName) {
+    throw new Error("lend borrow close usage: lend borrow close <walletFile> [positionId|*] [--all] [--extra '{...}']");
   }
   const wallet = findWalletByName(walletName);
-  const tail = args.slice(2);
-  const { options } = parseCliOptions(tail);
+  const { options, rest } = parseCliOptions(args.slice(1));
   const extra = parseJsonOption(options.extra, "--extra");
-  const body = {
-    wallet: wallet.kp.publicKey.toBase58(),
-    positionId,
-    ...extra,
-  };
-  const ignore = new Set(["extra"]);
+  const explicitIds = rest
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item !== "*");
+  const wildcardRequested =
+    rest.length === 0 ||
+    rest.some((item) => {
+      const trimmed = item.trim().toLowerCase();
+      return trimmed.length === 0 || trimmed === "*" || trimmed === "all";
+    }) ||
+    options.all === true ||
+    (typeof options.all === "string" &&
+      options.all.trim().toLowerCase() === "true");
+  if (!wildcardRequested && options.position && typeof options.position === "string") {
+    explicitIds.push(options.position.trim());
+  }
+  let positionIds = Array.from(new Set(explicitIds.filter(Boolean)));
+  const walletPubkey = wallet.kp.publicKey.toBase58();
+  if (wildcardRequested) {
+    console.log(
+      paint(
+        `  Fetching borrow positions for ${wallet.name} to close all.`,
+        "muted"
+      )
+    );
+    try {
+      const result = await lendBorrowRequest({
+        path: "positions",
+        method: "GET",
+        query: { wallets: walletPubkey },
+      });
+      if (!result.ok) {
+        console.error(
+          paint(
+            `Unable to enumerate borrow positions for ${wallet.name}:`,
+            "error"
+          ),
+          result.status,
+          result.data?.error || result.raw || ""
+        );
+        return;
+      }
+      const entries = extractIterableFromLendData(result.data) || [];
+      const ids = collectBorrowPositionIds(entries, walletPubkey);
+      positionIds = ids;
+      if (!ids.length) {
+        console.log(
+          paint(
+            `  No open borrow positions found for ${wallet.name}.`,
+            "muted"
+          )
+        );
+        return;
+      }
+      console.log(
+        paint(
+          `  Closing ${ids.length} borrow position(s) for ${wallet.name}.`,
+          "info"
+        )
+      );
+    } catch (err) {
+      console.error(
+        paint(
+          `Unable to enumerate borrow positions for ${wallet.name}:`,
+          "error"
+        ),
+        err.message || err
+      );
+      return;
+    }
+  }
+  if (!positionIds.length) {
+    throw new Error("lend borrow close usage: supply a position id or request --all/\"*\".");
+  }
+  const ignore = new Set(["extra", "all", "position"]);
+  const additionalFields = {};
   for (const [key, value] of Object.entries(options)) {
     if (ignore.has(key)) continue;
-    body[key] = value;
+    additionalFields[key] = value;
   }
-  console.log(
-    paint("  request payload (borrow close)", "muted"),
-    JSON.stringify(body, null, 2)
-  );
-  try {
-    const result = await lendBorrowRequest({
-      path: "close",
-      method: "POST",
-      body,
-    });
-    logLendApiResult("borrow close", result);
-  } catch (err) {
-    console.error(paint("Lend borrow close request failed:", "error"), err.message);
+  for (const positionId of positionIds) {
+    const body = {
+      wallet: walletPubkey,
+      positionId,
+      ...extra,
+      ...additionalFields,
+    };
+    console.log(
+      paint(
+        `  request payload (borrow close) → ${wallet.name}`,
+        "muted"
+      ),
+      JSON.stringify(body, null, 2)
+    );
+    try {
+      const result = await lendBorrowRequest({
+        path: "close",
+        method: "POST",
+        body,
+      });
+      logLendApiResult("borrow close", result);
+    } catch (err) {
+      console.error(
+        paint(
+          `Lend borrow close request failed for ${wallet.name} (position ${positionId}):`,
+          "error"
+        ),
+        err.message || err
+      );
+    }
   }
 }
 function describeMintLabel(mint, options = {}) {
@@ -4839,6 +6029,395 @@ async function runRpcSwapTest(endpoints, options = {}) {
   }
 }
 
+
+async function testJupiterUltraOrder({
+  inputMint: inputMintRaw,
+  outputMint: outputMintRaw,
+  amount: amountRaw,
+  walletName,
+  submit = false,
+  slippageBps: slippageRaw,
+} = {}) {
+  const inputArg = (inputMintRaw ?? SOL_MINT).toString().trim();
+  const outputArg = (outputMintRaw ?? DEFAULT_USDC_MINT).toString().trim();
+  const amountArg = (amountRaw ?? "0.001").toString().trim();
+  const slippageBps =
+    slippageRaw !== undefined && slippageRaw !== null
+      ? Math.max(1, parseInt(slippageRaw, 10) || SLIPPAGE_BPS)
+      : SLIPPAGE_BPS;
+
+  if (!JUPITER_ULTRA_API_KEY) {
+    console.warn(
+      paint(
+        "Ultra API key not configured; proceeding with anonymous request.",
+        "warn"
+      )
+    );
+  }
+
+  let wallet;
+  if (walletName) {
+    try {
+      wallet = findWalletByName(walletName);
+    } catch (err) {
+      console.error(paint("Ultra test aborted:", "error"), err.message);
+      return;
+    }
+  } else {
+    const wallets = listWallets();
+    if (wallets.length === 0) {
+      console.error(
+        paint("Ultra test aborted: no wallets found in keypairs directory.", "error")
+      );
+      return;
+    }
+    wallet =
+      wallets.find((entry) => entry.name === "crew_1.json") || wallets[0];
+  }
+
+  const walletPubkey = wallet.kp.publicKey.toBase58();
+  console.log(
+    paint(
+      `Using wallet ${wallet.name} (${walletPubkey}) for Ultra order.`,
+      "muted"
+    )
+  );
+  if (isWalletDisabledByGuard(wallet.name)) {
+    console.warn(
+      paint(
+        `  Warning: wallet guard disabled ${wallet.name}. Ensure it has at least 0.01 SOL before submitting.`,
+        "warn"
+      )
+    );
+  }
+
+  const resolveMintInput = async (value, label) => {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      throw new Error(`${label} token is required`);
+    }
+    const record = await resolveTokenRecord(trimmed);
+    if (record?.mint) {
+      return {
+        mint: record.mint,
+        symbol: record.symbol || symbolForMint(record.mint),
+        decimals:
+          typeof record.decimals === "number" ? record.decimals : undefined,
+      };
+    }
+    if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+      return {
+        mint: trimmed,
+        symbol: symbolForMint(trimmed),
+        decimals: undefined,
+      };
+    }
+    throw new Error(
+      `${label} token ${trimmed} not found in catalog (provide a mint address)`
+    );
+  };
+
+  let inputInfo;
+  let outputInfo;
+  try {
+    inputInfo = await resolveMintInput(inputArg, "Input");
+    outputInfo = await resolveMintInput(outputArg, "Output");
+  } catch (err) {
+    console.error(paint("Ultra test aborted:", "error"), err.message);
+    return;
+  }
+
+  const connection = createRpcConnection("confirmed");
+  let inputMeta;
+  let outputMeta;
+  try {
+    inputMeta = await resolveMintMetadata(connection, inputInfo.mint);
+  } catch (err) {
+    console.error(
+      paint(
+        `Ultra test aborted: failed to load input mint metadata (${inputInfo.mint}):`,
+        "error"
+      ),
+      err.message || err
+    );
+    return;
+  }
+  try {
+    outputMeta = await resolveMintMetadata(connection, outputInfo.mint);
+  } catch (err) {
+    console.error(
+      paint(
+        `Ultra test aborted: failed to load output mint metadata (${outputInfo.mint}):`,
+        "error"
+      ),
+      err.message || err
+    );
+    return;
+  }
+
+  const inputDecimals =
+    inputMeta?.decimals ??
+    inputInfo.decimals ??
+    KNOWN_MINTS.get(inputInfo.mint)?.decimals ??
+    0;
+  const outputDecimals =
+    outputMeta?.decimals ??
+    outputInfo.decimals ??
+    KNOWN_MINTS.get(outputInfo.mint)?.decimals ??
+    0;
+
+  let amountLamports;
+  try {
+    amountLamports = decimalToBaseUnits(amountArg, inputDecimals);
+  } catch (err) {
+    console.error(
+      paint("Ultra test aborted: invalid amount (expected decimal).", "error"),
+      err.message
+    );
+    return;
+  }
+  if (amountLamports <= 0n) {
+    console.error(
+      paint("Ultra test aborted: amount must be greater than zero.", "error")
+    );
+    return;
+  }
+
+  const wrapSol =
+    SOL_LIKE_MINTS.has(inputInfo.mint) || SOL_LIKE_MINTS.has(outputInfo.mint);
+
+  console.log(
+    paint(
+      `Ultra order plan: ${describeMintLabel(inputInfo.mint)} → ${describeMintLabel(outputInfo.mint)}`,
+      "label"
+    )
+  );
+  console.log(
+    paint(
+      `  amount: ${amountArg} (${amountLamports.toString()} base units) — slippage ${slippageBps} bps`,
+      "muted"
+    )
+  );
+  console.log(
+    paint(`  wrap/unwrap SOL: ${wrapSol ? "yes" : "no"}`, "muted")
+  );
+
+  let orderInfo;
+  try {
+    orderInfo = await createUltraOrder({
+      inputMint: inputInfo.mint,
+      outputMint: outputInfo.mint,
+      amountLamports,
+      userPublicKey: walletPubkey,
+      slippageBps,
+      wrapAndUnwrapSol: wrapSol,
+    });
+  } catch (err) {
+    const message = err?.message || err;
+    console.error(paint("Ultra order request failed:", "error"), message);
+    if (err?.payload) {
+      try {
+        const preview = JSON.stringify(err.payload, null, 2);
+        console.error(paint("  payload:", "muted"), preview);
+      } catch (_) {}
+    }
+    const payloadText =
+      typeof err?.payload === "string" ? err.payload : "";
+    if (/route not found/i.test(String(message)) || /route not found/i.test(payloadText)) {
+      console.warn(
+        paint(
+          "  Hint: try increasing the amount or confirm the selected mints are supported by Jupiter Ultra.",
+          "warn"
+        )
+      );
+    } else if (/(?:^|\D)(401|403)(?:\D|$)/.test(String(message))) {
+      console.warn(
+        paint(
+          "  Hint: Ultra returned 401/403 — verify JUPITER_ULTRA_API_KEY or JUPITER_ULTRA_API_BASE.",
+          "warn"
+        )
+      );
+    }
+    return;
+  }
+
+  console.log(paint("Ultra order created successfully.", "success"));
+  if (orderInfo.clientOrderId) {
+    console.log(
+      paint(`  clientOrderId: ${orderInfo.clientOrderId}`, "muted")
+    );
+  }
+  if (orderInfo.outAmount) {
+    const outDecimal = (() => {
+      try {
+        return formatBaseUnits(BigInt(orderInfo.outAmount), outputDecimals);
+      } catch (_) {
+        return null;
+      }
+    })();
+    const label = outDecimal
+      ? `${orderInfo.outAmount} (${outDecimal} ${symbolForMint(outputInfo.mint)})`
+      : orderInfo.outAmount;
+    console.log(paint(`  expected outAmount: ${label}`, "muted"));
+  }
+  if (orderInfo.payload) {
+    try {
+      const preview = JSON.stringify(orderInfo.payload);
+      const snippet = preview.length > 400 ? `${preview.slice(0, 400)}…` : preview;
+      console.log(paint("  payload snippet:", "muted"), snippet);
+    } catch (_) {}
+  }
+
+  let vtx;
+  try {
+    const txbuf = Buffer.from(orderInfo.swapTransaction, "base64");
+    vtx = VersionedTransaction.deserialize(txbuf);
+    const ixCount = vtx.message.compiledInstructions.length;
+    const accountCount = vtx.message.staticAccountKeys.length;
+    console.log(
+      paint(
+        `  transaction decoded: ${accountCount} static accounts, ${ixCount} instruction(s)`,
+        "muted"
+      )
+    );
+  } catch (err) {
+    console.error(
+      paint("Failed to decode Ultra swap transaction:", "error"),
+      err.message || err
+    );
+    return;
+  }
+
+  if (!submit) {
+    console.log(
+      paint(
+        "Dry run complete — transaction not signed or broadcast. Re-run with --submit to execute.",
+        "info"
+      )
+    );
+    return;
+  }
+
+  vtx.sign([wallet.kp]);
+  const rawSigned = vtx.serialize();
+  const signedBase64 = Buffer.from(rawSigned).toString("base64");
+  const derivedSignature = bs58.encode(vtx.signatures[0]);
+
+  console.log(
+    paint(
+      "Submitting signed swap via Ultra execute endpoint...",
+      "info"
+    )
+  );
+  let executeResult;
+  try {
+    await delay(DELAY_BETWEEN_CALLS_MS);
+    executeResult = await executeUltraSwap({
+      signedTransaction: signedBase64,
+      clientOrderId: orderInfo.clientOrderId,
+      signatureHint: derivedSignature,
+    });
+  } catch (err) {
+    console.error(paint("Ultra execute request failed:", "error"), err.message || err);
+    if (err?.payload) {
+      try {
+        const preview = JSON.stringify(err.payload, null, 2);
+        console.error(paint("  payload:", "muted"), preview);
+      } catch (_) {}
+    }
+    return;
+  }
+
+  const networkSignature =
+    executeResult.signature || derivedSignature || null;
+  if (networkSignature) {
+    console.log(
+      paint(`Ultra execute accepted signature ${networkSignature}`, "success")
+    );
+  } else {
+    console.log(
+      paint("Ultra execute response did not include a signature.", "warn")
+    );
+  }
+  if (executeResult?.payload) {
+    try {
+      const preview = JSON.stringify(executeResult.payload);
+      const snippet = preview.length > 400 ? `${preview.slice(0, 400)}…` : preview;
+      console.log(paint("  execute payload snippet:", "muted"), snippet);
+    } catch (_) {}
+  }
+
+  if (networkSignature) {
+    try {
+      await connection.confirmTransaction(networkSignature, "confirmed");
+      console.log(paint("  transaction confirmed on-chain.", "success"));
+    } catch (err) {
+      console.warn(
+        paint(
+          "  confirmation warning:",
+          "warn"
+        ),
+        err.message || err
+      );
+    }
+  }
+
+  console.log(paint("Ultra swap test finished.", "info"));
+}
+
+async function submitSignedSolanaTransaction(connection, wallet, base64Tx, { label, index, total }) {
+  const labelPrefix =
+    total && total > 1 ? `${label} ${index + 1}/${total}` : label;
+  let serialized = null;
+  let derivedSignature = null;
+  try {
+    const buf = Buffer.from(base64Tx, "base64");
+    const vtx = VersionedTransaction.deserialize(buf);
+    vtx.sign([wallet.kp]);
+    serialized = vtx.serialize();
+    derivedSignature = bs58.encode(vtx.signatures[0]);
+  } catch (versionedErr) {
+    try {
+      const bufLegacy = Buffer.from(base64Tx, "base64");
+      const tx = Transaction.from(bufLegacy);
+      tx.sign(wallet.kp);
+      serialized = tx.serialize();
+      derivedSignature = tx.signature ? bs58.encode(tx.signature) : null;
+    } catch (legacyErr) {
+      throw new Error(
+        `Unable to deserialize transaction for ${labelPrefix} (${versionedErr.message || versionedErr} / ${legacyErr.message || legacyErr})`
+      );
+    }
+  }
+  if (!serialized) {
+    throw new Error(`Failed to serialize transaction for ${labelPrefix}`);
+  }
+  let networkSignature;
+  try {
+    networkSignature = await connection.sendRawTransaction(serialized, {
+      skipPreflight: false,
+    });
+    await connection.confirmTransaction(networkSignature, "confirmed");
+  } catch (err) {
+    throw new Error(
+      `RPC submission failed for ${labelPrefix}: ${err.message || err}`
+    );
+  }
+  const finalSignature = networkSignature || derivedSignature;
+  if (finalSignature) {
+    console.log(
+      paint(
+        `  ${labelPrefix}: executed tx ${finalSignature}`,
+        "success"
+      )
+    );
+  } else {
+    console.log(
+      paint(`  ${labelPrefix}: transaction submitted (no signature returned)`, "success")
+    );
+  }
+}
+
 // send a signed native SOL transfer tx
 async function sendSolTransfer(connection, fromKeypair, toPubkey, lamports) {
   const tx = new Transaction().add(
@@ -4874,10 +6453,16 @@ async function listWalletAddresses() {
   const connection = createRpcConnection("confirmed");
   for (const w of wallets) {
     try {
-      const lam = await getSolBalance(connection, w.kp.publicKey);
+      const lamports = BigInt(await getSolBalance(connection, w.kp.publicKey));
+      const solDisplay = formatBaseUnits(lamports, 9);
+      const { lamports: wsolLamports } = await getWrappedSolAccountInfo(
+        connection,
+        w.kp.publicKey
+      );
+      const wsolDisplay = formatBaseUnits(wsolLamports, 9);
       console.log(
         paint(
-          `${w.name}  ${w.kp.publicKey.toBase58()}  ${(lam / 1e9).toFixed(6)} SOL`,
+          `${w.name}  ${w.kp.publicKey.toBase58()}  ${solDisplay} SOL  (wSOL ${wsolDisplay})`,
           "info"
         )
       );
@@ -4890,6 +6475,281 @@ async function listWalletAddresses() {
       );
     }
   }
+}
+
+async function handleWalletWrap(args) {
+  const walletName = args[0];
+  const usage =
+    "wallet wrap usage: wallet wrap <walletName> [amount|all] [--raw]";
+  if (!walletName) {
+    console.log(usage);
+    return;
+  }
+  const wallet = findWalletByName(walletName);
+  const { options, rest } = parseCliOptions(args.slice(1));
+  const rawAmount =
+    options.raw === true ||
+    options.raw === "true" ||
+    options.raw === "1";
+  const amountArg = (rest[0] || "all").trim();
+  const connection = createRpcConnection("confirmed");
+  const beforeBalances = await getSolAndWrappedSolBalances(connection, wallet);
+  const spendableInfo = await computeSpendableSolBalance(
+    connection,
+    wallet.kp.publicKey
+  );
+  let wrapLamports;
+  if (amountArg === "*" || amountArg.toLowerCase() === "all") {
+    wrapLamports = spendableInfo.spendableLamports;
+  } else {
+    try {
+      wrapLamports = rawAmount
+        ? BigInt(amountArg)
+        : decimalToBaseUnits(amountArg, 9);
+    } catch (err) {
+      throw new Error(
+        `Invalid amount for wallet wrap: ${amountArg} (${err.message || err})`
+      );
+    }
+  }
+  if (wrapLamports < 0n) wrapLamports = 0n;
+  const availableLamports = spendableInfo.spendableLamports;
+  if (availableLamports <= 0n) {
+    console.log(
+      paint(
+        `  Wallet ${wallet.name} has no spendable SOL after gas/reserve buffers.`,
+        "warn"
+      )
+    );
+    return;
+  }
+  const feeBuffer = ESTIMATED_GAS_PER_SWAP_LAMPORTS;
+  const maxWrap =
+    availableLamports > feeBuffer ? availableLamports - feeBuffer : 0n;
+  if (wrapLamports > maxWrap) {
+    console.warn(
+      paint(
+        `  Adjusting wrap amount to ${formatBaseUnits(maxWrap, 9)} SOL to leave room for fees.`,
+        "warn"
+      )
+    );
+    wrapLamports = maxWrap;
+  }
+  if (wrapLamports <= 0n) {
+    console.log(paint("  Nothing to wrap after reserves/fees.", "muted"));
+    return;
+  }
+
+  const humanWrap = formatBaseUnits(wrapLamports, 9);
+  console.log(
+    paint(
+      `  Wrapping ${humanWrap} SOL for ${wallet.name}.`,
+      "info"
+    )
+  );
+  console.log(
+    paint(
+      `    before → SOL ${formatBaseUnits(beforeBalances.solLamports, 9)} | wSOL ${formatBaseUnits(beforeBalances.wsolLamports, 9)}`,
+      "muted"
+    )
+  );
+
+  const requiredTotal = beforeBalances.wsolLamports + wrapLamports;
+  await ensureWrappedSolBalance(
+    connection,
+    wallet,
+    requiredTotal,
+    beforeBalances.wsolLamports
+  );
+
+  const afterBalances = await getSolAndWrappedSolBalances(connection, wallet);
+  console.log(
+    paint(
+      `    after  → SOL ${formatBaseUnits(afterBalances.solLamports, 9)} | wSOL ${formatBaseUnits(afterBalances.wsolLamports, 9)}`,
+      "muted"
+    )
+  );
+}
+
+async function handleWalletUnwrap(args) {
+  const walletName = args[0];
+  const usage =
+    "wallet unwrap usage: wallet unwrap <walletName> [amount|all] [--raw]";
+  if (!walletName) {
+    console.log(usage);
+    return;
+  }
+  const wallet = findWalletByName(walletName);
+  const { options, rest } = parseCliOptions(args.slice(1));
+  const rawAmount =
+    options.raw === true ||
+    options.raw === "true" ||
+    options.raw === "1";
+  const amountArg = (rest[0] || "all").trim();
+  const connection = createRpcConnection("confirmed");
+  const beforeBalances = await getSolAndWrappedSolBalances(connection, wallet);
+  if (beforeBalances.wsolLamports <= 0n) {
+    console.log(
+      paint(
+        `  Wallet ${wallet.name} has no wrapped SOL to unwrap.`,
+        "muted"
+      )
+    );
+    return;
+  }
+
+  let unwrapLamports;
+  if (amountArg === "*" || amountArg.toLowerCase() === "all") {
+    unwrapLamports = beforeBalances.wsolLamports;
+  } else {
+    try {
+      unwrapLamports = rawAmount
+        ? BigInt(amountArg)
+        : decimalToBaseUnits(amountArg, 9);
+    } catch (err) {
+      throw new Error(
+        `Invalid amount for wallet unwrap: ${amountArg} (${err.message || err})`
+      );
+    }
+  }
+  if (unwrapLamports < 0n) unwrapLamports = 0n;
+  if (unwrapLamports <= 0n) {
+    console.log(paint("  Nothing to unwrap.", "muted"));
+    return;
+  }
+
+  if (unwrapLamports > beforeBalances.wsolLamports) {
+    console.warn(
+      paint(
+        `  Requested unwrap exceeds wSOL balance; capping to ${formatBaseUnits(beforeBalances.wsolLamports, 9)} SOL.`,
+        "warn"
+      )
+    );
+    unwrapLamports = beforeBalances.wsolLamports;
+  }
+
+  let remainingLamports = beforeBalances.wsolLamports - unwrapLamports;
+  if (
+    remainingLamports > 0n &&
+    remainingLamports < LEND_SOL_WRAP_BUFFER_LAMPORTS
+  ) {
+    console.warn(
+      paint(
+        `  Remaining wSOL would drop below the wrap buffer; unwrapping entire balance instead.`,
+        "warn"
+      )
+    );
+    unwrapLamports = beforeBalances.wsolLamports;
+    remainingLamports = 0n;
+  }
+
+  const { ata, exists } = await getWrappedSolAccountInfo(
+    connection,
+    wallet.kp.publicKey
+  );
+  if (!exists) {
+    console.log(
+      paint(
+        `  No active wSOL account found for ${wallet.name}.`,
+        "warn"
+      )
+    );
+    return;
+  }
+
+  const humanUnwrap = formatBaseUnits(unwrapLamports, 9);
+  console.log(
+    paint(
+      `  Unwrapping ${humanUnwrap} SOL for ${wallet.name}.`,
+      "info"
+    )
+  );
+  console.log(
+    paint(
+      `    before → SOL ${formatBaseUnits(beforeBalances.solLamports, 9)} | wSOL ${formatBaseUnits(beforeBalances.wsolLamports, 9)}`,
+      "muted"
+    )
+  );
+
+  const sig = await closeAccount(
+    connection,
+    wallet.kp,
+    ata,
+    wallet.kp.publicKey,
+    wallet.kp,
+    [],
+    undefined,
+    TOKEN_PROGRAM_ID
+  );
+  console.log(
+    paint(
+      `  Closed wSOL account for ${wallet.name} — tx ${sig}`,
+      "success"
+    )
+  );
+
+  if (remainingLamports > 0n) {
+    const wrapConnection = connection;
+    const solAfterClose = BigInt(
+      await getSolBalance(wrapConnection, wallet.kp.publicKey)
+    );
+    if (
+      remainingLamports + ESTIMATED_GAS_PER_SWAP_LAMPORTS >
+      solAfterClose
+    ) {
+      console.warn(
+        paint(
+          `  Remaining SOL ${formatBaseUnits(remainingLamports, 9)} is insufficient to re-wrap after fees; leaving as native SOL.`,
+          "warn"
+        )
+      );
+      remainingLamports = 0n;
+    } else {
+      console.log(
+        paint(
+          `  Re-wrapping ${formatBaseUnits(remainingLamports, 9)} SOL to preserve leftover wSOL balance.`,
+          "muted"
+        )
+      );
+      await ensureWrappedSolBalance(
+        wrapConnection,
+        wallet,
+        remainingLamports,
+        0n
+      );
+    }
+  }
+
+  const afterBalances = await getSolAndWrappedSolBalances(connection, wallet);
+  console.log(
+    paint(
+      `    after  → SOL ${formatBaseUnits(afterBalances.solLamports, 9)} | wSOL ${formatBaseUnits(afterBalances.wsolLamports, 9)}`,
+      "muted"
+    )
+  );
+}
+
+async function handleWalletCommand(args) {
+  const subcommandRaw = args[0];
+  if (!subcommandRaw) {
+    console.log(
+      "wallet usage: wallet <wrap|unwrap> <walletName> [amount|all] [--raw]"
+    );
+    return;
+  }
+  const subcommand = subcommandRaw.toLowerCase();
+  const rest = args.slice(1);
+  if (subcommand === "wrap") {
+    await handleWalletWrap(rest);
+    return;
+  }
+  if (subcommand === "unwrap") {
+    await handleWalletUnwrap(rest);
+    return;
+  }
+  throw new Error(
+    `Unknown wallet subcommand '${subcommandRaw}'. Expected 'wrap' or 'unwrap'.`
+  );
 }
 
 // fund all wallets from one source - same lamportsEach to each wallet
@@ -6297,7 +8157,7 @@ async function main() {
   const cmd = args[0];
   if (!cmd) {
     console.log(
-      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
+      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
     );
     process.exit(0);
   }
@@ -6328,6 +8188,10 @@ async function main() {
     }
     if (cmd === "lend") {
       await handleLendCommand(args.slice(1));
+      process.exit(0);
+    }
+    if (cmd === "wallet") {
+      await handleWalletCommand(args.slice(1));
       process.exit(0);
     }
     if (cmd === "launcher-bootstrap") {
@@ -6561,6 +8425,46 @@ async function main() {
         swapDelayMs,
         swapAmount,
         swapConfirm,
+      });
+    } else if (cmd === "test-ultra") {
+      const { options, rest } = parseCliOptions(args.slice(1));
+      const inputMint =
+        options.input ||
+        options["input-mint"] ||
+        rest[0] ||
+        SOL_MINT;
+      const outputMint =
+        options.output ||
+        options["output-mint"] ||
+        rest[1] ||
+        DEFAULT_USDC_MINT;
+      const amount =
+        options.amount ||
+        options.size ||
+        rest[2] ||
+        "0.001";
+      const walletOption =
+        options.wallet ||
+        options.from ||
+        options["wallet-file"] ||
+        null;
+      const slippageOption =
+        options.slippage ||
+        options["slippage-bps"] ||
+        options["slippagebps"] ||
+        null;
+      const submitOption = options.submit;
+      const submit =
+        submitOption === true ||
+        (typeof submitOption === "string" &&
+          submitOption.trim().toLowerCase() === "true");
+      await testJupiterUltraOrder({
+        inputMint,
+        outputMint,
+        amount,
+        walletName: walletOption,
+        submit,
+        slippageBps: slippageOption,
       });
     } else if (cmd === "swap") {
       const inMint = (args[1] || "").trim();
