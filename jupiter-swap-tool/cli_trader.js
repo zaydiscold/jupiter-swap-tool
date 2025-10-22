@@ -45,6 +45,7 @@ import {
   KNOWN_CUSTODIES,
   getPerpsProgram,
 } from "./perps.js";
+import { getPerpsProgramId } from "./perps/client.js";
 import {
   instantiateCampaignForWallets,
   executeTimedPlansAcrossWallets,
@@ -101,8 +102,13 @@ const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
-const JUPITER_PERPS_PROGRAM_ID =
-  process.env.JUPITER_PERPS_PROGRAM_ID || DEFAULT_PERPS_PROGRAM_ID;
+const JUPITER_PERPS_PROGRAM_ID = (() => {
+  const raw =
+    process.env.JUPITER_PERPS_PROGRAM_ID ||
+    process.env.PERPS_PROGRAM_ID ||
+    DEFAULT_PERPS_PROGRAM_ID;
+  return String(raw).trim();
+})();
 const PERPS_RPC_URL = process.env.PERPS_RPC_URL || DEFAULT_RPC_URL;
 const PERPS_COMPUTE_UNIT_LIMIT = process.env.PERPS_COMPUTE_UNIT_LIMIT
   ? Math.max(1, parseInt(process.env.PERPS_COMPUTE_UNIT_LIMIT, 10) || 0)
@@ -9257,6 +9263,32 @@ function printPerpsUsage() {
   );
 }
 
+function ensurePerpsProgramMatchesConfig(connection) {
+  const program = getPerpsProgram(connection);
+  const resolvedProgramId = program?.programId;
+  if (!resolvedProgramId) {
+    throw new Error(
+      "Unable to resolve the Jupiter perps program ID from the Anchor program"
+    );
+  }
+  const expectedProgramId = getPerpsProgramId();
+  if (!resolvedProgramId.equals(expectedProgramId)) {
+    throw new Error(
+      `Perps program mismatch: Anchor loaded ${resolvedProgramId.toBase58()} but resolver returned ${expectedProgramId.toBase58()}`
+    );
+  }
+  const configuredProgramId = JUPITER_PERPS_PROGRAM_ID;
+  if (
+    configuredProgramId &&
+    resolvedProgramId.toBase58() !== configuredProgramId
+  ) {
+    throw new Error(
+      `Perps program mismatch: configured ${configuredProgramId} but loaded ${resolvedProgramId.toBase58()}`
+    );
+  }
+  return program;
+}
+
 async function perpsPositionsCommand(rawArgs) {
   const wallets = listWallets();
   if (!wallets.length) {
@@ -9328,6 +9360,7 @@ async function perpsPositionsCommand(rawArgs) {
       }
     }
   };
+  ensurePerpsProgramMatchesConfig(connection);
   const ownerPubkeys = targetWallets.map((wallet) => wallet.kp.publicKey);
   const ownerResults = await runWithRpcRetry("fetch positions", () =>
     fetchPositionsForOwners(connection, ownerPubkeys)
@@ -9639,6 +9672,7 @@ async function perpsIncreaseCommand(rawArgs) {
       }
     }
   };
+  ensurePerpsProgramMatchesConfig(connection);
   const custodyMap = await runWithRpcRetry("fetch custodies", () =>
     fetchCustodyAccounts(connection, [
       custodyResolved.custody,
@@ -9835,7 +9869,7 @@ async function perpsIncreaseCommand(rawArgs) {
   );
   console.log(paint("  confirmed", "success"));
   try {
-    const program = getPerpsProgram(connection);
+    const program = ensurePerpsProgramMatchesConfig(connection);
     const requestAccount = await runWithRpcRetry("fetch request", () =>
       program.account.positionRequest.fetch(increaseResult.positionRequest)
     );
@@ -9977,7 +10011,7 @@ async function perpsDecreaseCommand(rawArgs) {
       }
     }
   };
-  const program = getPerpsProgram(connection);
+  const program = ensurePerpsProgramMatchesConfig(connection);
   const positionAccount = await runWithRpcRetry("fetch position", () =>
     program.account.position.fetch(positionPubkey)
   );
@@ -10201,7 +10235,7 @@ async function perpsDecreaseCommand(rawArgs) {
   );
   console.log(paint("  confirmed", "success"));
   try {
-    const programLatest = getPerpsProgram(connection);
+    const programLatest = ensurePerpsProgramMatchesConfig(connection);
     const requestAccount = await runWithRpcRetry("fetch request", () =>
       programLatest.account.positionRequest.fetch(
         decreaseResult.positionRequest
