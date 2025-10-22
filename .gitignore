@@ -3,3 +3,4 @@ keypairs/
 node_modules/
 npm-debug.log*
 .DS_Store
+perps_config.json

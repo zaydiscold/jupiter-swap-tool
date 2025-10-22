@@ -15,6 +15,8 @@ import {
   VersionedTransaction,
   Transaction,
   SystemProgram,
+  ComputeBudgetProgram,
+  TransactionMessage,
 } from "@solana/web3.js";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -26,7 +28,30 @@ import {
   MintLayout,
   createSyncNativeInstruction,
   closeAccount,
+  NATIVE_MINT,
 } from "@solana/spl-token";
+import {
+  buildIncreaseRequestInstruction,
+  buildDecreaseRequestInstruction,
+  simulatePerpsInstructions,
+  fetchPoolAccount,
+  fetchCustodyAccounts,
+  fetchPositionsForOwners,
+  buildComputeBudgetInstructions,
+  preparePreviewTransaction,
+  resolveCustodyIdentifier,
+  extractSideLabel,
+  convertDbpsToHourlyRate,
+  KNOWN_CUSTODIES,
+  getPerpsProgram,
+} from "./perps.js";
+import {
+  instantiateCampaignForWallets,
+  executeTimedPlansAcrossWallets,
+  registerHooks as registerCampaignHooks,
+  truncatePlanToBudget,
+  CAMPAIGNS,
+} from "./chains/solana/campaigns_runtime.js";
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
@@ -40,10 +65,41 @@ const TOOL_VERSION = "1.1.2";
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
-const SCRIPT_FILE = fileURLToPath(import.meta.url);
-const SCRIPT_DIR = path.dirname(SCRIPT_FILE);
+// Normalise a filesystem path for equality comparisons that tolerate symlinks.
+const toComparablePath = (rawPath) => {
+  if (!rawPath) return null;
+  const valueAsString =
+    typeof rawPath === "string" ? rawPath : String(rawPath ?? "");
+  const normalizedInput = path.resolve(
+    valueAsString.startsWith("file://") ? fileURLToPath(valueAsString) : valueAsString
+  );
+  try {
+    return path.normalize(fs.realpathSync(normalizedInput));
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "EACCES" || err?.code === "EPERM") {
+      return path.normalize(normalizedInput);
+    }
+    return path.normalize(normalizedInput);
+  }
+};
+
+const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_COMPARABLE_PATH =
+  toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
+
+const IS_MAIN_EXECUTION = (() => {
+  const entry = process?.argv?.[1];
+  if (!entry) return false;
+  const entryComparablePath = toComparablePath(entry);
+  if (!entryComparablePath || !SCRIPT_COMPARABLE_PATH) {
+    return false;
+  }
+  return entryComparablePath === SCRIPT_COMPARABLE_PATH;
+})();
+
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
 const JUPITER_PERPS_PROGRAM_ID =
   process.env.JUPITER_PERPS_PROGRAM_ID || DEFAULT_PERPS_PROGRAM_ID;
@@ -238,6 +294,8 @@ const DEFAULT_LEND_EARN_BASE =
   process.env.JUPITER_LEND_API_BASE || "https://lite-api.jup.ag/lend/v1/earn";
 const DEFAULT_LEND_BORROW_BASE =
   process.env.JUPITER_LEND_BORROW_API_BASE || "https://lite-api.jup.ag/lend/v1/borrow";
+const DEFAULT_PERPS_API_BASE =
+  process.env.JUPITER_PERPS_API_BASE || "https://lite-api.jup.ag/perps/v1";
 const FALLBACK_LEND_EARN_BASES = [
   "https://api.jup.ag/lend/v1/earn",
   "https://api.jup.ag/lend/earn",
@@ -248,36 +306,19 @@ const FALLBACK_LEND_BORROW_BASES = [
   "https://api.jup.ag/lend/borrow",
   "https://api.jup.ag/jup-integrators/borrow",
 ];
+const FALLBACK_PERPS_BASES = [
+  "https://api.jup.ag/perps/v1",
+  "https://api.jup.ag/perps",
+];
 const LEND_EARN_BASES = Array.from(
   new Set([DEFAULT_LEND_EARN_BASE, ...FALLBACK_LEND_EARN_BASES])
 );
 const LEND_BORROW_BASES = Array.from(
   new Set([DEFAULT_LEND_BORROW_BASE, ...FALLBACK_LEND_BORROW_BASES])
 );
-let lendEarnBaseIndex = 0;
-let lendBorrowBaseIndex = 0;
-function currentLendEarnBase() {
-  return LEND_EARN_BASES[Math.min(lendEarnBaseIndex, LEND_EARN_BASES.length - 1)];
-}
-function advanceLendEarnBase() {
-  if (lendEarnBaseIndex < LEND_EARN_BASES.length - 1) {
-    lendEarnBaseIndex += 1;
-    return true;
-  }
-  return false;
-}
-function currentLendBorrowBase() {
-  return LEND_BORROW_BASES[
-    Math.min(lendBorrowBaseIndex, LEND_BORROW_BASES.length - 1)
-  ];
-}
-function advanceLendBorrowBase() {
-  if (lendBorrowBaseIndex < LEND_BORROW_BASES.length - 1) {
-    lendBorrowBaseIndex += 1;
-    return true;
-  }
-  return false;
-}
+const PERPS_API_BASES = Array.from(
+  new Set([DEFAULT_PERPS_API_BASE, ...FALLBACK_PERPS_BASES])
+);
 const USE_ULTRA_ENGINE = JUPITER_SWAP_ENGINE !== "lite";
 const FALLBACK_TOKEN_CATALOG = [
   {
@@ -618,7 +659,9 @@ async function refreshTokenCatalogFromApi(options = {}) {
   return tokenCatalogRefreshPromise;
 }
 
-refreshTokenCatalogFromApi().catch(() => {});
+if (IS_MAIN_EXECUTION) {
+  refreshTokenCatalogFromApi().catch(() => {});
+}
 
 function tokenBySymbol(symbol) {
   if (!symbol) return null;
@@ -1001,10 +1044,21 @@ async function fetchPricesForMints(mints) {
   }
 }
 
-async function lendApiRequest({ base, path, method = "POST", body, query, headers } = {}) {
-  if (!base) throw new Error("Lend API base is not defined");
-  if (!path) throw new Error("Lend API path is required");
-  const url = new URL(path.startsWith("http") ? path : `${base.replace(/\/$/, "")}/${path.replace(/^\//, "")}`);
+async function namespaceApiRequest({
+  base,
+  path,
+  method = "POST",
+  body,
+  query,
+  headers,
+} = {}) {
+  if (!base) throw new Error("Namespace API base is not defined");
+  if (!path) throw new Error("Namespace API path is required");
+  const url = new URL(
+    path.startsWith("http")
+      ? path
+      : `${base.replace(/\/$/, "")}/${path.replace(/^\//, "")}`
+  );
   if (query && typeof query === "object") {
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null) continue;
@@ -1056,38 +1110,73 @@ async function lendApiRequest({ base, path, method = "POST", body, query, header
   };
 }
 
-async function lendEarnRequest(options) {
-  while (true) {
-    const base = currentLendEarnBase();
-    const result = await lendApiRequest({ base, ...options });
-    if (result.status === 404 && advanceLendEarnBase()) {
-      console.warn(
-        paint(
-          `  Lend earn endpoint ${base} returned 404; switching to ${currentLendEarnBase()}`,
-          "warn"
-        )
-      );
-      continue;
-    }
-    return result;
+function createNamespaceClient({ name, bases }) {
+  const label = typeof name === "string" && name.trim().length > 0 ? name.trim() : "namespace";
+  const prettyLabel = label.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const uniqueBases = Array.from(
+    new Set((Array.isArray(bases) ? bases : []).filter((base) => typeof base === "string" && base.trim().length > 0))
+  );
+  if (uniqueBases.length === 0) {
+    throw new Error(`No API bases configured for ${label}`);
   }
+  let index = 0;
+  function currentBase() {
+    return uniqueBases[Math.min(index, uniqueBases.length - 1)];
+  }
+  function advanceBase() {
+    if (index < uniqueBases.length - 1) {
+      index += 1;
+      return true;
+    }
+    return false;
+  }
+  async function request(options = {}) {
+    while (true) {
+      const base = currentBase();
+      const result = await namespaceApiRequest({ base, ...options });
+      if (result.status === 404 && advanceBase()) {
+        console.warn(
+          paint(
+            `  ${prettyLabel} endpoint ${base} returned 404; switching to ${currentBase()}`,
+            "warn"
+          )
+        );
+        continue;
+      }
+      return result;
+    }
+  }
+  return {
+    request,
+    currentBase,
+  };
+}
+
+const lendEarnClient = createNamespaceClient({
+  name: "lend earn",
+  bases: LEND_EARN_BASES,
+});
+
+const lendBorrowClient = createNamespaceClient({
+  name: "lend borrow",
+  bases: LEND_BORROW_BASES,
+});
+
+const perpsClient = createNamespaceClient({
+  name: "perps",
+  bases: PERPS_API_BASES,
+});
+
+async function lendEarnRequest(options) {
+  return lendEarnClient.request(options);
 }
 
 async function lendBorrowRequest(options) {
-  while (true) {
-    const base = currentLendBorrowBase();
-    const result = await lendApiRequest({ base, ...options });
-    if (result.status === 404 && advanceLendBorrowBase()) {
-      console.warn(
-        paint(
-          `  Lend borrow endpoint ${base} returned 404; switching to ${currentLendBorrowBase()}`,
-          "warn"
-        )
-      );
-      continue;
-    }
-    return result;
-  }
+  return lendBorrowClient.request(options);
+}
+
+async function perpsApiRequest(options) {
+  return perpsClient.request(options);
 }
 
 function parseCliOptions(tokens = []) {
@@ -1174,13 +1263,151 @@ function logLendApiResult(action, result) {
   }
 }
 
-function parseJsonOption(value, label) {
+function logPerpsApiResult(action, result) {
+  const tone = result.ok ? "success" : "warn";
+  console.log(
+    paint(
+      `[perps] ${action}: ${result.status} ${result.ok ? "ok" : "error"}`,
+      tone
+    )
+  );
+  console.log(paint(`  url: ${result.url}`, "muted"));
+  if (result.headers && result.headers["x-request-id"]) {
+    console.log(
+      paint(`  request-id: ${result.headers["x-request-id"]}`, "muted")
+    );
+  }
+  if (result.data !== null && result.data !== undefined) {
+    try {
+      const pretty = JSON.stringify(result.data, null, 2);
+      console.log(pretty);
+    } catch (_) {
+      console.log(result.data);
+    }
+  } else if (result.raw) {
+    console.log(result.raw);
+  }
+  if (!result.ok && result.status === 404) {
+    console.log(
+      paint(
+        "  Tip: set JUPITER_PERPS_API_BASE to a valid integrator endpoint if the default lite endpoint is unavailable.",
+        "warn"
+      )
+    );
+  }
+}
+
+function coerceCliBoolean(value) {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) return false;
+    return ["true", "t", "1", "yes", "y", "on"].includes(trimmed);
+  }
+  return false;
+}
+
+function normalizePerpsSide(value) {
+  if (!value) return "long";
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "long" || normalized === "short") {
+    return normalized;
+  }
+  if (normalized === "buy") return "long";
+  if (normalized === "sell") return "short";
+  throw new Error(
+    `Unknown perps side '${value}'. Expected long/short or buy/sell.`
+  );
+}
+
+function formatPerpsMarketSnippet(entry) {
+  if (!entry || typeof entry !== "object") return "unknown market";
+  const symbol =
+    entry.symbol || entry.market || entry.name || entry.id || "unknown";
+  const pair =
+    entry.pair ||
+    (entry.baseAsset && entry.quoteAsset
+      ? `${entry.baseAsset}/${entry.quoteAsset}`
+      : null);
+  const leverage = entry.maxLeverage || entry.leverage || entry.maxLev;
+  const status = entry.status || entry.state;
+  const funding =
+    entry.fundingRate ?? entry.currentFundingRate ?? entry.funding ?? null;
+  const parts = [symbol];
+  if (pair) parts.push(pair);
+  if (leverage !== undefined && leverage !== null) {
+    parts.push(`max ${leverage}x`);
+  }
+  if (status) parts.push(status);
+  if (funding !== null && funding !== undefined) {
+    parts.push(`funding ${funding}`);
+  }
+  return parts.join(" · ");
+}
+
+function formatPerpsPositionSnippet(entry) {
+  if (!entry || typeof entry !== "object") return "position";
+  const market = entry.market || entry.symbol || entry.pair || entry.ticker;
+  const side = entry.side || entry.direction || entry.positionSide;
+  const size = entry.size ?? entry.baseSize ?? entry.positionSize;
+  const notional = entry.notional ?? entry.notionalUsd ?? entry.value;
+  const pnl =
+    entry.unrealizedPnl ?? entry.unrealizedPnL ?? entry.pnlUsd ?? entry.pnl;
+  const leverage = entry.leverage || entry.currentLeverage;
+  const pieces = [market || "?"];
+  if (side) pieces.push(String(side).toLowerCase());
+  if (size !== undefined && size !== null) pieces.push(`size ${size}`);
+  if (notional !== undefined && notional !== null)
+    pieces.push(`notional ${notional}`);
+  if (leverage !== undefined && leverage !== null)
+    pieces.push(`${leverage}x`);
+  if (pnl !== undefined && pnl !== null) pieces.push(`PnL ${pnl}`);
+  return pieces.join(" · ");
+}
+
+function parseJsonOption(value, label, { expectObject = false } = {}) {
   if (value === undefined || value === null) return {};
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be provided as a JSON string`);
+  }
   try {
-    return JSON.parse(value);
+    const parsed = JSON.parse(value);
+    if (expectObject) {
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`${label} must be a JSON object`);
+      }
+    }
+    return parsed;
   } catch (err) {
+    if (err instanceof Error && err.message.startsWith(`${label} must`)) {
+      throw err;
+    }
     throw new Error(`${label} must be valid JSON (${err.message})`);
   }
+}
+
+function buildPerpsRequest(action, payload, options, { defaultPath, defaultMethod = "POST" } = {}) {
+  if (!defaultPath) {
+    throw new Error(`Perps ${action} handler is missing a default path`);
+  }
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const methodRaw = normalizedOptions.method;
+  const method = methodRaw
+    ? String(methodRaw).trim().toUpperCase()
+    : (defaultMethod || "POST").toUpperCase();
+  const pathRaw = normalizedOptions.path;
+  const path = pathRaw ? String(pathRaw).trim() : defaultPath;
+  const request = { path, method };
+  if (method === "GET") {
+    if (payload !== undefined) {
+      request.query = payload;
+    }
+  } else if (payload !== undefined) {
+    request.body = payload;
+  }
+  return request;
 }
 
 function resolveWalletIdentifiers(inputs) {
@@ -1242,6 +1469,419 @@ async function handleLendCommand(args) {
     await handleLendBorrowCommand(rest);
   } else {
     throw new Error(`Unknown lend category '${categoryRaw}'. Expected 'earn' or 'borrow'.`);
+  }
+}
+
+async function handlePerpsCommand(args) {
+  const actionRaw = args[0];
+  if (!actionRaw) {
+    console.log(
+      "perps usage: perps <markets|positions|open|close> [...options]"
+    );
+    return;
+  }
+  console.log(
+    paint(
+      "Perpetual trading carries liquidation and leverage risk. Review every payload before broadcasting transactions.",
+      "warn"
+    )
+  );
+  const action = actionRaw.toLowerCase();
+  const rest = args.slice(1);
+  if (action === "markets" || action === "market") {
+    await handlePerpsMarkets(rest);
+    return;
+  }
+  if (action === "positions" || action === "position") {
+    await handlePerpsPositions(rest);
+    return;
+  }
+  if (action === "open") {
+    await handlePerpsOpen(rest);
+    return;
+  }
+  if (action === "close" || action === "exit") {
+    await handlePerpsClose(rest);
+    return;
+  }
+  throw new Error(
+    `Unknown perps action '${actionRaw}'. Expected 'markets', 'positions', 'open', or 'close'.`
+  );
+}
+
+async function handlePerpsMarkets(args) {
+  const { options, rest } = parseCliOptions(args);
+  const filters = {};
+  const search = options.query ?? options.search ?? rest[0];
+  const status = options.status ?? options.state;
+  const category = options.category ?? options.tag ?? options.type;
+  const limitRaw = options.limit ?? options.max;
+  if (search) filters.query = search;
+  if (status) filters.status = status;
+  if (category) filters.category = category;
+  if (limitRaw !== undefined) {
+    const parsedLimit = parseInt(limitRaw, 10);
+    if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      throw new Error("perps markets: --limit must be a positive integer");
+    }
+    filters.limit = parsedLimit;
+  }
+  const payload = Object.keys(filters).length > 0 ? filters : undefined;
+  const request = buildPerpsRequest(
+    "markets",
+    payload,
+    options,
+    { defaultPath: "markets", defaultMethod: "GET" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("markets", result);
+    const markets =
+      extractIterableFromLendData(result.data) ||
+      (Array.isArray(result.data?.markets) ? result.data.markets : []);
+    if (!Array.isArray(markets) || markets.length === 0) {
+      console.log(paint("  No markets returned for the selected filters.", "muted"));
+      return;
+    }
+    const sample = markets.slice(0, Math.min(markets.length, 8));
+    console.log(
+      paint(
+        `  Showing ${sample.length}/${markets.length} market(s).`,
+        "muted"
+      )
+    );
+    for (const entry of sample) {
+      console.log(paint(`    ${formatPerpsMarketSnippet(entry)}`, "info"));
+    }
+    if (markets.length > sample.length) {
+      console.log(
+        paint(`    ... ${markets.length - sample.length} more market(s).`, "muted")
+      );
+    }
+  } catch (err) {
+    console.error(paint("Perps markets request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsPositions(args) {
+  const { options, rest } = parseCliOptions(args);
+  let inputs = rest.slice();
+  if (inputs.length === 0 && typeof options.wallet === "string") {
+    inputs = [options.wallet];
+  }
+  if (inputs.length === 0 && typeof options.wallets === "string") {
+    inputs = options.wallets.split(",");
+  }
+  const wantsAll =
+    coerceCliBoolean(options.all) ||
+    coerceCliBoolean(options["all-wallets"]) ||
+    inputs.some((item) => typeof item === "string" && item.trim() === "*");
+  if (wantsAll) {
+    inputs = listWallets().map((wallet) => wallet.name);
+  }
+  if (!inputs || inputs.length === 0) {
+    throw new Error(
+      "perps positions usage: perps positions <walletName|pubkey>[,...] [--market <market>] [--all]"
+    );
+  }
+  const identifiers = resolveWalletIdentifiers(inputs);
+  const walletNameMap = new Map(
+    identifiers.map((entry) => [entry.pubkey, entry.name || entry.pubkey])
+  );
+  if (wantsAll) {
+    console.log(
+      paint(
+        `  Targeting all ${identifiers.length} wallet(s) for perps positions.`,
+        "muted"
+      )
+    );
+  } else if (identifiers.length > 1) {
+    console.log(
+      paint(
+        `  Targeting ${identifiers.length} wallet(s) for perps positions.`,
+        "muted"
+      )
+    );
+  }
+  const scopeNames = identifiers
+    .map((entry) => entry.name || entry.pubkey)
+    .filter(Boolean);
+  if (scopeNames.length > 0 && scopeNames.length <= 5) {
+    console.log(paint(`  Wallet scope: ${scopeNames.join(", ")}`, "muted"));
+  }
+  const payload = {
+    wallets: identifiers.map((entry) => entry.pubkey).join(","),
+  };
+  if (options.market) payload.market = options.market;
+  if (options.markets) payload.market = options.markets;
+  if (options.status) payload.status = options.status;
+  if (options.side) payload.side = options.side;
+  if (options.leverage) payload.leverage = options.leverage;
+  if (options.limit !== undefined) {
+    const parsedLimit = parseInt(options.limit, 10);
+    if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      throw new Error("perps positions: --limit must be a positive integer");
+    }
+    payload.limit = parsedLimit;
+  }
+  const request = buildPerpsRequest(
+    "positions",
+    payload,
+    options,
+    { defaultPath: "positions", defaultMethod: "GET" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("positions", result);
+    const entries = extractIterableFromLendData(result.data) || [];
+    if (!Array.isArray(entries) || entries.length === 0) {
+      console.log(
+        paint(
+          "  No perps positions found for the requested wallet scope.",
+          "muted"
+        )
+      );
+      return;
+    }
+    const owners = new Map();
+    for (const entry of entries) {
+      const ownerKey =
+        normalizeWalletIdentifier(entry.owner) ||
+        normalizeWalletIdentifier(entry.wallet) ||
+        normalizeWalletIdentifier(entry.account);
+      if (!ownerKey) continue;
+      const label = walletNameMap.get(ownerKey) || ownerKey;
+      owners.set(label, (owners.get(label) || 0) + 1);
+    }
+    console.log(
+      paint(
+        `  Found ${entries.length} open position(s) across ${owners.size || 1} wallet(s).`,
+        "info"
+      )
+    );
+    const sample = entries.slice(0, Math.min(entries.length, 6));
+    for (const entry of sample) {
+      const ownerKey =
+        normalizeWalletIdentifier(entry.owner) ||
+        normalizeWalletIdentifier(entry.wallet) ||
+        normalizeWalletIdentifier(entry.account);
+      const label = ownerKey && walletNameMap.get(ownerKey)
+        ? walletNameMap.get(ownerKey)
+        : ownerKey || "unknown";
+      console.log(
+        paint(`    ${label}: ${formatPerpsPositionSnippet(entry)}`, "muted")
+      );
+    }
+    if (entries.length > sample.length) {
+      console.log(
+        paint(`    ... ${entries.length - sample.length} more position(s).`, "muted")
+      );
+    }
+  } catch (err) {
+    console.error(paint("Perps positions request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsOpen(args) {
+  const { options, rest } = parseCliOptions(args);
+  let walletName = options.wallet || options.owner;
+  let market = options.market || options.pair;
+  let sideRaw = options.side || options.direction;
+  let sizeRaw = options.size ?? options.amount ?? options.notional;
+  let priceRaw = options.price ?? options.limit;
+  if (!walletName && rest.length > 0) walletName = rest[0];
+  if (!market && rest.length > 1) market = rest[1];
+  if (!sideRaw && rest.length > 2) sideRaw = rest[2];
+  if (sizeRaw === undefined && rest.length > 3) sizeRaw = rest[3];
+  if (priceRaw === undefined && rest.length > 4) priceRaw = rest[4];
+  walletName = walletName ? String(walletName).trim() : "";
+  market = market ? String(market).trim() : "";
+  const sizeValue = sizeRaw !== undefined ? String(sizeRaw).trim() : "";
+  const priceValue = priceRaw !== undefined ? String(priceRaw).trim() : "";
+  if (!walletName || !market || !sideRaw || !sizeValue) {
+    throw new Error(
+      "perps open usage: perps open <walletFile> <market> <side> <size> [price] [--options ...]"
+    );
+  }
+  const wallet = findWalletByName(walletName);
+  const payload = {
+    wallet: wallet.kp.publicKey.toBase58(),
+    market,
+    side: normalizePerpsSide(sideRaw),
+    size: sizeValue,
+  };
+  if (priceValue) payload.price = priceValue;
+  if (options.leverage !== undefined) payload.leverage = String(options.leverage).trim();
+  if (options.margin !== undefined) payload.margin = String(options.margin).trim();
+  if (options.intent !== undefined) payload.intent = String(options.intent).trim();
+  if (options.type !== undefined) payload.type = String(options.type).trim();
+  const tif = options["time-in-force"] || options.timeInForce || options.tif;
+  if (tif !== undefined) payload.timeInForce = String(tif).trim();
+  const clientOrderId =
+    options["client-order-id"] || options.clientOrderId || options.cid;
+  if (clientOrderId !== undefined) {
+    payload.clientOrderId = String(clientOrderId).trim();
+  }
+  if (options.triggerPrice !== undefined || options["trigger-price"] !== undefined) {
+    const triggerValue = options.triggerPrice ?? options["trigger-price"];
+    if (triggerValue !== undefined) {
+      payload.triggerPrice = String(triggerValue).trim();
+    }
+  }
+  if (options.takeProfit !== undefined || options["take-profit"] !== undefined) {
+    const tp = options.takeProfit ?? options["take-profit"];
+    if (tp !== undefined) payload.takeProfit = String(tp).trim();
+  }
+  if (options.stopLoss !== undefined || options["stop-loss"] !== undefined) {
+    const sl = options.stopLoss ?? options["stop-loss"];
+    if (sl !== undefined) payload.stopLoss = String(sl).trim();
+  }
+  if (coerceCliBoolean(options["reduce-only"]) || coerceCliBoolean(options.reduceOnly)) {
+    payload.reduceOnly = true;
+  }
+  if (coerceCliBoolean(options["post-only"]) || coerceCliBoolean(options.postOnly)) {
+    payload.postOnly = true;
+  }
+  if (
+    coerceCliBoolean(options["immediate-or-cancel"]) ||
+    coerceCliBoolean(options.immediateOrCancel) ||
+    coerceCliBoolean(options.ioc) ||
+    coerceCliBoolean(options.fok) ||
+    coerceCliBoolean(options.fillOrKill)
+  ) {
+    payload.immediateOrCancel = true;
+  }
+  if (options.extra !== undefined || options.body !== undefined || options.params !== undefined) {
+    const extra = parseJsonOption(
+      options.extra ?? options.body ?? options.params,
+      "perps open extra",
+      { expectObject: true }
+    );
+    if (extra && Object.keys(extra).length > 0) {
+      Object.assign(payload, extra);
+    }
+  }
+  console.log(
+    paint(
+      `  Wallet ${wallet.name}: ${wallet.kp.publicKey.toBase58()} — ${payload.side} ${payload.size} ${payload.market}`,
+      "muted"
+    )
+  );
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) || coerceCliBoolean(options.dryRun);
+  if (dryRun) {
+    console.log(paint("  Dry-run enabled — request payload:", "warn"));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  const request = buildPerpsRequest(
+    "open",
+    payload,
+    options,
+    { defaultPath: "orders/open", defaultMethod: "POST" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("open", result);
+  } catch (err) {
+    console.error(paint("Perps open request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsClose(args) {
+  const { options, rest } = parseCliOptions(args);
+  let walletName = options.wallet || options.owner;
+  let market = options.market || options.pair;
+  let positionId = options.position || options["position-id"] || options.positionId;
+  let sizeRaw = options.size ?? options.amount ?? options.notional;
+  let priceRaw = options.price ?? options.limit;
+  if (!walletName && rest.length > 0) walletName = rest[0];
+  if (!market && rest.length > 1) market = rest[1];
+  if (!positionId && rest.length > 2) positionId = rest[2];
+  if (sizeRaw === undefined && rest.length > 3) sizeRaw = rest[3];
+  if (priceRaw === undefined && rest.length > 4) priceRaw = rest[4];
+  walletName = walletName ? String(walletName).trim() : "";
+  const marketValue = market ? String(market).trim() : "";
+  const positionValue = positionId ? String(positionId).trim() : "";
+  const sizeValue = sizeRaw !== undefined ? String(sizeRaw).trim() : "";
+  const priceValue = priceRaw !== undefined ? String(priceRaw).trim() : "";
+  if (!walletName) {
+    throw new Error(
+      "perps close usage: perps close <walletFile> [market] [positionId] [size]"
+    );
+  }
+  const wallet = findWalletByName(walletName);
+  const closeAll =
+    coerceCliBoolean(options["close-all"]) ||
+    coerceCliBoolean(options.closeAll) ||
+    coerceCliBoolean(options.all);
+  if (!marketValue && !positionValue && !closeAll) {
+    throw new Error(
+      "perps close requires --market or --position to identify the exposure."
+    );
+  }
+  const payload = {
+    wallet: wallet.kp.publicKey.toBase58(),
+  };
+  if (marketValue) payload.market = marketValue;
+  if (positionValue) payload.positionId = positionValue;
+  if (sizeValue) payload.size = sizeValue;
+  if (priceValue) payload.price = priceValue;
+  if (closeAll) payload.closeAll = true;
+  if (coerceCliBoolean(options["reduce-only"]) || coerceCliBoolean(options.reduceOnly)) {
+    payload.reduceOnly = true;
+  }
+  if (options.intent !== undefined) payload.intent = String(options.intent).trim();
+  if (options.type !== undefined) payload.type = String(options.type).trim();
+  const tif = options["time-in-force"] || options.timeInForce || options.tif;
+  if (tif !== undefined) payload.timeInForce = String(tif).trim();
+  const clientOrderId =
+    options["client-order-id"] || options.clientOrderId || options.cid;
+  if (clientOrderId !== undefined) {
+    payload.clientOrderId = String(clientOrderId).trim();
+  }
+  if (options.extra !== undefined || options.body !== undefined || options.params !== undefined) {
+    const extra = parseJsonOption(
+      options.extra ?? options.body ?? options.params,
+      "perps close extra",
+      { expectObject: true }
+    );
+    if (extra && Object.keys(extra).length > 0) {
+      Object.assign(payload, extra);
+    }
+  }
+  const targetLabel =
+    payload.market || payload.positionId || marketValue || positionValue || "?";
+  console.log(
+    paint(
+      `  Wallet ${wallet.name}: ${wallet.kp.publicKey.toBase58()} — closing ${targetLabel}`,
+      "muted"
+    )
+  );
+  if (payload.size) {
+    console.log(paint(`  Requested size: ${payload.size}`, "muted"));
+  }
+  if (payload.closeAll) {
+    console.log(paint("  closeAll=true", "muted"));
+  }
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) || coerceCliBoolean(options.dryRun);
+  if (dryRun) {
+    console.log(paint("  Dry-run enabled — request payload:", "warn"));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  const request = buildPerpsRequest(
+    "close",
+    payload,
+    options,
+    { defaultPath: "positions/close", defaultMethod: "POST" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("close", result);
+  } catch (err) {
+    console.error(paint("Perps close request failed:", "error"), err.message);
   }
 }
 
@@ -3088,6 +3728,13 @@ function isRateLimitError(err) {
   }
   if (typeof err.code === "number" && err.code === 429) return true;
   if (typeof err.status === "number" && err.status === 429) return true;
+  if (
+    (typeof err.name === "string" && err.name === "TypeError" &&
+      typeof err.message === "string" && err.message.toLowerCase().includes("fetch failed")) ||
+    (typeof err.message === "string" && err.message.toLowerCase().includes("failed to fetch"))
+  ) {
+    return true;
+  }
   if (isRateLimitMessage(err.message)) return true;
   if (Array.isArray(err.logs)) {
     const joined = err.logs.join("\n");
@@ -3694,6 +4341,375 @@ function listWallets() {
   return wallets;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Campaign runtime glue                                                      */
+/* -------------------------------------------------------------------------- */
+
+const campaignWalletRegistry = new Map();
+let campaignHooksRegistered = false;
+let campaignDryRun = false;
+
+function getCampaignWallet(pubkeyBase58) {
+  if (!campaignWalletRegistry.has(pubkeyBase58)) {
+    throw new Error(`campaign wallet ${pubkeyBase58} not registered`);
+  }
+  return campaignWalletRegistry.get(pubkeyBase58);
+}
+
+function ensureCampaignHooksRegistered() {
+  if (campaignHooksRegistered) return;
+  registerCampaignHooks({
+    getSolLamports: async (pubkeyBase58) => {
+      const connection = createRpcConnection("confirmed");
+      try {
+        const lamports = await connection.getBalance(new PublicKey(pubkeyBase58));
+        return BigInt(lamports);
+      } finally {
+        try {
+          connection?.destroy?.();
+        } catch (_) {}
+      }
+    },
+    jupiterLiteSwap: async (pubkeyBase58, inMint, outMint, lamports) => {
+      return performCampaignSwap({
+        pubkeyBase58,
+        inMint,
+        outMint,
+        amountLamports: lamports,
+      });
+    },
+    findLargestSplHolding: async (pubkeyBase58) => {
+      return campaignFindLargestHolding(pubkeyBase58);
+    },
+    splToLamports: async (pubkeyBase58, mint, uiAmount) => {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
+    },
+  });
+  campaignHooksRegistered = true;
+}
+
+async function ensureCampaignAta(connection, ownerKeypair, mint, programId) {
+  const mintPubkey = new PublicKey(mint);
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    ownerKeypair.publicKey,
+    false,
+    programId || TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const info = await connection.getAccountInfo(ata);
+  if (info) {
+    return { ata, created: false };
+  }
+  const transaction = new Transaction().add(
+    createAssociatedTokenAccountInstruction(
+      ownerKeypair.publicKey,
+      ata,
+      ownerKeypair.publicKey,
+      mintPubkey,
+      programId || TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+  );
+  transaction.feePayer = ownerKeypair.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  transaction.recentBlockhash = blockhash;
+  transaction.sign(ownerKeypair);
+  const raw = transaction.serialize();
+  const signature = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(signature, "confirmed");
+  return { ata, created: true };
+}
+
+async function performCampaignSwap({ pubkeyBase58, inMint, outMint, amountLamports }) {
+  const entry = getCampaignWallet(pubkeyBase58);
+  const wallet = entry.wallet;
+  const lamportsBig = BigInt(amountLamports ?? 0);
+  if (lamportsBig <= 0n) {
+    throw new Error("campaign swap requires positive lamports");
+  }
+  const userPubkey = wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  const metadataConnection = createRpcConnection("confirmed");
+  let inputMeta = null;
+  let outputMeta = null;
+  try {
+    if (!SOL_LIKE_MINTS.has(inMint)) {
+      inputMeta = await resolveMintMetadata(metadataConnection, inMint);
+    }
+    if (!SOL_LIKE_MINTS.has(outMint)) {
+      outputMeta = await resolveMintMetadata(metadataConnection, outMint);
+      await ensureCampaignAta(connection, wallet.kp, outMint, outputMeta.programId);
+    }
+  } catch (err) {
+    throw new Error(`metadata prep failed: ${err?.message || err}`);
+  }
+
+  let quote;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      quote = await fetchLegacyQuote(
+        inMint,
+        outMint,
+        lamportsBig,
+        userPubkey.toBase58(),
+        SLIPPAGE_BPS
+      );
+      break;
+    } catch (err) {
+      const message = err?.message || String(err || "");
+      if (/rate limit/i.test(message) && attempt < 3) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (!quote) {
+    throw new Error("quote unavailable after retries");
+  }
+
+  if (campaignDryRun) {
+    const outAmountLamports = BigInt(quote.outAmount || quote.outAmountWithSlippage || 0);
+    const inputDecimals = inputMeta?.decimals ?? 9;
+    const outputDecimals = outputMeta?.decimals ?? (SOL_LIKE_MINTS.has(outMint) ? 9 : 6);
+    console.log(
+      paint(
+        `[dry-run] ${entry.name}: ${symbolForMint(inMint)}→${symbolForMint(outMint)} amount=${formatBaseUnits(lamportsBig, inputDecimals)} expectedOut=${formatBaseUnits(outAmountLamports, outputDecimals)}`,
+        "muted"
+      )
+    );
+    return `dry-run-${Date.now()}`;
+  }
+
+  const swapPayload = await fetchLegacySwap(
+    quote,
+    userPubkey.toBase58(),
+    SOL_LIKE_MINTS.has(inMint) || SOL_LIKE_MINTS.has(outMint)
+  );
+  const txBuffer = Buffer.from(swapPayload.swapTransaction, "base64");
+  const vtx = VersionedTransaction.deserialize(txBuffer);
+  vtx.sign([wallet.kp]);
+  const raw = vtx.serialize();
+  const signature = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(signature, "confirmed");
+  return signature;
+}
+
+async function campaignFindLargestHolding(pubkeyBase58) {
+  const entry = getCampaignWallet(pubkeyBase58);
+  const owner = entry.wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  try {
+    const parsed = await getAllParsedTokenAccounts(connection, owner);
+    let best = null;
+    for (const { account } of parsed) {
+      const info = account?.data?.parsed?.info;
+      if (!info) continue;
+      const mint = info.mint;
+      if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+      const rawAmount = info.tokenAmount?.amount ?? "0";
+      let amount;
+      try {
+        amount = BigInt(rawAmount);
+      } catch (_) {
+        amount = 0n;
+      }
+      if (amount <= 0n) continue;
+      if (!best || amount > best.amount) {
+        best = {
+          mint,
+          amount,
+          uiAmount: rawAmount,
+          decimals: info.tokenAmount?.decimals ?? 0,
+        };
+      }
+    }
+    if (!best) return null;
+    return { mint: best.mint, uiAmount: best.uiAmount, decimals: best.decimals };
+  } finally {
+    try {
+      connection?.destroy?.();
+    } catch (_) {}
+  }
+}
+
+async function campaignSplToLamports(pubkeyBase58, mint, uiAmount) {
+  if (typeof uiAmount === "bigint") {
+    return uiAmount;
+  }
+  if (typeof uiAmount === "number") {
+    const connection = createRpcConnection("confirmed");
+    try {
+      const meta = await resolveMintMetadata(connection, mint);
+      const decimals = meta?.decimals ?? 0;
+      return BigInt(Math.floor(uiAmount * 10 ** decimals));
+    } finally {
+      try {
+        connection?.destroy?.();
+      } catch (_) {}
+    }
+  }
+  if (typeof uiAmount === "string") {
+    if (/^\d+$/.test(uiAmount)) {
+      return BigInt(uiAmount);
+    }
+    const parsed = Number(uiAmount);
+    if (!Number.isNaN(parsed)) {
+      const connection = createRpcConnection("confirmed");
+      try {
+        const meta = await resolveMintMetadata(connection, mint);
+        const decimals = meta?.decimals ?? 0;
+        return BigInt(Math.floor(parsed * 10 ** decimals));
+      } finally {
+        try {
+          connection?.destroy?.();
+        } catch (_) {}
+      }
+    }
+  }
+  if (uiAmount && typeof uiAmount === "object") {
+    if (typeof uiAmount.amount === "string" && /^\d+$/.test(uiAmount.amount)) {
+      return BigInt(uiAmount.amount);
+    }
+    if (typeof uiAmount.uiAmount === "number") {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount.uiAmount);
+    }
+    if (typeof uiAmount.uiAmountString === "string") {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount.uiAmountString);
+    }
+  }
+  return 0n;
+}
+
+function filterWalletsByBatch(wallets, batchRaw) {
+  const normalized = (batchRaw || "all").toString().trim().toLowerCase();
+  if (normalized === "all" || normalized.length === 0) {
+    return wallets;
+  }
+  if (normalized === "1" || normalized === "2") {
+    const target = parseInt(normalized, 10) - 1;
+    return wallets.filter((_, index) => index % 2 === target);
+  }
+  throw new Error("campaign --batch must be 1, 2, or all");
+}
+
+async function handleCampaignCommand(rawArgs) {
+  const { options, rest } = parseCliOptions(rawArgs);
+  const [campaignKeyRaw, durationKeyRaw] = rest;
+  if (!campaignKeyRaw || !durationKeyRaw) {
+    throw new Error(
+      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
+    );
+  }
+  const campaignKey = campaignKeyRaw.toLowerCase();
+  const durationKey = durationKeyRaw.toLowerCase();
+  const preset = CAMPAIGNS[campaignKey];
+  if (!preset) {
+    throw new Error(`campaign ${campaignKeyRaw} not recognised`);
+  }
+  if (!preset.durations[durationKey]) {
+    throw new Error(`campaign duration ${durationKeyRaw} not supported`);
+  }
+
+  let wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found in keypairs directory.", "warn"));
+    return;
+  }
+
+  const batchRaw = options.batch || options.Batch || options.BATCH;
+  wallets = filterWalletsByBatch(wallets, batchRaw);
+  wallets = wallets.filter((wallet) => !isWalletDisabledByGuard(wallet.name));
+  if (wallets.length === 0) {
+    console.log(paint("No eligible wallets after filtering/batch selection.", "warn"));
+    return;
+  }
+
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) ||
+    coerceCliBoolean(options.dryRun) ||
+    coerceCliBoolean(options.dryrun);
+
+  campaignWalletRegistry.clear();
+  for (const wallet of wallets) {
+    const pubkey = wallet.kp.publicKey.toBase58();
+    campaignWalletRegistry.set(pubkey, { wallet, name: wallet.name });
+  }
+  ensureCampaignHooksRegistered();
+
+  const pubkeys = wallets.map((wallet) => wallet.kp.publicKey.toBase58());
+  const { plansByWallet } = instantiateCampaignForWallets({
+    campaignKey,
+    durationKey,
+    walletPubkeys: pubkeys,
+  });
+
+  const connection = createRpcConnection("confirmed");
+  const preparedPlans = new Map();
+  for (const wallet of wallets) {
+    const pubkey = wallet.kp.publicKey.toBase58();
+    const plan = plansByWallet.get(pubkey);
+    if (!plan) continue;
+    let balance = 0n;
+    try {
+      balance = BigInt(await connection.getBalance(wallet.kp.publicKey));
+    } catch (err) {
+      console.warn(
+        paint(
+          `  Failed to fetch balance for ${wallet.name}: ${err?.message || err}`,
+          "warn"
+        )
+      );
+      continue;
+    }
+    const truncated = truncatePlanToBudget(plan.schedule, balance);
+    if (truncated.length === 0) {
+      console.log(
+        paint(
+          `  Skipping ${wallet.name}: insufficient SOL after reserve (balance ${formatBaseUnits(balance, 9)} SOL).`,
+          "warn"
+        )
+      );
+      continue;
+    }
+    preparedPlans.set(pubkey, { schedule: truncated, rng: plan.rng });
+  }
+
+  if (preparedPlans.size === 0) {
+    console.log(paint("No wallets have sufficient balance to participate.", "warn"));
+    return;
+  }
+
+  campaignDryRun = dryRun;
+  const swapCounts = [];
+  for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+    const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
+    const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
+    const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+    swapCounts.push({ label, swapSteps, checkpointSteps });
+  }
+
+  console.log(
+    paint(
+      `Starting campaign ${campaignKey} (${durationKey}) across ${preparedPlans.size} wallet(s) — dryRun=${dryRun ? "yes" : "no"}.`,
+      "info"
+    )
+  );
+  swapCounts.forEach(({ label, swapSteps, checkpointSteps }) => {
+    console.log(
+      paint(
+        `  ${label}: ${swapSteps} swap(s) + ${checkpointSteps} checkpoint(s) scheduled.`,
+        "muted"
+      )
+    );
+  });
+
+  await executeTimedPlansAcrossWallets({ plansByWallet: preparedPlans });
+  console.log(paint("Campaign complete.", "success"));
+}
+
 function decimalToBaseUnits(amountStr, decimals) {
   if (typeof amountStr !== "string") amountStr = String(amountStr);
   const normalized = amountStr.trim();
@@ -3725,12 +4741,55 @@ function formatBaseUnits(amount, decimals) {
   return `${whole}.${fracStr}`;
 }
 
+function formatSignedBaseUnits(amount, decimals) {
+  if (typeof amount === "string") amount = BigInt(amount);
+  if (typeof amount !== "bigint") amount = BigInt(amount);
+  const negative = amount < 0n;
+  const formatted = formatBaseUnits(negative ? -amount : amount, decimals);
+  return negative ? `-${formatted}` : formatted;
+}
+
 // Present lamport deltas using the existing decimal formatter while preserving sign.
 function formatLamportsDelta(delta) {
   const negative = delta < 0n;
   const magnitude = negative ? -delta : delta;
   const formatted = formatBaseUnits(magnitude, 9);
   return negative ? `-${formatted}` : formatted;
+}
+
+function parsePublicKeyStrict(value, label) {
+  try {
+    return new PublicKey(value);
+  } catch (err) {
+    const detail = err?.message ? `: ${err.message}` : "";
+    throw new Error(`${label || "Public key"} is invalid${detail}`);
+  }
+}
+
+function bnToBigInt(value) {
+  if (!value) return 0n;
+  if (typeof value === "bigint") return value;
+  if (typeof value === "number") return BigInt(value);
+  if (typeof value === "string") return BigInt(value);
+  if (typeof value.toString === "function") {
+    return BigInt(value.toString());
+  }
+  throw new Error("Cannot convert value to bigint");
+}
+
+function formatTimestampSeconds(secondsLike) {
+  if (secondsLike === null || secondsLike === undefined) return "n/a";
+  const seconds = Number(bnToBigInt(secondsLike));
+  if (!Number.isFinite(seconds) || seconds <= 0) return "n/a";
+  const millis = seconds * 1000;
+  if (!Number.isFinite(millis)) return "n/a";
+  const date = new Date(millis);
+  if (Number.isNaN(date.getTime())) return "n/a";
+  return date.toISOString();
+}
+
+function perpsKnownCustodyLabels() {
+  return KNOWN_CUSTODIES.map((entry) => entry.symbol).join(", ");
 }
 
 function pickRandomPortion(total) {
@@ -8158,6 +9217,1020 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
   }
 }
 
+function describeEnumVariant(enumObject) {
+  if (!enumObject || typeof enumObject !== "object") return "unknown";
+  for (const [key, value] of Object.entries(enumObject)) {
+    if (value === null || value === undefined) return key.toLowerCase();
+    if (value === true) return key.toLowerCase();
+    if (typeof value === "object") return key.toLowerCase();
+  }
+  const keys = Object.keys(enumObject);
+  return keys.length ? keys[0].toLowerCase() : "unknown";
+}
+
+function printPerpsUsage() {
+  console.log(paint("Perpetuals command usage:", "label"));
+  console.log(
+    paint(
+      "  perps positions [walletName ... | --wallet <walletName>]",
+      "muted"
+    )
+  );
+  console.log(paint("  perps funding", "muted"));
+  console.log(
+    paint(
+      "  perps increase <walletName> --custody <symbol|address> --collateral <symbol|address> --side <long|short> --size-usd <amount> --collateral-amount <amount> --price-slippage <amount> [--min-out <amount>] [--input-mint <mint>] [--compute-price <microLamports>] [--compute-units <units>] [--referral <pubkey>] [--skip-sim]",
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      "  perps decrease <walletName> --position <pubkey> --price-slippage <amount> [--collateral-usd <amount>] [--size-usd <amount>] [--desired <mint>] [--min-out <amount>] [--entire] [--compute-price <microLamports>] [--compute-units <units>] [--referral <pubkey>] [--skip-sim]",
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      `  Known custody symbols: ${perpsKnownCustodyLabels()}`,
+      "muted"
+    )
+  );
+}
+
+async function perpsPositionsCommand(rawArgs) {
+  const wallets = listWallets();
+  if (!wallets.length) {
+    console.log(
+      paint(
+        "Perps positions aborted: no wallets found in keypairs directory.",
+        "warn"
+      )
+    );
+    return;
+  }
+  const selectedNames = [];
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const token = rawArgs[i];
+    if (!token) continue;
+    if (token === "--wallet" || token === "-w") {
+      if (i + 1 >= rawArgs.length) {
+        throw new Error("perps positions --wallet requires a wallet name");
+      }
+      selectedNames.push(rawArgs[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (token === "--help" || token === "-h") {
+      printPerpsUsage();
+      return;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`perps positions: unknown flag ${token}`);
+    }
+    selectedNames.push(token);
+  }
+  const targetWallets = selectedNames.length
+    ? selectedNames.map((name) => {
+        const match = wallets.find((entry) => entry.name === name);
+        if (!match) {
+          throw new Error(`perps positions: wallet ${name} not found`);
+        }
+        return match;
+      })
+    : wallets;
+  if (!targetWallets.length) {
+    console.log(paint("Perps positions aborted: no wallets selected.", "warn"));
+    return;
+  }
+  let connection = createRpcConnection("confirmed");
+  const getEndpoint = () =>
+    connection.__rpcEndpoint || connection._rpcEndpoint || DEFAULT_RPC_URL;
+  const rotateConnection = (reason) => {
+    const previous = getEndpoint();
+    if (typeof connection.__markUnhealthy === "function") {
+      connection.__markUnhealthy(reason);
+    }
+    connection = createRpcConnection("confirmed");
+    const next = getEndpoint();
+    console.warn(paint(`RPC ${previous} ${reason}; switched to ${next}`, "warn"));
+  };
+  const runWithRpcRetry = async (label, fn) => {
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          rotateConnection(`rate-limit ${label}`);
+          await delay(500);
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const ownerPubkeys = targetWallets.map((wallet) => wallet.kp.publicKey);
+  const ownerResults = await runWithRpcRetry("fetch positions", () =>
+    fetchPositionsForOwners(connection, ownerPubkeys)
+  );
+  const custodySet = new Set();
+  for (const { positions } of ownerResults) {
+    for (const entry of positions) {
+      custodySet.add(entry.account.custody.toBase58());
+      custodySet.add(entry.account.collateralCustody.toBase58());
+    }
+  }
+  const custodyMap = await runWithRpcRetry("fetch custodies", () =>
+    fetchCustodyAccounts(connection, Array.from(custodySet))
+  );
+  const ownerPositionMap = new Map();
+  for (const entry of ownerResults) {
+    ownerPositionMap.set(entry.owner.toBase58(), entry.positions);
+  }
+  console.log(
+    paint(
+      `Perps positions across ${targetWallets.length} wallet(s).`,
+      "label"
+    )
+  );
+  for (const wallet of targetWallets) {
+    const positions = ownerPositionMap.get(wallet.kp.publicKey.toBase58()) || [];
+    console.log(
+      paint(
+        `\nWallet ${wallet.name} (${wallet.kp.publicKey.toBase58()})`,
+        "info"
+      )
+    );
+    if (!positions.length) {
+      console.log(paint("  No open perps positions.", "muted"));
+      continue;
+    }
+    positions.sort((a, b) => {
+      const timeA = Number(bnToBigInt(a.account.updateTime));
+      const timeB = Number(bnToBigInt(b.account.updateTime));
+      return timeB - timeA;
+    });
+    for (const position of positions) {
+      const custodyKey = position.account.custody.toBase58();
+      const collateralKey = position.account.collateralCustody.toBase58();
+      const custodyInfo = custodyMap.get(custodyKey);
+      const collateralInfo = custodyMap.get(collateralKey);
+      const marketMint = custodyInfo?.account?.mint?.toBase58() || custodyKey;
+      const collateralMint =
+        collateralInfo?.account?.mint?.toBase58() || collateralKey;
+      const marketSymbol = symbolForMint(marketMint);
+      const collateralSymbol = symbolForMint(collateralMint);
+      const sideLabel = extractSideLabel(position.account.side).toUpperCase();
+      const sizeUsd = formatBaseUnits(bnToBigInt(position.account.sizeUsd), 6);
+      const collateralUsd = formatBaseUnits(
+        bnToBigInt(position.account.collateralUsd),
+        6
+      );
+      const entryPrice = formatBaseUnits(bnToBigInt(position.account.price), 6);
+      const marketDecimals = custodyInfo?.account?.decimals ?? 9;
+      const lockedAmount = formatBaseUnits(
+        bnToBigInt(position.account.lockedAmount),
+        marketDecimals
+      );
+      const realisedPnl = formatSignedBaseUnits(
+        bnToBigInt(position.account.realisedPnlUsd),
+        6
+      );
+      console.log(
+        paint(
+          `  Position ${position.publicKey.toBase58()} — ${marketSymbol} ${sideLabel}`,
+          sideLabel === "LONG" ? "success" : "warn"
+        )
+      );
+      console.log(
+        paint(
+          `    size: ${sizeUsd} USD | collateral: ${collateralUsd} USD`,
+          "muted"
+        )
+      );
+      console.log(
+        paint(
+          `    entry price: ${entryPrice} USD | locked: ${lockedAmount} ${marketSymbol}`,
+          "muted"
+        )
+      );
+      console.log(
+        paint(
+          `    realised PnL: ${realisedPnl} USD | updated: ${formatTimestampSeconds(position.account.updateTime)}`,
+          "muted"
+        )
+      );
+      console.log(
+        paint(
+          `    custody: ${marketSymbol} [${marketMint}] | collateral: ${collateralSymbol} [${collateralMint}]`,
+          "muted"
+        )
+      );
+    }
+  }
+}
+
+async function perpsFundingCommand(rawArgs) {
+  for (const token of rawArgs) {
+    if (!token) continue;
+    if (token === "--help" || token === "-h") {
+      printPerpsUsage();
+      return;
+    }
+    if (token.startsWith("--")) {
+      throw new Error(`perps funding: unknown flag ${token}`);
+    }
+  }
+  let connection = createRpcConnection("confirmed");
+  const getEndpoint = () =>
+    connection.__rpcEndpoint || connection._rpcEndpoint || DEFAULT_RPC_URL;
+  const rotateConnection = (reason) => {
+    const previous = getEndpoint();
+    if (typeof connection.__markUnhealthy === "function") {
+      connection.__markUnhealthy(reason);
+    }
+    connection = createRpcConnection("confirmed");
+    const next = getEndpoint();
+    console.warn(paint(`RPC ${previous} ${reason}; switched to ${next}`, "warn"));
+  };
+  const runWithRpcRetry = async (label, fn) => {
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          rotateConnection(`rate-limit ${label}`);
+          await delay(500);
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const { account: pool } = await runWithRpcRetry("fetch pool", () =>
+    fetchPoolAccount(connection)
+  );
+  const custodyPubkeys = pool.custodies.map((pk) => pk.toBase58());
+  const custodyMap = await runWithRpcRetry("fetch custodies", () =>
+    fetchCustodyAccounts(connection, custodyPubkeys)
+  );
+  console.log(
+    paint(
+      `Perps funding overview for ${custodyMap.size} custody account(s).`,
+      "label"
+    )
+  );
+  for (const entry of custodyMap.values()) {
+    const account = entry.account;
+    const mint = account.mint.toBase58();
+    const symbol = symbolForMint(mint);
+    const decimals = account.decimals;
+    const locked = formatBaseUnits(bnToBigInt(account.assets.locked), decimals);
+    const owned = formatBaseUnits(bnToBigInt(account.assets.owned), decimals);
+    const fees = formatBaseUnits(bnToBigInt(account.assets.feesReserves), decimals);
+    const hourlyDbps = bnToBigInt(account.fundingRateState.hourlyFundingDbps);
+    const hourlyPercent = convertDbpsToHourlyRate(hourlyDbps) * 100;
+    const dailyPercent = hourlyPercent * 24;
+    const annualPercent = dailyPercent * 365;
+    const increaseBps = Number(bnToBigInt(account.increasePositionBps));
+    const decreaseBps = Number(bnToBigInt(account.decreasePositionBps));
+    const targetRatioBps = Number(bnToBigInt(account.targetRatioBps));
+    console.log(paint(`\n${symbol} custody [${entry.pubkey.toBase58()}]`, "info"));
+    console.log(
+      paint(
+        `  mint: ${mint} (decimals ${decimals}) | stable: ${account.isStable ? "yes" : "no"}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  assets — owned: ${owned} ${symbol}, locked: ${locked} ${symbol}, fees: ${fees} ${symbol}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  target ratio: ${(targetRatioBps / 100).toFixed(2)}% | increase fee: ${(increaseBps / 100).toFixed(2)}% | decrease fee: ${(decreaseBps / 100).toFixed(2)}%`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  funding/hour: ${hourlyPercent.toFixed(6)}% (${Number(hourlyDbps) / 1000} dbps) | funding/day: ${dailyPercent.toFixed(4)}% | funding/year: ${annualPercent.toFixed(2)}%`,
+        "muted"
+      )
+    );
+  }
+}
+
+async function perpsIncreaseCommand(rawArgs) {
+  if (!rawArgs.length || rawArgs.includes("--help") || rawArgs.includes("-h")) {
+    printPerpsUsage();
+    return;
+  }
+  const opts = {
+    computePrice: 100000,
+    simulate: true,
+  };
+  const positional = [];
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const token = rawArgs[i];
+    if (!token) continue;
+    if (!token.startsWith("--")) {
+      positional.push(token);
+      continue;
+    }
+    const flag = token.toLowerCase();
+    const requireValue = () => {
+      if (i + 1 >= rawArgs.length) {
+        throw new Error(`perps increase ${flag} requires a value`);
+      }
+      return rawArgs[++i];
+    };
+    if (flag === "--custody") {
+      opts.custody = requireValue();
+    } else if (flag === "--collateral") {
+      opts.collateral = requireValue();
+    } else if (flag === "--input-mint") {
+      opts.inputMint = requireValue();
+    } else if (flag === "--side") {
+      opts.side = requireValue();
+    } else if (flag === "--size-usd" || flag === "--size") {
+      opts.sizeUsd = requireValue();
+    } else if (flag === "--collateral-amount" || flag === "--collateral-size") {
+      opts.collateralAmount = requireValue();
+    } else if (flag === "--price-slippage") {
+      opts.priceSlippage = requireValue();
+    } else if (flag === "--min-out" || flag === "--jupiter-min-out") {
+      opts.minOut = requireValue();
+    } else if (flag === "--counter") {
+      opts.counter = requireValue();
+    } else if (flag === "--compute-price") {
+      const value = parseInt(requireValue(), 10);
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("perps increase --compute-price must be a positive integer");
+      }
+      opts.computePrice = value;
+    } else if (flag === "--compute-units") {
+      const value = parseInt(requireValue(), 10);
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("perps increase --compute-units must be a positive integer");
+      }
+      opts.computeUnits = value;
+    } else if (flag === "--referral") {
+      opts.referral = requireValue();
+    } else if (flag === "--skip-sim" || flag === "--no-sim") {
+      opts.simulate = false;
+    } else if (flag === "--simulate") {
+      opts.simulate = true;
+    } else {
+      throw new Error(`perps increase: unknown flag ${token}`);
+    }
+  }
+  if (!positional.length) {
+    throw new Error(
+      "perps increase usage: perps increase <walletName> --custody <symbol|address> --collateral <symbol|address> --side <long|short> --size-usd <amount> --collateral-amount <amount> --price-slippage <amount>"
+    );
+  }
+  const walletName = positional[0];
+  const wallet = listWallets().find((entry) => entry.name === walletName);
+  if (!wallet) {
+    throw new Error(`perps increase: wallet ${walletName} not found`);
+  }
+  if (!opts.custody || !opts.collateral || !opts.side || !opts.sizeUsd || !opts.collateralAmount || !opts.priceSlippage) {
+    throw new Error(
+      "perps increase requires --custody, --collateral, --side, --size-usd, --collateral-amount, and --price-slippage"
+    );
+  }
+  const sideNormalized = opts.side.toLowerCase();
+  if (sideNormalized !== "long" && sideNormalized !== "short") {
+    throw new Error("perps increase --side must be 'long' or 'short'");
+  }
+  const custodyResolved = resolveCustodyIdentifier(opts.custody);
+  if (!custodyResolved) {
+    throw new Error(`perps increase: unknown custody ${opts.custody}`);
+  }
+  const collateralResolved = resolveCustodyIdentifier(opts.collateral);
+  if (!collateralResolved) {
+    throw new Error(`perps increase: unknown collateral ${opts.collateral}`);
+  }
+  let connection = createRpcConnection("confirmed");
+  const getEndpoint = () =>
+    connection.__rpcEndpoint || connection._rpcEndpoint || DEFAULT_RPC_URL;
+  const rotateConnection = (reason) => {
+    const previous = getEndpoint();
+    if (typeof connection.__markUnhealthy === "function") {
+      connection.__markUnhealthy(reason);
+    }
+    connection = createRpcConnection("confirmed");
+    const next = getEndpoint();
+    console.warn(paint(`RPC ${previous} ${reason}; switched to ${next}`, "warn"));
+  };
+  const runWithRpcRetry = async (label, fn) => {
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          rotateConnection(`rate-limit ${label}`);
+          await delay(500);
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const custodyMap = await runWithRpcRetry("fetch custodies", () =>
+    fetchCustodyAccounts(connection, [
+      custodyResolved.custody,
+      collateralResolved.custody,
+    ])
+  );
+  const custodyEntry = custodyMap.get(custodyResolved.custody.toBase58());
+  const collateralEntry = custodyMap.get(collateralResolved.custody.toBase58());
+  if (!custodyEntry || !collateralEntry) {
+    throw new Error("perps increase: failed to fetch custody metadata");
+  }
+  const custodyAccount = custodyEntry.account;
+  const collateralAccount = collateralEntry.account;
+  const collateralDecimals = collateralAccount.decimals;
+  const custodyDecimals = custodyAccount.decimals;
+  const sizeUsdDelta = decimalToBaseUnits(opts.sizeUsd, 6);
+  const collateralTokenDelta = decimalToBaseUnits(
+    opts.collateralAmount,
+    collateralDecimals
+  );
+  const priceSlippageDelta = decimalToBaseUnits(opts.priceSlippage, 6);
+  const jupiterMinOut = opts.minOut
+    ? decimalToBaseUnits(opts.minOut, custodyDecimals)
+    : null;
+  const counterValue = opts.counter ? BigInt(opts.counter) : null;
+  const referralPubkey = opts.referral
+    ? parsePublicKeyStrict(opts.referral, "referral public key")
+    : null;
+  const inputMintPk = opts.inputMint
+    ? parsePublicKeyStrict(opts.inputMint, "input mint")
+    : collateralAccount.mint;
+  const marketSymbol = symbolForMint(custodyAccount.mint.toBase58());
+  const collateralSymbol = symbolForMint(collateralAccount.mint.toBase58());
+  if (inputMintPk.equals(NATIVE_MINT)) {
+    await ensureWrappedSolBalance(connection, wallet, collateralTokenDelta);
+  } else {
+    await ensureAtaForMint(connection, wallet, inputMintPk, TOKEN_PROGRAM_ID, {
+      label: "perps",
+    });
+  }
+  const increaseResult = await buildIncreaseRequestInstruction({
+    connection,
+    owner: wallet.kp.publicKey,
+    custody: custodyResolved.custody,
+    collateralCustody: collateralResolved.custody,
+    inputMint: inputMintPk,
+    sizeUsdDelta,
+    collateralTokenDelta,
+    side: sideNormalized,
+    priceSlippage: priceSlippageDelta,
+    jupiterMinimumOut: jupiterMinOut,
+    counter: counterValue,
+    referral: referralPubkey,
+  });
+  const computePrice = opts.computePrice || 100000;
+  let computeUnits = opts.computeUnits || null;
+  const previewInstructions = [
+    ...buildComputeBudgetInstructions({ microLamports: computePrice }),
+    increaseResult.instruction,
+  ];
+  let simulation = null;
+  let simUnits = null;
+  if (opts.simulate) {
+    simulation = await runWithRpcRetry("simulate", () =>
+      simulatePerpsInstructions({
+        connection,
+        payer: wallet.kp.publicKey,
+        instructions: previewInstructions,
+      })
+    );
+    if (simulation.value?.err) {
+      console.error(
+        paint(
+          `Simulation failed: ${JSON.stringify(simulation.value.err)}`,
+          "error"
+        )
+      );
+      const logs = simulation.value?.logs || [];
+      logs.slice(0, 5).forEach((log) =>
+        console.error(paint(`  log: ${log}`, "error"))
+      );
+      throw new Error("perps increase simulation failed");
+    }
+    simUnits = simulation.value?.unitsConsumed || null;
+    if (simUnits) {
+      console.log(
+        paint(
+          `  simulation consumed ${simUnits} compute units`,
+          "muted"
+        )
+      );
+    }
+    const logs = simulation.value?.logs || [];
+    if (logs.length) {
+      logs.slice(0, 4).forEach((log) =>
+        console.log(paint(`    sim log: ${log}`, "muted"))
+      );
+      if (logs.length > 4) {
+        console.log(
+          paint(
+            `    sim logs truncated (${logs.length - 4} more)`,
+            "muted"
+          )
+        );
+      }
+    }
+  } else {
+    console.log(paint("  simulation skipped (--skip-sim)", "warn"));
+  }
+  const DEFAULT_COMPUTE_UNITS = 1_400_000;
+  if (!computeUnits) {
+    if (simUnits) {
+      computeUnits = Math.min(
+        DEFAULT_COMPUTE_UNITS,
+        Math.max(simUnits + 50_000, 600_000)
+      );
+    } else {
+      computeUnits = DEFAULT_COMPUTE_UNITS;
+    }
+  }
+  const finalInstructions = [
+    ...buildComputeBudgetInstructions({
+      units: computeUnits,
+      microLamports: computePrice,
+    }),
+    increaseResult.instruction,
+  ];
+  const previewBase64 = preparePreviewTransaction({
+    instructions: finalInstructions,
+    payer: wallet.kp.publicKey,
+  });
+  const createdAtas = await ensureAtasForTransaction({
+    connection,
+    wallet,
+    txBase64: previewBase64,
+    label: "perps increase request",
+  });
+  if (createdAtas > 0) {
+    console.log(
+      paint(
+        `  Prepared ${createdAtas} associated token account(s) for request`,
+        "muted"
+      )
+    );
+  }
+  const latestBlockhash = await runWithRpcRetry("getLatestBlockhash", () =>
+    connection.getLatestBlockhash()
+  );
+  const message = new TransactionMessage({
+    payerKey: wallet.kp.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    instructions: finalInstructions,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  tx.sign([wallet.kp]);
+  const rawTx = tx.serialize();
+  console.log(
+    paint(
+      `Submitting increase request on RPC ${getEndpoint()}`,
+      "info"
+    )
+  );
+  console.log(
+    paint(
+      `  market ${marketSymbol} | collateral ${collateralSymbol} | side ${sideNormalized}`,
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      `  size: ${formatBaseUnits(sizeUsdDelta, 6)} USD | collateral: ${formatBaseUnits(collateralTokenDelta, collateralDecimals)} ${collateralSymbol}`,
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      `  position: ${increaseResult.position.toBase58()} | request: ${increaseResult.positionRequest.toBase58()} (counter ${increaseResult.counter.toString()})`,
+      "muted"
+    )
+  );
+  const signature = await runWithRpcRetry("sendRawTransaction", () =>
+    connection.sendRawTransaction(rawTx)
+  );
+  console.log(paint(`  submitted: ${signature}`, "success"));
+  await runWithRpcRetry("confirmTransaction", () =>
+    connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      "confirmed"
+    )
+  );
+  console.log(paint("  confirmed", "success"));
+  try {
+    const program = getPerpsProgram(connection);
+    const requestAccount = await runWithRpcRetry("fetch request", () =>
+      program.account.positionRequest.fetch(increaseResult.positionRequest)
+    );
+    const requestChange = describeEnumVariant(requestAccount.requestChange);
+    const requestType = describeEnumVariant(requestAccount.requestType);
+    console.log(
+      paint(
+        `  keeper pending: request ${increaseResult.positionRequest.toBase58()} (${requestChange}/${requestType}) executed=${requestAccount.executed ? "yes" : "no"}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  request mint: ${requestAccount.mint.toBase58()} | update time: ${formatTimestampSeconds(requestAccount.updateTime)}`,
+        "muted"
+      )
+    );
+  } catch (err) {
+    console.warn(
+      paint(
+        `  warning: failed to fetch position request account — ${err.message || err}`,
+        "warn"
+      )
+    );
+  }
+}
+
+async function perpsDecreaseCommand(rawArgs) {
+  if (!rawArgs.length || rawArgs.includes("--help") || rawArgs.includes("-h")) {
+    printPerpsUsage();
+    return;
+  }
+  const opts = {
+    computePrice: 100000,
+    simulate: true,
+  };
+  const positional = [];
+  for (let i = 0; i < rawArgs.length; i += 1) {
+    const token = rawArgs[i];
+    if (!token) continue;
+    if (!token.startsWith("--")) {
+      positional.push(token);
+      continue;
+    }
+    const flag = token.toLowerCase();
+    const requireValue = () => {
+      if (i + 1 >= rawArgs.length) {
+        throw new Error(`perps decrease ${flag} requires a value`);
+      }
+      return rawArgs[++i];
+    };
+    if (flag === "--position") {
+      opts.position = requireValue();
+    } else if (flag === "--price-slippage") {
+      opts.priceSlippage = requireValue();
+    } else if (flag === "--collateral-usd") {
+      opts.collateralUsd = requireValue();
+    } else if (flag === "--size-usd" || flag === "--size") {
+      opts.sizeUsd = requireValue();
+    } else if (flag === "--desired" || flag === "--desired-mint") {
+      opts.desiredMint = requireValue();
+    } else if (flag === "--min-out" || flag === "--jupiter-min-out") {
+      opts.minOut = requireValue();
+    } else if (flag === "--entire") {
+      opts.entire = true;
+    } else if (flag === "--no-entire") {
+      opts.entire = false;
+    } else if (flag === "--counter") {
+      opts.counter = requireValue();
+    } else if (flag === "--compute-price") {
+      const value = parseInt(requireValue(), 10);
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("perps decrease --compute-price must be a positive integer");
+      }
+      opts.computePrice = value;
+    } else if (flag === "--compute-units") {
+      const value = parseInt(requireValue(), 10);
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("perps decrease --compute-units must be a positive integer");
+      }
+      opts.computeUnits = value;
+    } else if (flag === "--referral") {
+      opts.referral = requireValue();
+    } else if (flag === "--skip-sim" || flag === "--no-sim") {
+      opts.simulate = false;
+    } else if (flag === "--simulate") {
+      opts.simulate = true;
+    } else {
+      throw new Error(`perps decrease: unknown flag ${token}`);
+    }
+  }
+  if (!positional.length) {
+    throw new Error(
+      "perps decrease usage: perps decrease <walletName> --position <pubkey> --price-slippage <amount> [--collateral-usd <amount>] [--size-usd <amount>] [--desired <mint>] [--min-out <amount>] [--entire]"
+    );
+  }
+  const walletName = positional[0];
+  const wallet = listWallets().find((entry) => entry.name === walletName);
+  if (!wallet) {
+    throw new Error(`perps decrease: wallet ${walletName} not found`);
+  }
+  if (!opts.position || !opts.priceSlippage) {
+    throw new Error(
+      "perps decrease requires --position and --price-slippage"
+    );
+  }
+  if (!opts.entire && !opts.collateralUsd && !opts.sizeUsd) {
+    throw new Error(
+      "perps decrease requires --entire or at least one of --collateral-usd/--size-usd"
+    );
+  }
+  const positionPubkey = parsePublicKeyStrict(
+    opts.position,
+    "position public key"
+  );
+  let connection = createRpcConnection("confirmed");
+  const getEndpoint = () =>
+    connection.__rpcEndpoint || connection._rpcEndpoint || DEFAULT_RPC_URL;
+  const rotateConnection = (reason) => {
+    const previous = getEndpoint();
+    if (typeof connection.__markUnhealthy === "function") {
+      connection.__markUnhealthy(reason);
+    }
+    connection = createRpcConnection("confirmed");
+    const next = getEndpoint();
+    console.warn(paint(`RPC ${previous} ${reason}; switched to ${next}`, "warn"));
+  };
+  const runWithRpcRetry = async (label, fn) => {
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          rotateConnection(`rate-limit ${label}`);
+          await delay(500);
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const program = getPerpsProgram(connection);
+  const positionAccount = await runWithRpcRetry("fetch position", () =>
+    program.account.position.fetch(positionPubkey)
+  );
+  const custodyMap = await runWithRpcRetry("fetch custodies", () =>
+    fetchCustodyAccounts(connection, [
+      positionAccount.custody,
+      positionAccount.collateralCustody,
+    ])
+  );
+  const custodyEntry = custodyMap.get(positionAccount.custody.toBase58());
+  const collateralEntry = custodyMap.get(
+    positionAccount.collateralCustody.toBase58()
+  );
+  if (!custodyEntry || !collateralEntry) {
+    throw new Error("perps decrease: failed to load custody metadata");
+  }
+  const custodyAccount = custodyEntry.account;
+  const collateralAccount = collateralEntry.account;
+  const collateralDecimals = collateralAccount.decimals;
+  let desiredMintPk = opts.desiredMint
+    ? parsePublicKeyStrict(opts.desiredMint, "desired mint")
+    : collateralAccount.mint;
+  let desiredDecimals = collateralAccount.decimals;
+  if (opts.desiredMint) {
+    const desiredMintStr = desiredMintPk.toBase58();
+    const matchingCustody = Array.from(custodyMap.values()).find((entry) =>
+      entry.account.mint.toBase58() === desiredMintStr
+    );
+    if (matchingCustody) {
+      desiredDecimals = matchingCustody.account.decimals;
+    } else {
+      try {
+        const mintInfo = await runWithRpcRetry("getMint", () =>
+          getMint(connection, desiredMintPk)
+        );
+        if (typeof mintInfo?.decimals === "number") {
+          desiredDecimals = mintInfo.decimals;
+        }
+      } catch (err) {
+        console.warn(
+          paint(
+            `  warning: failed to fetch mint info for ${desiredMintStr}; using decimals ${desiredDecimals}`,
+            "warn"
+          )
+        );
+      }
+    }
+  }
+  const collateralUsdDelta = opts.collateralUsd
+    ? decimalToBaseUnits(opts.collateralUsd, 6)
+    : 0n;
+  const sizeUsdDelta = opts.sizeUsd
+    ? decimalToBaseUnits(opts.sizeUsd, 6)
+    : 0n;
+  const priceSlippageDelta = decimalToBaseUnits(opts.priceSlippage, 6);
+  const jupiterMinOut = opts.minOut
+    ? decimalToBaseUnits(opts.minOut, desiredDecimals)
+    : null;
+  const counterValue = opts.counter ? BigInt(opts.counter) : null;
+  const referralPubkey = opts.referral
+    ? parsePublicKeyStrict(opts.referral, "referral public key")
+    : null;
+  const marketSymbol = symbolForMint(custodyAccount.mint.toBase58());
+  const collateralSymbol = symbolForMint(collateralAccount.mint.toBase58());
+  const desiredSymbol = symbolForMint(desiredMintPk.toBase58());
+  await ensureAtaForMint(connection, wallet, desiredMintPk, TOKEN_PROGRAM_ID, {
+    label: "perps",
+  });
+  const decreaseResult = await buildDecreaseRequestInstruction({
+    connection,
+    owner: wallet.kp.publicKey,
+    position: positionPubkey,
+    desiredMint: desiredMintPk,
+    collateralUsdDelta,
+    sizeUsdDelta,
+    priceSlippage: priceSlippageDelta,
+    jupiterMinimumOut: jupiterMinOut,
+    entirePosition: opts.entire === true,
+    counter: counterValue,
+    referral: referralPubkey,
+  });
+  const computePrice = opts.computePrice || 100000;
+  let computeUnits = opts.computeUnits || null;
+  const previewInstructions = [
+    ...buildComputeBudgetInstructions({ microLamports: computePrice }),
+    decreaseResult.instruction,
+  ];
+  let simulation = null;
+  let simUnits = null;
+  if (opts.simulate) {
+    simulation = await runWithRpcRetry("simulate", () =>
+      simulatePerpsInstructions({
+        connection,
+        payer: wallet.kp.publicKey,
+        instructions: previewInstructions,
+      })
+    );
+    if (simulation.value?.err) {
+      console.error(
+        paint(
+          `Simulation failed: ${JSON.stringify(simulation.value.err)}`,
+          "error"
+        )
+      );
+      const logs = simulation.value?.logs || [];
+      logs.slice(0, 5).forEach((log) =>
+        console.error(paint(`  log: ${log}`, "error"))
+      );
+      throw new Error("perps decrease simulation failed");
+    }
+    simUnits = simulation.value?.unitsConsumed || null;
+    if (simUnits) {
+      console.log(
+        paint(
+          `  simulation consumed ${simUnits} compute units`,
+          "muted"
+        )
+      );
+    }
+    const logs = simulation.value?.logs || [];
+    if (logs.length) {
+      logs.slice(0, 4).forEach((log) =>
+        console.log(paint(`    sim log: ${log}`, "muted"))
+      );
+      if (logs.length > 4) {
+        console.log(
+          paint(
+            `    sim logs truncated (${logs.length - 4} more)`,
+            "muted"
+          )
+        );
+      }
+    }
+  } else {
+    console.log(paint("  simulation skipped (--skip-sim)", "warn"));
+  }
+  const DEFAULT_COMPUTE_UNITS = 1_400_000;
+  if (!computeUnits) {
+    if (simUnits) {
+      computeUnits = Math.min(
+        DEFAULT_COMPUTE_UNITS,
+        Math.max(simUnits + 50_000, 600_000)
+      );
+    } else {
+      computeUnits = DEFAULT_COMPUTE_UNITS;
+    }
+  }
+  const finalInstructions = [
+    ...buildComputeBudgetInstructions({
+      units: computeUnits,
+      microLamports: computePrice,
+    }),
+    decreaseResult.instruction,
+  ];
+  const previewBase64 = preparePreviewTransaction({
+    instructions: finalInstructions,
+    payer: wallet.kp.publicKey,
+  });
+  const createdAtas = await ensureAtasForTransaction({
+    connection,
+    wallet,
+    txBase64: previewBase64,
+    label: "perps decrease request",
+  });
+  if (createdAtas > 0) {
+    console.log(
+      paint(
+        `  Prepared ${createdAtas} associated token account(s) for request`,
+        "muted"
+      )
+    );
+  }
+  const latestBlockhash = await runWithRpcRetry("getLatestBlockhash", () =>
+    connection.getLatestBlockhash()
+  );
+  const message = new TransactionMessage({
+    payerKey: wallet.kp.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    instructions: finalInstructions,
+  }).compileToV0Message();
+  const tx = new VersionedTransaction(message);
+  tx.sign([wallet.kp]);
+  const rawTx = tx.serialize();
+  console.log(
+    paint(
+      `Submitting decrease request on RPC ${getEndpoint()}`,
+      "info"
+    )
+  );
+  console.log(
+    paint(
+      `  market ${marketSymbol} | collateral ${collateralSymbol} | desired ${desiredSymbol}`,
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      `  collateral delta: ${formatBaseUnits(collateralUsdDelta, 6)} USD | size delta: ${formatBaseUnits(sizeUsdDelta, 6)} USD | entire=${opts.entire ? "yes" : "no"}`,
+      "muted"
+    )
+  );
+  console.log(
+    paint(
+      `  request: ${decreaseResult.positionRequest.toBase58()} (counter ${decreaseResult.counter.toString()})`,
+      "muted"
+    )
+  );
+  const signature = await runWithRpcRetry("sendRawTransaction", () =>
+    connection.sendRawTransaction(rawTx)
+  );
+  console.log(paint(`  submitted: ${signature}`, "success"));
+  await runWithRpcRetry("confirmTransaction", () =>
+    connection.confirmTransaction(
+      {
+        signature,
+        blockhash: latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+      },
+      "confirmed"
+    )
+  );
+  console.log(paint("  confirmed", "success"));
+  try {
+    const programLatest = getPerpsProgram(connection);
+    const requestAccount = await runWithRpcRetry("fetch request", () =>
+      programLatest.account.positionRequest.fetch(
+        decreaseResult.positionRequest
+      )
+    );
+    const requestChange = describeEnumVariant(requestAccount.requestChange);
+    const requestType = describeEnumVariant(requestAccount.requestType);
+    console.log(
+      paint(
+        `  keeper pending: request ${decreaseResult.positionRequest.toBase58()} (${requestChange}/${requestType}) executed=${requestAccount.executed ? "yes" : "no"}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  request mint: ${requestAccount.mint.toBase58()} | update time: ${formatTimestampSeconds(requestAccount.updateTime)}`,
+        "muted"
+      )
+    );
+  } catch (err) {
+    console.warn(
+      paint(
+        `  warning: failed to fetch position request account — ${err.message || err}`,
+        "warn"
+      )
+    );
+  }
+}
+
 // CLI dispatch
 // ---- CLI entry point ----
 // Parses CLI arguments, performs RPC health checks, and dispatches to the
@@ -8175,7 +10248,7 @@ async function main() {
   const cmd = args[0];
   if (!cmd) {
     console.log(
-      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
+      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
     );
     process.exit(0);
   }
@@ -8208,9 +10281,39 @@ async function main() {
       await handleLendCommand(args.slice(1));
       process.exit(0);
     }
+    if (cmd === "perps") {
+      await handlePerpsCommand(args.slice(1));
+      process.exit(0);
+    }
     if (cmd === "wallet") {
       await handleWalletCommand(args.slice(1));
       process.exit(0);
+    }
+    if (cmd === "perps") {
+      const sub = args[1];
+      const subArgs = args.slice(2);
+      if (!sub || sub === "--help" || sub === "-h") {
+        printPerpsUsage();
+        process.exit(0);
+      }
+      const lowered = sub.toLowerCase();
+      if (lowered === "positions") {
+        await perpsPositionsCommand(subArgs);
+        process.exit(0);
+      }
+      if (lowered === "funding") {
+        await perpsFundingCommand(subArgs);
+        process.exit(0);
+      }
+      if (lowered === "increase" || lowered === "open") {
+        await perpsIncreaseCommand(subArgs);
+        process.exit(0);
+      }
+      if (lowered === "decrease" || lowered === "close") {
+        await perpsDecreaseCommand(subArgs);
+        process.exit(0);
+      }
+      throw new Error(`perps: unknown subcommand ${sub}`);
     }
     if (cmd === "launcher-bootstrap") {
       let forceRefresh = false;
@@ -8326,6 +10429,8 @@ async function main() {
       const fromName = args[1];
       if (!fromName) throw new Error("redistribute usage: redistribute <fromWalletFile>");
       await redistributeSol(fromName);
+    } else if (cmd === "campaign") {
+      await handleCampaignCommand(args.slice(1));
     } else if (cmd === "fund" || cmd === "send") {
       const [ , fromName, toName, lamStr ] = args;
       const lam = parseInt(lamStr);
@@ -8574,4 +10679,8 @@ async function main() {
   process.exit(0);
 }
 
-main();
+if (IS_MAIN_EXECUTION) {
+  main();
+}
+
+export { listWallets, ensureAtaForMint, ensureWrappedSolBalance };
