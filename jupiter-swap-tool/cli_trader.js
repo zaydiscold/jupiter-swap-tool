@@ -220,6 +220,8 @@ const DEFAULT_LEND_EARN_BASE =
   process.env.JUPITER_LEND_API_BASE || "https://lite-api.jup.ag/lend/v1/earn";
 const DEFAULT_LEND_BORROW_BASE =
   process.env.JUPITER_LEND_BORROW_API_BASE || "https://lite-api.jup.ag/lend/v1/borrow";
+const DEFAULT_PERPS_API_BASE =
+  process.env.JUPITER_PERPS_API_BASE || "https://lite-api.jup.ag/perps/v1";
 const FALLBACK_LEND_EARN_BASES = [
   "https://api.jup.ag/lend/v1/earn",
   "https://api.jup.ag/lend/earn",
@@ -230,36 +232,19 @@ const FALLBACK_LEND_BORROW_BASES = [
   "https://api.jup.ag/lend/borrow",
   "https://api.jup.ag/jup-integrators/borrow",
 ];
+const FALLBACK_PERPS_BASES = [
+  "https://api.jup.ag/perps/v1",
+  "https://api.jup.ag/perps",
+];
 const LEND_EARN_BASES = Array.from(
   new Set([DEFAULT_LEND_EARN_BASE, ...FALLBACK_LEND_EARN_BASES])
 );
 const LEND_BORROW_BASES = Array.from(
   new Set([DEFAULT_LEND_BORROW_BASE, ...FALLBACK_LEND_BORROW_BASES])
 );
-let lendEarnBaseIndex = 0;
-let lendBorrowBaseIndex = 0;
-function currentLendEarnBase() {
-  return LEND_EARN_BASES[Math.min(lendEarnBaseIndex, LEND_EARN_BASES.length - 1)];
-}
-function advanceLendEarnBase() {
-  if (lendEarnBaseIndex < LEND_EARN_BASES.length - 1) {
-    lendEarnBaseIndex += 1;
-    return true;
-  }
-  return false;
-}
-function currentLendBorrowBase() {
-  return LEND_BORROW_BASES[
-    Math.min(lendBorrowBaseIndex, LEND_BORROW_BASES.length - 1)
-  ];
-}
-function advanceLendBorrowBase() {
-  if (lendBorrowBaseIndex < LEND_BORROW_BASES.length - 1) {
-    lendBorrowBaseIndex += 1;
-    return true;
-  }
-  return false;
-}
+const PERPS_API_BASES = Array.from(
+  new Set([DEFAULT_PERPS_API_BASE, ...FALLBACK_PERPS_BASES])
+);
 const USE_ULTRA_ENGINE = JUPITER_SWAP_ENGINE !== "lite";
 const FALLBACK_TOKEN_CATALOG = [
   {
@@ -983,10 +968,21 @@ async function fetchPricesForMints(mints) {
   }
 }
 
-async function lendApiRequest({ base, path, method = "POST", body, query, headers } = {}) {
-  if (!base) throw new Error("Lend API base is not defined");
-  if (!path) throw new Error("Lend API path is required");
-  const url = new URL(path.startsWith("http") ? path : `${base.replace(/\/$/, "")}/${path.replace(/^\//, "")}`);
+async function namespaceApiRequest({
+  base,
+  path,
+  method = "POST",
+  body,
+  query,
+  headers,
+} = {}) {
+  if (!base) throw new Error("Namespace API base is not defined");
+  if (!path) throw new Error("Namespace API path is required");
+  const url = new URL(
+    path.startsWith("http")
+      ? path
+      : `${base.replace(/\/$/, "")}/${path.replace(/^\//, "")}`
+  );
   if (query && typeof query === "object") {
     for (const [key, value] of Object.entries(query)) {
       if (value === undefined || value === null) continue;
@@ -1038,38 +1034,73 @@ async function lendApiRequest({ base, path, method = "POST", body, query, header
   };
 }
 
-async function lendEarnRequest(options) {
-  while (true) {
-    const base = currentLendEarnBase();
-    const result = await lendApiRequest({ base, ...options });
-    if (result.status === 404 && advanceLendEarnBase()) {
-      console.warn(
-        paint(
-          `  Lend earn endpoint ${base} returned 404; switching to ${currentLendEarnBase()}`,
-          "warn"
-        )
-      );
-      continue;
-    }
-    return result;
+function createNamespaceClient({ name, bases }) {
+  const label = typeof name === "string" && name.trim().length > 0 ? name.trim() : "namespace";
+  const prettyLabel = label.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  const uniqueBases = Array.from(
+    new Set((Array.isArray(bases) ? bases : []).filter((base) => typeof base === "string" && base.trim().length > 0))
+  );
+  if (uniqueBases.length === 0) {
+    throw new Error(`No API bases configured for ${label}`);
   }
+  let index = 0;
+  function currentBase() {
+    return uniqueBases[Math.min(index, uniqueBases.length - 1)];
+  }
+  function advanceBase() {
+    if (index < uniqueBases.length - 1) {
+      index += 1;
+      return true;
+    }
+    return false;
+  }
+  async function request(options = {}) {
+    while (true) {
+      const base = currentBase();
+      const result = await namespaceApiRequest({ base, ...options });
+      if (result.status === 404 && advanceBase()) {
+        console.warn(
+          paint(
+            `  ${prettyLabel} endpoint ${base} returned 404; switching to ${currentBase()}`,
+            "warn"
+          )
+        );
+        continue;
+      }
+      return result;
+    }
+  }
+  return {
+    request,
+    currentBase,
+  };
+}
+
+const lendEarnClient = createNamespaceClient({
+  name: "lend earn",
+  bases: LEND_EARN_BASES,
+});
+
+const lendBorrowClient = createNamespaceClient({
+  name: "lend borrow",
+  bases: LEND_BORROW_BASES,
+});
+
+const perpsClient = createNamespaceClient({
+  name: "perps",
+  bases: PERPS_API_BASES,
+});
+
+async function lendEarnRequest(options) {
+  return lendEarnClient.request(options);
 }
 
 async function lendBorrowRequest(options) {
-  while (true) {
-    const base = currentLendBorrowBase();
-    const result = await lendApiRequest({ base, ...options });
-    if (result.status === 404 && advanceLendBorrowBase()) {
-      console.warn(
-        paint(
-          `  Lend borrow endpoint ${base} returned 404; switching to ${currentLendBorrowBase()}`,
-          "warn"
-        )
-      );
-      continue;
-    }
-    return result;
-  }
+  return lendBorrowClient.request(options);
+}
+
+async function perpsApiRequest(options) {
+  return perpsClient.request(options);
 }
 
 function parseCliOptions(tokens = []) {
@@ -1156,13 +1187,151 @@ function logLendApiResult(action, result) {
   }
 }
 
-function parseJsonOption(value, label) {
+function logPerpsApiResult(action, result) {
+  const tone = result.ok ? "success" : "warn";
+  console.log(
+    paint(
+      `[perps] ${action}: ${result.status} ${result.ok ? "ok" : "error"}`,
+      tone
+    )
+  );
+  console.log(paint(`  url: ${result.url}`, "muted"));
+  if (result.headers && result.headers["x-request-id"]) {
+    console.log(
+      paint(`  request-id: ${result.headers["x-request-id"]}`, "muted")
+    );
+  }
+  if (result.data !== null && result.data !== undefined) {
+    try {
+      const pretty = JSON.stringify(result.data, null, 2);
+      console.log(pretty);
+    } catch (_) {
+      console.log(result.data);
+    }
+  } else if (result.raw) {
+    console.log(result.raw);
+  }
+  if (!result.ok && result.status === 404) {
+    console.log(
+      paint(
+        "  Tip: set JUPITER_PERPS_API_BASE to a valid integrator endpoint if the default lite endpoint is unavailable.",
+        "warn"
+      )
+    );
+  }
+}
+
+function coerceCliBoolean(value) {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const trimmed = value.trim().toLowerCase();
+    if (!trimmed) return false;
+    return ["true", "t", "1", "yes", "y", "on"].includes(trimmed);
+  }
+  return false;
+}
+
+function normalizePerpsSide(value) {
+  if (!value) return "long";
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === "long" || normalized === "short") {
+    return normalized;
+  }
+  if (normalized === "buy") return "long";
+  if (normalized === "sell") return "short";
+  throw new Error(
+    `Unknown perps side '${value}'. Expected long/short or buy/sell.`
+  );
+}
+
+function formatPerpsMarketSnippet(entry) {
+  if (!entry || typeof entry !== "object") return "unknown market";
+  const symbol =
+    entry.symbol || entry.market || entry.name || entry.id || "unknown";
+  const pair =
+    entry.pair ||
+    (entry.baseAsset && entry.quoteAsset
+      ? `${entry.baseAsset}/${entry.quoteAsset}`
+      : null);
+  const leverage = entry.maxLeverage || entry.leverage || entry.maxLev;
+  const status = entry.status || entry.state;
+  const funding =
+    entry.fundingRate ?? entry.currentFundingRate ?? entry.funding ?? null;
+  const parts = [symbol];
+  if (pair) parts.push(pair);
+  if (leverage !== undefined && leverage !== null) {
+    parts.push(`max ${leverage}x`);
+  }
+  if (status) parts.push(status);
+  if (funding !== null && funding !== undefined) {
+    parts.push(`funding ${funding}`);
+  }
+  return parts.join(" · ");
+}
+
+function formatPerpsPositionSnippet(entry) {
+  if (!entry || typeof entry !== "object") return "position";
+  const market = entry.market || entry.symbol || entry.pair || entry.ticker;
+  const side = entry.side || entry.direction || entry.positionSide;
+  const size = entry.size ?? entry.baseSize ?? entry.positionSize;
+  const notional = entry.notional ?? entry.notionalUsd ?? entry.value;
+  const pnl =
+    entry.unrealizedPnl ?? entry.unrealizedPnL ?? entry.pnlUsd ?? entry.pnl;
+  const leverage = entry.leverage || entry.currentLeverage;
+  const pieces = [market || "?"];
+  if (side) pieces.push(String(side).toLowerCase());
+  if (size !== undefined && size !== null) pieces.push(`size ${size}`);
+  if (notional !== undefined && notional !== null)
+    pieces.push(`notional ${notional}`);
+  if (leverage !== undefined && leverage !== null)
+    pieces.push(`${leverage}x`);
+  if (pnl !== undefined && pnl !== null) pieces.push(`PnL ${pnl}`);
+  return pieces.join(" · ");
+}
+
+function parseJsonOption(value, label, { expectObject = false } = {}) {
   if (value === undefined || value === null) return {};
+  if (typeof value !== "string") {
+    throw new Error(`${label} must be provided as a JSON string`);
+  }
   try {
-    return JSON.parse(value);
+    const parsed = JSON.parse(value);
+    if (expectObject) {
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error(`${label} must be a JSON object`);
+      }
+    }
+    return parsed;
   } catch (err) {
+    if (err instanceof Error && err.message.startsWith(`${label} must`)) {
+      throw err;
+    }
     throw new Error(`${label} must be valid JSON (${err.message})`);
   }
+}
+
+function buildPerpsRequest(action, payload, options, { defaultPath, defaultMethod = "POST" } = {}) {
+  if (!defaultPath) {
+    throw new Error(`Perps ${action} handler is missing a default path`);
+  }
+  const normalizedOptions = options && typeof options === "object" ? options : {};
+  const methodRaw = normalizedOptions.method;
+  const method = methodRaw
+    ? String(methodRaw).trim().toUpperCase()
+    : (defaultMethod || "POST").toUpperCase();
+  const pathRaw = normalizedOptions.path;
+  const path = pathRaw ? String(pathRaw).trim() : defaultPath;
+  const request = { path, method };
+  if (method === "GET") {
+    if (payload !== undefined) {
+      request.query = payload;
+    }
+  } else if (payload !== undefined) {
+    request.body = payload;
+  }
+  return request;
 }
 
 function resolveWalletIdentifiers(inputs) {
@@ -1224,6 +1393,419 @@ async function handleLendCommand(args) {
     await handleLendBorrowCommand(rest);
   } else {
     throw new Error(`Unknown lend category '${categoryRaw}'. Expected 'earn' or 'borrow'.`);
+  }
+}
+
+async function handlePerpsCommand(args) {
+  const actionRaw = args[0];
+  if (!actionRaw) {
+    console.log(
+      "perps usage: perps <markets|positions|open|close> [...options]"
+    );
+    return;
+  }
+  console.log(
+    paint(
+      "Perpetual trading carries liquidation and leverage risk. Review every payload before broadcasting transactions.",
+      "warn"
+    )
+  );
+  const action = actionRaw.toLowerCase();
+  const rest = args.slice(1);
+  if (action === "markets" || action === "market") {
+    await handlePerpsMarkets(rest);
+    return;
+  }
+  if (action === "positions" || action === "position") {
+    await handlePerpsPositions(rest);
+    return;
+  }
+  if (action === "open") {
+    await handlePerpsOpen(rest);
+    return;
+  }
+  if (action === "close" || action === "exit") {
+    await handlePerpsClose(rest);
+    return;
+  }
+  throw new Error(
+    `Unknown perps action '${actionRaw}'. Expected 'markets', 'positions', 'open', or 'close'.`
+  );
+}
+
+async function handlePerpsMarkets(args) {
+  const { options, rest } = parseCliOptions(args);
+  const filters = {};
+  const search = options.query ?? options.search ?? rest[0];
+  const status = options.status ?? options.state;
+  const category = options.category ?? options.tag ?? options.type;
+  const limitRaw = options.limit ?? options.max;
+  if (search) filters.query = search;
+  if (status) filters.status = status;
+  if (category) filters.category = category;
+  if (limitRaw !== undefined) {
+    const parsedLimit = parseInt(limitRaw, 10);
+    if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      throw new Error("perps markets: --limit must be a positive integer");
+    }
+    filters.limit = parsedLimit;
+  }
+  const payload = Object.keys(filters).length > 0 ? filters : undefined;
+  const request = buildPerpsRequest(
+    "markets",
+    payload,
+    options,
+    { defaultPath: "markets", defaultMethod: "GET" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("markets", result);
+    const markets =
+      extractIterableFromLendData(result.data) ||
+      (Array.isArray(result.data?.markets) ? result.data.markets : []);
+    if (!Array.isArray(markets) || markets.length === 0) {
+      console.log(paint("  No markets returned for the selected filters.", "muted"));
+      return;
+    }
+    const sample = markets.slice(0, Math.min(markets.length, 8));
+    console.log(
+      paint(
+        `  Showing ${sample.length}/${markets.length} market(s).`,
+        "muted"
+      )
+    );
+    for (const entry of sample) {
+      console.log(paint(`    ${formatPerpsMarketSnippet(entry)}`, "info"));
+    }
+    if (markets.length > sample.length) {
+      console.log(
+        paint(`    ... ${markets.length - sample.length} more market(s).`, "muted")
+      );
+    }
+  } catch (err) {
+    console.error(paint("Perps markets request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsPositions(args) {
+  const { options, rest } = parseCliOptions(args);
+  let inputs = rest.slice();
+  if (inputs.length === 0 && typeof options.wallet === "string") {
+    inputs = [options.wallet];
+  }
+  if (inputs.length === 0 && typeof options.wallets === "string") {
+    inputs = options.wallets.split(",");
+  }
+  const wantsAll =
+    coerceCliBoolean(options.all) ||
+    coerceCliBoolean(options["all-wallets"]) ||
+    inputs.some((item) => typeof item === "string" && item.trim() === "*");
+  if (wantsAll) {
+    inputs = listWallets().map((wallet) => wallet.name);
+  }
+  if (!inputs || inputs.length === 0) {
+    throw new Error(
+      "perps positions usage: perps positions <walletName|pubkey>[,...] [--market <market>] [--all]"
+    );
+  }
+  const identifiers = resolveWalletIdentifiers(inputs);
+  const walletNameMap = new Map(
+    identifiers.map((entry) => [entry.pubkey, entry.name || entry.pubkey])
+  );
+  if (wantsAll) {
+    console.log(
+      paint(
+        `  Targeting all ${identifiers.length} wallet(s) for perps positions.`,
+        "muted"
+      )
+    );
+  } else if (identifiers.length > 1) {
+    console.log(
+      paint(
+        `  Targeting ${identifiers.length} wallet(s) for perps positions.`,
+        "muted"
+      )
+    );
+  }
+  const scopeNames = identifiers
+    .map((entry) => entry.name || entry.pubkey)
+    .filter(Boolean);
+  if (scopeNames.length > 0 && scopeNames.length <= 5) {
+    console.log(paint(`  Wallet scope: ${scopeNames.join(", ")}`, "muted"));
+  }
+  const payload = {
+    wallets: identifiers.map((entry) => entry.pubkey).join(","),
+  };
+  if (options.market) payload.market = options.market;
+  if (options.markets) payload.market = options.markets;
+  if (options.status) payload.status = options.status;
+  if (options.side) payload.side = options.side;
+  if (options.leverage) payload.leverage = options.leverage;
+  if (options.limit !== undefined) {
+    const parsedLimit = parseInt(options.limit, 10);
+    if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      throw new Error("perps positions: --limit must be a positive integer");
+    }
+    payload.limit = parsedLimit;
+  }
+  const request = buildPerpsRequest(
+    "positions",
+    payload,
+    options,
+    { defaultPath: "positions", defaultMethod: "GET" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("positions", result);
+    const entries = extractIterableFromLendData(result.data) || [];
+    if (!Array.isArray(entries) || entries.length === 0) {
+      console.log(
+        paint(
+          "  No perps positions found for the requested wallet scope.",
+          "muted"
+        )
+      );
+      return;
+    }
+    const owners = new Map();
+    for (const entry of entries) {
+      const ownerKey =
+        normalizeWalletIdentifier(entry.owner) ||
+        normalizeWalletIdentifier(entry.wallet) ||
+        normalizeWalletIdentifier(entry.account);
+      if (!ownerKey) continue;
+      const label = walletNameMap.get(ownerKey) || ownerKey;
+      owners.set(label, (owners.get(label) || 0) + 1);
+    }
+    console.log(
+      paint(
+        `  Found ${entries.length} open position(s) across ${owners.size || 1} wallet(s).`,
+        "info"
+      )
+    );
+    const sample = entries.slice(0, Math.min(entries.length, 6));
+    for (const entry of sample) {
+      const ownerKey =
+        normalizeWalletIdentifier(entry.owner) ||
+        normalizeWalletIdentifier(entry.wallet) ||
+        normalizeWalletIdentifier(entry.account);
+      const label = ownerKey && walletNameMap.get(ownerKey)
+        ? walletNameMap.get(ownerKey)
+        : ownerKey || "unknown";
+      console.log(
+        paint(`    ${label}: ${formatPerpsPositionSnippet(entry)}`, "muted")
+      );
+    }
+    if (entries.length > sample.length) {
+      console.log(
+        paint(`    ... ${entries.length - sample.length} more position(s).`, "muted")
+      );
+    }
+  } catch (err) {
+    console.error(paint("Perps positions request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsOpen(args) {
+  const { options, rest } = parseCliOptions(args);
+  let walletName = options.wallet || options.owner;
+  let market = options.market || options.pair;
+  let sideRaw = options.side || options.direction;
+  let sizeRaw = options.size ?? options.amount ?? options.notional;
+  let priceRaw = options.price ?? options.limit;
+  if (!walletName && rest.length > 0) walletName = rest[0];
+  if (!market && rest.length > 1) market = rest[1];
+  if (!sideRaw && rest.length > 2) sideRaw = rest[2];
+  if (sizeRaw === undefined && rest.length > 3) sizeRaw = rest[3];
+  if (priceRaw === undefined && rest.length > 4) priceRaw = rest[4];
+  walletName = walletName ? String(walletName).trim() : "";
+  market = market ? String(market).trim() : "";
+  const sizeValue = sizeRaw !== undefined ? String(sizeRaw).trim() : "";
+  const priceValue = priceRaw !== undefined ? String(priceRaw).trim() : "";
+  if (!walletName || !market || !sideRaw || !sizeValue) {
+    throw new Error(
+      "perps open usage: perps open <walletFile> <market> <side> <size> [price] [--options ...]"
+    );
+  }
+  const wallet = findWalletByName(walletName);
+  const payload = {
+    wallet: wallet.kp.publicKey.toBase58(),
+    market,
+    side: normalizePerpsSide(sideRaw),
+    size: sizeValue,
+  };
+  if (priceValue) payload.price = priceValue;
+  if (options.leverage !== undefined) payload.leverage = String(options.leverage).trim();
+  if (options.margin !== undefined) payload.margin = String(options.margin).trim();
+  if (options.intent !== undefined) payload.intent = String(options.intent).trim();
+  if (options.type !== undefined) payload.type = String(options.type).trim();
+  const tif = options["time-in-force"] || options.timeInForce || options.tif;
+  if (tif !== undefined) payload.timeInForce = String(tif).trim();
+  const clientOrderId =
+    options["client-order-id"] || options.clientOrderId || options.cid;
+  if (clientOrderId !== undefined) {
+    payload.clientOrderId = String(clientOrderId).trim();
+  }
+  if (options.triggerPrice !== undefined || options["trigger-price"] !== undefined) {
+    const triggerValue = options.triggerPrice ?? options["trigger-price"];
+    if (triggerValue !== undefined) {
+      payload.triggerPrice = String(triggerValue).trim();
+    }
+  }
+  if (options.takeProfit !== undefined || options["take-profit"] !== undefined) {
+    const tp = options.takeProfit ?? options["take-profit"];
+    if (tp !== undefined) payload.takeProfit = String(tp).trim();
+  }
+  if (options.stopLoss !== undefined || options["stop-loss"] !== undefined) {
+    const sl = options.stopLoss ?? options["stop-loss"];
+    if (sl !== undefined) payload.stopLoss = String(sl).trim();
+  }
+  if (coerceCliBoolean(options["reduce-only"]) || coerceCliBoolean(options.reduceOnly)) {
+    payload.reduceOnly = true;
+  }
+  if (coerceCliBoolean(options["post-only"]) || coerceCliBoolean(options.postOnly)) {
+    payload.postOnly = true;
+  }
+  if (
+    coerceCliBoolean(options["immediate-or-cancel"]) ||
+    coerceCliBoolean(options.immediateOrCancel) ||
+    coerceCliBoolean(options.ioc) ||
+    coerceCliBoolean(options.fok) ||
+    coerceCliBoolean(options.fillOrKill)
+  ) {
+    payload.immediateOrCancel = true;
+  }
+  if (options.extra !== undefined || options.body !== undefined || options.params !== undefined) {
+    const extra = parseJsonOption(
+      options.extra ?? options.body ?? options.params,
+      "perps open extra",
+      { expectObject: true }
+    );
+    if (extra && Object.keys(extra).length > 0) {
+      Object.assign(payload, extra);
+    }
+  }
+  console.log(
+    paint(
+      `  Wallet ${wallet.name}: ${wallet.kp.publicKey.toBase58()} — ${payload.side} ${payload.size} ${payload.market}`,
+      "muted"
+    )
+  );
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) || coerceCliBoolean(options.dryRun);
+  if (dryRun) {
+    console.log(paint("  Dry-run enabled — request payload:", "warn"));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  const request = buildPerpsRequest(
+    "open",
+    payload,
+    options,
+    { defaultPath: "orders/open", defaultMethod: "POST" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("open", result);
+  } catch (err) {
+    console.error(paint("Perps open request failed:", "error"), err.message);
+  }
+}
+
+async function handlePerpsClose(args) {
+  const { options, rest } = parseCliOptions(args);
+  let walletName = options.wallet || options.owner;
+  let market = options.market || options.pair;
+  let positionId = options.position || options["position-id"] || options.positionId;
+  let sizeRaw = options.size ?? options.amount ?? options.notional;
+  let priceRaw = options.price ?? options.limit;
+  if (!walletName && rest.length > 0) walletName = rest[0];
+  if (!market && rest.length > 1) market = rest[1];
+  if (!positionId && rest.length > 2) positionId = rest[2];
+  if (sizeRaw === undefined && rest.length > 3) sizeRaw = rest[3];
+  if (priceRaw === undefined && rest.length > 4) priceRaw = rest[4];
+  walletName = walletName ? String(walletName).trim() : "";
+  const marketValue = market ? String(market).trim() : "";
+  const positionValue = positionId ? String(positionId).trim() : "";
+  const sizeValue = sizeRaw !== undefined ? String(sizeRaw).trim() : "";
+  const priceValue = priceRaw !== undefined ? String(priceRaw).trim() : "";
+  if (!walletName) {
+    throw new Error(
+      "perps close usage: perps close <walletFile> [market] [positionId] [size]"
+    );
+  }
+  const wallet = findWalletByName(walletName);
+  const closeAll =
+    coerceCliBoolean(options["close-all"]) ||
+    coerceCliBoolean(options.closeAll) ||
+    coerceCliBoolean(options.all);
+  if (!marketValue && !positionValue && !closeAll) {
+    throw new Error(
+      "perps close requires --market or --position to identify the exposure."
+    );
+  }
+  const payload = {
+    wallet: wallet.kp.publicKey.toBase58(),
+  };
+  if (marketValue) payload.market = marketValue;
+  if (positionValue) payload.positionId = positionValue;
+  if (sizeValue) payload.size = sizeValue;
+  if (priceValue) payload.price = priceValue;
+  if (closeAll) payload.closeAll = true;
+  if (coerceCliBoolean(options["reduce-only"]) || coerceCliBoolean(options.reduceOnly)) {
+    payload.reduceOnly = true;
+  }
+  if (options.intent !== undefined) payload.intent = String(options.intent).trim();
+  if (options.type !== undefined) payload.type = String(options.type).trim();
+  const tif = options["time-in-force"] || options.timeInForce || options.tif;
+  if (tif !== undefined) payload.timeInForce = String(tif).trim();
+  const clientOrderId =
+    options["client-order-id"] || options.clientOrderId || options.cid;
+  if (clientOrderId !== undefined) {
+    payload.clientOrderId = String(clientOrderId).trim();
+  }
+  if (options.extra !== undefined || options.body !== undefined || options.params !== undefined) {
+    const extra = parseJsonOption(
+      options.extra ?? options.body ?? options.params,
+      "perps close extra",
+      { expectObject: true }
+    );
+    if (extra && Object.keys(extra).length > 0) {
+      Object.assign(payload, extra);
+    }
+  }
+  const targetLabel =
+    payload.market || payload.positionId || marketValue || positionValue || "?";
+  console.log(
+    paint(
+      `  Wallet ${wallet.name}: ${wallet.kp.publicKey.toBase58()} — closing ${targetLabel}`,
+      "muted"
+    )
+  );
+  if (payload.size) {
+    console.log(paint(`  Requested size: ${payload.size}`, "muted"));
+  }
+  if (payload.closeAll) {
+    console.log(paint("  closeAll=true", "muted"));
+  }
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) || coerceCliBoolean(options.dryRun);
+  if (dryRun) {
+    console.log(paint("  Dry-run enabled — request payload:", "warn"));
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  const request = buildPerpsRequest(
+    "close",
+    payload,
+    options,
+    { defaultPath: "positions/close", defaultMethod: "POST" }
+  );
+  try {
+    const result = await perpsApiRequest(request);
+    logPerpsApiResult("close", result);
+  } catch (err) {
+    console.error(paint("Perps close request failed:", "error"), err.message);
   }
 }
 
@@ -8157,7 +8739,7 @@ async function main() {
   const cmd = args[0];
   if (!cmd) {
     console.log(
-      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
+      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
     );
     process.exit(0);
   }
@@ -8188,6 +8770,10 @@ async function main() {
     }
     if (cmd === "lend") {
       await handleLendCommand(args.slice(1));
+      process.exit(0);
+    }
+    if (cmd === "perps") {
+      await handlePerpsCommand(args.slice(1));
       process.exit(0);
     }
     if (cmd === "wallet") {
