@@ -101,15 +101,63 @@ function resolveWallet(options, fallbackWallet) {
         /* ignore mutations on frozen wallet objects */
       }
 
-      const normalizedWallet = Object.create(
-        Object.getPrototypeOf(providedWallet) || Object.prototype
-      );
-      Object.assign(normalizedWallet, providedWallet);
-      Object.defineProperty(normalizedWallet, "publicKey", {
-        value: normalizedPublicKey,
-        configurable: true,
-        enumerable: true,
-        writable: true,
+      const normalizedWallet = new Proxy(providedWallet, {
+        get(target, prop, receiver) {
+          if (prop === "publicKey") {
+            try {
+              const raw = Reflect.get(target, prop, target);
+              return coercePublicKey(raw ?? target);
+            } catch (err) {
+              return normalizedPublicKey;
+            }
+          }
+          const value = Reflect.get(target, prop, target);
+          if (typeof value === "function") {
+            return value.bind(target);
+          }
+          return value;
+        },
+        set(target, prop, value, receiver) {
+          if (prop === "publicKey") {
+            try {
+              return Reflect.set(target, prop, value, target);
+            } catch (err) {
+              return false;
+            }
+          }
+          return Reflect.set(target, prop, value, target);
+        },
+        ownKeys(target) {
+          const keys = Reflect.ownKeys(target);
+          if (!keys.includes("publicKey")) {
+            keys.push("publicKey");
+          }
+          return keys;
+        },
+        getOwnPropertyDescriptor(target, prop) {
+          if (prop === "publicKey") {
+            return {
+              configurable: true,
+              enumerable: true,
+              get() {
+                try {
+                  const raw = Reflect.get(target, prop, target);
+                  return coercePublicKey(raw ?? target);
+                } catch (err) {
+                  return normalizedPublicKey;
+                }
+              },
+              set(value) {
+                try {
+                  Reflect.set(target, prop, value, target);
+                } catch (err) {
+                  /* ignore setter failures */
+                }
+              },
+            };
+          }
+          return Object.getOwnPropertyDescriptor(target, prop);
+        },
       });
       return normalizedWallet;
     }
