@@ -1,0 +1,114 @@
+{
+  "generatedAt": "2025-10-22T01:05:04.475Z",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "perpetualsProgramId": "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu",
+  "perpetualsAccount": "H4ND9aYttUVLFmNypZqLjZ52FYiGvdEB45GmwNoKEjTj",
+  "markets": [
+    {
+      "pool": "5BUwFW4nRbftYTDMbgxykoFWqWHPzahFSNAaaaJtVKsq",
+      "name": "Pool",
+      "custodies": [
+        {
+          "address": "7xS2gz2bTp3fwCC7knJvUWTEU9Tycczu6VhJYKgi1wdz",
+          "mint": "So11111111111111111111111111111111111111112",
+          "tokenAccount": "BUvduFTd2sWFagCunBPLupG8fBTJqweLw9DuhruNFSCm",
+          "decimals": 9,
+          "isStable": false,
+          "targetRatioBps": "4700",
+          "dovesOracle": "39cWjvHrpHNz2SbXv6ME4NPhqBDBd4KsjUYv5JkHEAJU",
+          "dovesAgOracle": "FYq2BWQ1V5P1WFBqr3qB2Kb5yHVvSv7upzKodgQE5zXh",
+          "oracle": {
+            "type": "pyth",
+            "account": "7UVimffxr9ow1uXYxsr4LHAcV58mLzhmwaeKvJ1pjLiE",
+            "buffer": "50",
+            "maxPriceAgeSec": 5
+          },
+          "pricing": {
+            "maxPriceErrorBps": null,
+            "maxPriceAgeSec": null
+          }
+        },
+        {
+          "address": "AQCGyheWPLeo6Qp9WpYS9m3Qj479t7R636N9ey1rEjEn",
+          "mint": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
+          "tokenAccount": "Bgarxg65CEjN3kosjCW5Du3wEqvV3dpCGDR3a2HRQsYJ",
+          "decimals": 8,
+          "isStable": false,
+          "targetRatioBps": "800",
+          "dovesOracle": "5URYohbPy32nxK1t3jAHVNfdWY2xTubHiFvLrE3VhXEp",
+          "dovesAgOracle": "AFZnHPzy4mvVCffrVwhewHbFc93uTHvDSFrVH7GtfXF1",
+          "oracle": {
+            "type": "pyth",
+            "account": "42amVS4KgzR9rA28tkVYqVXjq9Qa8dcZQMbH5EYFX6XC",
+            "buffer": "50",
+            "maxPriceAgeSec": 5
+          },
+          "pricing": {
+            "maxPriceErrorBps": null,
+            "maxPriceAgeSec": null
+          }
+        },
+        {
+          "address": "5Pv3gM9JrFFH883SWAhvJC9RPYmo8UNxuFtv5bMMALkm",
+          "mint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
+          "tokenAccount": "FgpXg2J3TzSs7w3WGYYE7aWePdrxBVLCXSxmAKnCZNtZ",
+          "decimals": 8,
+          "isStable": false,
+          "targetRatioBps": "1300",
+          "dovesOracle": "4HBbPx9QJdjJ7GUe6bsiJjGybvfpDhQMMPXP1UEa7VT5",
+          "dovesAgOracle": "hUqAT1KQ7eW1i6Csp9CXYtpPfSAvi835V7wKi5fRfmC",
+          "oracle": {
+            "type": "pyth",
+            "account": "4cSM2e6rvbGQUFiJbqytoVMi5GgghSMr8LwVrT9VPSPo",
+            "buffer": "50",
+            "maxPriceAgeSec": 5
+          },
+          "pricing": {
+            "maxPriceErrorBps": null,
+            "maxPriceAgeSec": null
+          }
+        },
+        {
+          "address": "G18jKKXQwBbrHeiK3C9MRXhkHsLHf7XgCSisykV46EZa",
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "tokenAccount": "WzWUoCmtVv7eqAbU3BfKPU3fhLP6CXR8NCJH78UK9VS",
+          "decimals": 6,
+          "isStable": true,
+          "targetRatioBps": "3200",
+          "dovesOracle": "A28T5pKtscnhDo6C1Sz786Tup88aTjt8uyKewjVvPrGk",
+          "dovesAgOracle": "6Jp2xZUTWdDD2ZyUPRzeMdc6AFQ5K3pFgZxk2EijfjnM",
+          "oracle": {
+            "type": "pyth",
+            "account": "Dpw1EAVrSB1ibxiDQyTAW6Zip3J4Btk2x4SgApQCeFbX",
+            "buffer": "50",
+            "maxPriceAgeSec": 5
+          },
+          "pricing": {
+            "maxPriceErrorBps": null,
+            "maxPriceAgeSec": null
+          }
+        },
+        {
+          "address": "4vkNeXiYEUizLdrpdPS1eC2mccyM4NUPRtERrk6ZETkk",
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "tokenAccount": "Gex24YznvguMad1mBzTQ7a64U1CJy59gvsStQmNnnwAd",
+          "decimals": 6,
+          "isStable": true,
+          "targetRatioBps": "0",
+          "dovesOracle": "AGW7q2a3WxCzh5TB2Q6yNde1Nf41g3HLaaXdybz7cbBU",
+          "dovesAgOracle": "Fgc93D641F8N2d1xLjQ4jmShuD3GE3BsCXA56KBQbF5u",
+          "oracle": {
+            "type": "pyth",
+            "account": "HT2PLQBcG5EiCcNSaMHAjSgd9F98ecpATbk4Sk5oYuM",
+            "buffer": "50",
+            "maxPriceAgeSec": 5
+          },
+          "pricing": {
+            "maxPriceErrorBps": null,
+            "maxPriceAgeSec": null
+          }
+        }
+      ]
+    }
+  ]
+}
