@@ -39,7 +39,10 @@ const SUPPORTED_ACCOUNT_NAMES = new Set([
 ]);
 function normalizeIdlValue(value) {
   if (typeof value === "string") {
-    return value === "publicKey" ? "pubkey" : value;
+    if (value === "pubkey") {
+      return "publicKey";
+    }
+    return value;
   }
   if (Array.isArray(value)) {
     return value.map((item) => normalizeIdlValue(item));
@@ -50,11 +53,11 @@ function normalizeIdlValue(value) {
       normalizeIdlValue(val),
     ]);
     const normalized = Object.fromEntries(entries);
-    if (
-      Object.prototype.hasOwnProperty.call(normalized, "defined") &&
-      typeof normalized.defined === "string"
-    ) {
-      normalized.defined = { name: normalized.defined };
+    if (Object.prototype.hasOwnProperty.call(normalized, "defined")) {
+      const definedVal = normalized.defined;
+      if (definedVal && typeof definedVal === "object" && "name" in definedVal) {
+        normalized.defined = definedVal.name;
+      }
     }
     return normalized;
   }

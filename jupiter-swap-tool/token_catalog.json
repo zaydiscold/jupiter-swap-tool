@@ -63,11 +63,11 @@
     "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
   },
   {
-    "symbol": "PFP",
-    "mint": "5TfqNKZbn9AnNtzq8bbkyhKgcPGTfNDc9wNzFrTBpump",
+    "symbol": "URANUS",
+    "mint": "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     "decimals": 6,
     "program": "spl",
-    "tags": ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"]
+    "tags": ["default-sweep", "long-circle", "fanout"]
   },
   {
     "symbol": "wBTC",

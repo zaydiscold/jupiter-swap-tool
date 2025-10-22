@@ -45,6 +45,13 @@ import {
   KNOWN_CUSTODIES,
   getPerpsProgram,
 } from "./perps.js";
+import {
+  instantiateCampaignForWallets,
+  executeTimedPlansAcrossWallets,
+  registerHooks as registerCampaignHooks,
+  truncatePlanToBudget,
+  CAMPAIGNS,
+} from "./chains/solana/campaigns_runtime.js";
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
@@ -110,7 +117,6 @@ const PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS =
 const PERPS_MARKET_CACHE_PATH =
   process.env.PERPS_MARKET_CACHE_PATH ||
   path.resolve(SCRIPT_DIR, "perps/market_cache.json");
-const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RPC_LIST_FILE =
   process.env.RPC_LIST_FILE || path.resolve(SCRIPT_DIR, "rpc_endpoints.txt");
 let RPC_ENDPOINTS_FILE_USED = null;
@@ -4333,6 +4339,375 @@ function listWallets() {
     return a.name.localeCompare(b.name);
   });
   return wallets;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Campaign runtime glue                                                      */
+/* -------------------------------------------------------------------------- */
+
+const campaignWalletRegistry = new Map();
+let campaignHooksRegistered = false;
+let campaignDryRun = false;
+
+function getCampaignWallet(pubkeyBase58) {
+  if (!campaignWalletRegistry.has(pubkeyBase58)) {
+    throw new Error(`campaign wallet ${pubkeyBase58} not registered`);
+  }
+  return campaignWalletRegistry.get(pubkeyBase58);
+}
+
+function ensureCampaignHooksRegistered() {
+  if (campaignHooksRegistered) return;
+  registerCampaignHooks({
+    getSolLamports: async (pubkeyBase58) => {
+      const connection = createRpcConnection("confirmed");
+      try {
+        const lamports = await connection.getBalance(new PublicKey(pubkeyBase58));
+        return BigInt(lamports);
+      } finally {
+        try {
+          connection?.destroy?.();
+        } catch (_) {}
+      }
+    },
+    jupiterLiteSwap: async (pubkeyBase58, inMint, outMint, lamports) => {
+      return performCampaignSwap({
+        pubkeyBase58,
+        inMint,
+        outMint,
+        amountLamports: lamports,
+      });
+    },
+    findLargestSplHolding: async (pubkeyBase58) => {
+      return campaignFindLargestHolding(pubkeyBase58);
+    },
+    splToLamports: async (pubkeyBase58, mint, uiAmount) => {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
+    },
+  });
+  campaignHooksRegistered = true;
+}
+
+async function ensureCampaignAta(connection, ownerKeypair, mint, programId) {
+  const mintPubkey = new PublicKey(mint);
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    ownerKeypair.publicKey,
+    false,
+    programId || TOKEN_PROGRAM_ID,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const info = await connection.getAccountInfo(ata);
+  if (info) {
+    return { ata, created: false };
+  }
+  const transaction = new Transaction().add(
+    createAssociatedTokenAccountInstruction(
+      ownerKeypair.publicKey,
+      ata,
+      ownerKeypair.publicKey,
+      mintPubkey,
+      programId || TOKEN_PROGRAM_ID,
+      ASSOCIATED_TOKEN_PROGRAM_ID
+    )
+  );
+  transaction.feePayer = ownerKeypair.publicKey;
+  const { blockhash } = await connection.getLatestBlockhash();
+  transaction.recentBlockhash = blockhash;
+  transaction.sign(ownerKeypair);
+  const raw = transaction.serialize();
+  const signature = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(signature, "confirmed");
+  return { ata, created: true };
+}
+
+async function performCampaignSwap({ pubkeyBase58, inMint, outMint, amountLamports }) {
+  const entry = getCampaignWallet(pubkeyBase58);
+  const wallet = entry.wallet;
+  const lamportsBig = BigInt(amountLamports ?? 0);
+  if (lamportsBig <= 0n) {
+    throw new Error("campaign swap requires positive lamports");
+  }
+  const userPubkey = wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  const metadataConnection = createRpcConnection("confirmed");
+  let inputMeta = null;
+  let outputMeta = null;
+  try {
+    if (!SOL_LIKE_MINTS.has(inMint)) {
+      inputMeta = await resolveMintMetadata(metadataConnection, inMint);
+    }
+    if (!SOL_LIKE_MINTS.has(outMint)) {
+      outputMeta = await resolveMintMetadata(metadataConnection, outMint);
+      await ensureCampaignAta(connection, wallet.kp, outMint, outputMeta.programId);
+    }
+  } catch (err) {
+    throw new Error(`metadata prep failed: ${err?.message || err}`);
+  }
+
+  let quote;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      quote = await fetchLegacyQuote(
+        inMint,
+        outMint,
+        lamportsBig,
+        userPubkey.toBase58(),
+        SLIPPAGE_BPS
+      );
+      break;
+    } catch (err) {
+      const message = err?.message || String(err || "");
+      if (/rate limit/i.test(message) && attempt < 3) {
+        await delay(500 * (attempt + 1));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (!quote) {
+    throw new Error("quote unavailable after retries");
+  }
+
+  if (campaignDryRun) {
+    const outAmountLamports = BigInt(quote.outAmount || quote.outAmountWithSlippage || 0);
+    const inputDecimals = inputMeta?.decimals ?? 9;
+    const outputDecimals = outputMeta?.decimals ?? (SOL_LIKE_MINTS.has(outMint) ? 9 : 6);
+    console.log(
+      paint(
+        `[dry-run] ${entry.name}: ${symbolForMint(inMint)}→${symbolForMint(outMint)} amount=${formatBaseUnits(lamportsBig, inputDecimals)} expectedOut=${formatBaseUnits(outAmountLamports, outputDecimals)}`,
+        "muted"
+      )
+    );
+    return `dry-run-${Date.now()}`;
+  }
+
+  const swapPayload = await fetchLegacySwap(
+    quote,
+    userPubkey.toBase58(),
+    SOL_LIKE_MINTS.has(inMint) || SOL_LIKE_MINTS.has(outMint)
+  );
+  const txBuffer = Buffer.from(swapPayload.swapTransaction, "base64");
+  const vtx = VersionedTransaction.deserialize(txBuffer);
+  vtx.sign([wallet.kp]);
+  const raw = vtx.serialize();
+  const signature = await connection.sendRawTransaction(raw);
+  await connection.confirmTransaction(signature, "confirmed");
+  return signature;
+}
+
+async function campaignFindLargestHolding(pubkeyBase58) {
+  const entry = getCampaignWallet(pubkeyBase58);
+  const owner = entry.wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  try {
+    const parsed = await getAllParsedTokenAccounts(connection, owner);
+    let best = null;
+    for (const { account } of parsed) {
+      const info = account?.data?.parsed?.info;
+      if (!info) continue;
+      const mint = info.mint;
+      if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+      const rawAmount = info.tokenAmount?.amount ?? "0";
+      let amount;
+      try {
+        amount = BigInt(rawAmount);
+      } catch (_) {
+        amount = 0n;
+      }
+      if (amount <= 0n) continue;
+      if (!best || amount > best.amount) {
+        best = {
+          mint,
+          amount,
+          uiAmount: rawAmount,
+          decimals: info.tokenAmount?.decimals ?? 0,
+        };
+      }
+    }
+    if (!best) return null;
+    return { mint: best.mint, uiAmount: best.uiAmount, decimals: best.decimals };
+  } finally {
+    try {
+      connection?.destroy?.();
+    } catch (_) {}
+  }
+}
+
+async function campaignSplToLamports(pubkeyBase58, mint, uiAmount) {
+  if (typeof uiAmount === "bigint") {
+    return uiAmount;
+  }
+  if (typeof uiAmount === "number") {
+    const connection = createRpcConnection("confirmed");
+    try {
+      const meta = await resolveMintMetadata(connection, mint);
+      const decimals = meta?.decimals ?? 0;
+      return BigInt(Math.floor(uiAmount * 10 ** decimals));
+    } finally {
+      try {
+        connection?.destroy?.();
+      } catch (_) {}
+    }
+  }
+  if (typeof uiAmount === "string") {
+    if (/^\d+$/.test(uiAmount)) {
+      return BigInt(uiAmount);
+    }
+    const parsed = Number(uiAmount);
+    if (!Number.isNaN(parsed)) {
+      const connection = createRpcConnection("confirmed");
+      try {
+        const meta = await resolveMintMetadata(connection, mint);
+        const decimals = meta?.decimals ?? 0;
+        return BigInt(Math.floor(parsed * 10 ** decimals));
+      } finally {
+        try {
+          connection?.destroy?.();
+        } catch (_) {}
+      }
+    }
+  }
+  if (uiAmount && typeof uiAmount === "object") {
+    if (typeof uiAmount.amount === "string" && /^\d+$/.test(uiAmount.amount)) {
+      return BigInt(uiAmount.amount);
+    }
+    if (typeof uiAmount.uiAmount === "number") {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount.uiAmount);
+    }
+    if (typeof uiAmount.uiAmountString === "string") {
+      return campaignSplToLamports(pubkeyBase58, mint, uiAmount.uiAmountString);
+    }
+  }
+  return 0n;
+}
+
+function filterWalletsByBatch(wallets, batchRaw) {
+  const normalized = (batchRaw || "all").toString().trim().toLowerCase();
+  if (normalized === "all" || normalized.length === 0) {
+    return wallets;
+  }
+  if (normalized === "1" || normalized === "2") {
+    const target = parseInt(normalized, 10) - 1;
+    return wallets.filter((_, index) => index % 2 === target);
+  }
+  throw new Error("campaign --batch must be 1, 2, or all");
+}
+
+async function handleCampaignCommand(rawArgs) {
+  const { options, rest } = parseCliOptions(rawArgs);
+  const [campaignKeyRaw, durationKeyRaw] = rest;
+  if (!campaignKeyRaw || !durationKeyRaw) {
+    throw new Error(
+      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
+    );
+  }
+  const campaignKey = campaignKeyRaw.toLowerCase();
+  const durationKey = durationKeyRaw.toLowerCase();
+  const preset = CAMPAIGNS[campaignKey];
+  if (!preset) {
+    throw new Error(`campaign ${campaignKeyRaw} not recognised`);
+  }
+  if (!preset.durations[durationKey]) {
+    throw new Error(`campaign duration ${durationKeyRaw} not supported`);
+  }
+
+  let wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found in keypairs directory.", "warn"));
+    return;
+  }
+
+  const batchRaw = options.batch || options.Batch || options.BATCH;
+  wallets = filterWalletsByBatch(wallets, batchRaw);
+  wallets = wallets.filter((wallet) => !isWalletDisabledByGuard(wallet.name));
+  if (wallets.length === 0) {
+    console.log(paint("No eligible wallets after filtering/batch selection.", "warn"));
+    return;
+  }
+
+  const dryRun =
+    coerceCliBoolean(options["dry-run"]) ||
+    coerceCliBoolean(options.dryRun) ||
+    coerceCliBoolean(options.dryrun);
+
+  campaignWalletRegistry.clear();
+  for (const wallet of wallets) {
+    const pubkey = wallet.kp.publicKey.toBase58();
+    campaignWalletRegistry.set(pubkey, { wallet, name: wallet.name });
+  }
+  ensureCampaignHooksRegistered();
+
+  const pubkeys = wallets.map((wallet) => wallet.kp.publicKey.toBase58());
+  const { plansByWallet } = instantiateCampaignForWallets({
+    campaignKey,
+    durationKey,
+    walletPubkeys: pubkeys,
+  });
+
+  const connection = createRpcConnection("confirmed");
+  const preparedPlans = new Map();
+  for (const wallet of wallets) {
+    const pubkey = wallet.kp.publicKey.toBase58();
+    const plan = plansByWallet.get(pubkey);
+    if (!plan) continue;
+    let balance = 0n;
+    try {
+      balance = BigInt(await connection.getBalance(wallet.kp.publicKey));
+    } catch (err) {
+      console.warn(
+        paint(
+          `  Failed to fetch balance for ${wallet.name}: ${err?.message || err}`,
+          "warn"
+        )
+      );
+      continue;
+    }
+    const truncated = truncatePlanToBudget(plan.schedule, balance);
+    if (truncated.length === 0) {
+      console.log(
+        paint(
+          `  Skipping ${wallet.name}: insufficient SOL after reserve (balance ${formatBaseUnits(balance, 9)} SOL).`,
+          "warn"
+        )
+      );
+      continue;
+    }
+    preparedPlans.set(pubkey, { schedule: truncated, rng: plan.rng });
+  }
+
+  if (preparedPlans.size === 0) {
+    console.log(paint("No wallets have sufficient balance to participate.", "warn"));
+    return;
+  }
+
+  campaignDryRun = dryRun;
+  const swapCounts = [];
+  for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+    const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
+    const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
+    const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+    swapCounts.push({ label, swapSteps, checkpointSteps });
+  }
+
+  console.log(
+    paint(
+      `Starting campaign ${campaignKey} (${durationKey}) across ${preparedPlans.size} wallet(s) — dryRun=${dryRun ? "yes" : "no"}.`,
+      "info"
+    )
+  );
+  swapCounts.forEach(({ label, swapSteps, checkpointSteps }) => {
+    console.log(
+      paint(
+        `  ${label}: ${swapSteps} swap(s) + ${checkpointSteps} checkpoint(s) scheduled.`,
+        "muted"
+      )
+    );
+  });
+
+  await executeTimedPlansAcrossWallets({ plansByWallet: preparedPlans });
+  console.log(paint("Campaign complete.", "success"));
 }
 
 function decimalToBaseUnits(amountStr, decimals) {
@@ -9873,7 +10248,7 @@ async function main() {
   const cmd = args[0];
   if (!cmd) {
     console.log(
-      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
+      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
     );
     process.exit(0);
   }
@@ -10054,6 +10429,8 @@ async function main() {
       const fromName = args[1];
       if (!fromName) throw new Error("redistribute usage: redistribute <fromWalletFile>");
       await redistributeSol(fromName);
+    } else if (cmd === "campaign") {
+      await handleCampaignCommand(args.slice(1));
     } else if (cmd === "fund" || cmd === "send") {
       const [ , fromName, toName, lamStr ] = args;
       const lam = parseInt(lamStr);
