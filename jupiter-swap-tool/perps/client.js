@@ -74,8 +74,22 @@ function resolveWallet(options, fallbackWallet) {
     if (providedWallet.publicKey instanceof PublicKey) {
       return providedWallet;
     }
-    if (providedWallet.publicKey) {
-      return new ReadOnlyWallet(providedWallet.publicKey);
+    if (typeof providedWallet === "string" || providedWallet instanceof PublicKey || isBytesLike(providedWallet)) {
+      return new ReadOnlyWallet(providedWallet);
+    }
+    if (providedWallet.publicKey !== undefined) {
+      const coercedPublicKey = coercePublicKey(providedWallet.publicKey);
+      try {
+        // Some wallet-like objects expose a mutable `publicKey` property. When this
+        // is the case we prefer to update the existing wallet so that any custom
+        // signing behaviour is preserved.
+        providedWallet.publicKey = coercedPublicKey;
+        return providedWallet;
+      } catch (error) {
+        // If the property is read-only (for example, a getter) fall back to a
+        // lightweight read-only wallet instance instead.
+        return new ReadOnlyWallet(coercedPublicKey);
+      }
     }
     return new ReadOnlyWallet(providedWallet);
   }
