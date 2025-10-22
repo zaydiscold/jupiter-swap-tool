@@ -388,6 +388,8 @@ export async function buildIncreaseRequestInstruction({
       collateralCustody: collateralPk,
       inputMint: inputMintPk,
       referral,
+      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      program: JUPITER_PERPETUALS_PROGRAM_ID,
     })
     .instruction();
   return {
@@ -461,6 +463,8 @@ export async function buildDecreaseRequestInstruction({
       collateralCustody: positionAccount.collateralCustody,
       desiredMint: desiredMintPk,
       referral,
+      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      program: JUPITER_PERPETUALS_PROGRAM_ID,
     })
     .instruction();
   return {
