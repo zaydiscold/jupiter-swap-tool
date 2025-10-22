@@ -75,6 +75,24 @@ const IS_MAIN_EXECUTION = (() => {
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
+const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
+const JUPITER_PERPS_PROGRAM_ID =
+  process.env.JUPITER_PERPS_PROGRAM_ID || DEFAULT_PERPS_PROGRAM_ID;
+const PERPS_RPC_URL = process.env.PERPS_RPC_URL || DEFAULT_RPC_URL;
+const PERPS_COMPUTE_UNIT_LIMIT = process.env.PERPS_COMPUTE_UNIT_LIMIT
+  ? Math.max(1, parseInt(process.env.PERPS_COMPUTE_UNIT_LIMIT, 10) || 0)
+  : 1_200_000;
+const PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS =
+  process.env.PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS
+    ? Math.max(
+        0,
+        parseInt(process.env.PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS, 10) || 0
+      )
+    : 10_000;
+const PERPS_MARKET_CACHE_PATH =
+  process.env.PERPS_MARKET_CACHE_PATH ||
+  path.resolve(SCRIPT_DIR, "perps/market_cache.json");
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RPC_LIST_FILE =
   process.env.RPC_LIST_FILE || path.resolve(SCRIPT_DIR, "rpc_endpoints.txt");
 let RPC_ENDPOINTS_FILE_USED = null;

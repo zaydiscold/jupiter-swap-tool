@@ -1,11 +1,12 @@
 # Jupiter Swap Tool CLI (v1.1.2)
 
 ## Getting Started
-1. Install Node.js 18+ and clone the repo.
-2. Double-click `run_cli_trader.command` (macOS) or run `node cli_trader.js` manually.
-3. When prompted, supply your preferred RPC (or press Enter to use the default).
-4. Open wallet tools with hotkey `1` to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
-5. Use the hotkeys listed below to run funding, sweeping, or swap routines.
+1. Install Node.js 18+ **and** the Anchor CLI dependencies Jupiter Perps relies on (e.g. `cargo install --git https://github.com/coral-xyz/anchor anchor-cli` or follow [Anchor’s installation guide](https://www.anchor-lang.com/docs/installation)).
+2. Clone the repo and run `npm install` to pull the JavaScript dependencies the CLI expects.
+3. Double-click `run_cli_trader.command` (macOS) or run `node cli_trader.js` manually.
+4. When prompted, supply your preferred RPC (or press Enter to use the default).
+5. Open wallet tools with hotkey `1` to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
+6. Use the hotkeys listed below to run funding, sweeping, swap, lend, or perps routines.
 
 **Note**: The `keypairs/` directory is excluded from git and will be created automatically when you generate your first wallet.
 
@@ -18,32 +19,39 @@ Node/CLI tool for managing batches of Solana wallets, funding them, and copying 
 - Optional: populate `rpc_endpoints.txt` in this directory with newline-separated RPC URLs (e.g. public/rate-limited endpoints). The CLI will rotate through them automatically and temporarily sideline endpoints that come back with 401/403s or repeated rate-limit errors.
 
 Environment variables (optional):
-- `RPC_URL` – default RPC (overridden by launcher prompt).
-- `RPC_LIST_FILE` – optional path to a newline/CSV-separated list of RPC URLs to rotate through (default `rpc_endpoints.txt` in the project root).
-- `RPC_HEALTH_URL` (or `RPC_HEALTH_ENDPOINT`) – force the initial health check to use a specific RPC URL instead of the current rotation.
-- `RPC_HEALTH_INDEX` – 1-based index into the loaded RPC list for the initial health check (handy when testing endpoints one-by-one).
-- `SWAP_AMOUNT_MODE` – default swap behaviour (`all` or `random`); the launcher prompt sets this for you.
-- `JUPITER_SWAP_ENGINE` – choose the swap backend (`ultra` default; set `lite` to fall back to the legacy quote/swap endpoints).
-- `JUPITER_ULTRA_API_KEY` – Ultra API key (defaults to `91233f8d-d064-48c7-a97a-87b5d4d8a511`; override if you have your own).
-- `PRINT_SECRET_KEYS=1` – print base58 secrets when generating wallets.
-- `GAS_RESERVE_LAMPORTS` – lamports reserved for gas (default `1_000_000` ≈ 0.001 SOL).
-- `JUPITER_SOL_BUFFER_LAMPORTS` – extra lamports left behind when spending SOL to cover wrap rent + Jupiter route side-costs (default `2_000_000`).
-- `JUPITER_SOL_RETRY_DELTA_LAMPORTS` – lamports trimmed from the spending amount each time Jupiter reports "insufficient lamports" (default `200_000`).
-- `JUPITER_SOL_MAX_RETRIES` – number of retries (with reduced spend) permitted before giving up on a wallet when Jupiter reports "insufficient lamports" (default `3`).
-- `SLIPPAGE_BPS` – per-swap slippage tolerance in basis points (default `20`).
-- `MAX_SLIPPAGE_RETRIES` – number of times to refetch routes when Jupiter reports a slippage failure (default `5`).
-- `MIN_SOL_PER_SWAP_LAMPORTS` – minimum SOL a wallet must retain before SOL-based swaps are attempted (default `10_000_000`, ≈ 0.01 SOL, to leave room for rent and fees).
-- `MIN_TRANSFER_LAMPORTS` – smallest lamport transfer allowed in redistribution/aggregation (default `50_000`).
-- `ESTIMATED_GAS_PER_SWAP_LAMPORTS` – estimated gas cost per swap transaction for multi-hop sequence planning (default `5_000`).
-- `ESTIMATED_ATA_CREATION_LAMPORTS` – estimated cost for creating Associated Token Accounts (default `2_000_000`).
-- `NO_COLOR=1` – disable colored console output.
-- `NODE_NO_WARNINGS=1` – suppress Node deprecation noise (launcher sets this automatically).
-- `JUPITER_SWAP_TOOL_TIMING=1` – emit planning vs execution timings for Buckshot, Long Circle, and BTC/ETH sweep commands.
-- `JUPITER_ULTRA_API_BASE` – override the Jupiter Ultra API base (defaults to `https://api.jup.ag/ultra/<JUPITER_ULTRA_API_KEY>` when a key is provided, otherwise `https://api.jup.ag/ultra/v1`).
-- `JUPITER_PRICE_API_BASE` – override the default Price API v3 base (`https://api.jup.ag/price/v3`).
-- `JUPITER_TOKENS_API_BASE` – override the default Tokens API v2 base (`https://api.jup.ag/tokens/v2`).
-- `JUPITER_LEND_API_BASE` – override the Jupiter Lend Earn API base (default `https://lite-api.jup.ag/lend/v1/earn`; automatic fallback to the paid/integrator paths if a 404 occurs).
-- `JUPITER_LEND_BORROW_API_BASE` – override the Jupiter Lend Borrow API base (default `https://lite-api.jup.ag/lend/v1/borrow`; automatic fallback to the paid/integrator paths if a 404 occurs).
+
+| Variable | Description |
+| --- | --- |
+| `RPC_URL` | Default RPC (overridden by the launcher prompt). |
+| `RPC_LIST_FILE` | Path to a newline/CSV-separated list of RPC URLs to rotate through (defaults to `rpc_endpoints.txt` beside the CLI). |
+| `RPC_HEALTH_URL` / `RPC_HEALTH_ENDPOINT` | Override the initial health check URL, bypassing rotation for the first probe. |
+| `RPC_HEALTH_INDEX` | 1-based index into the loaded RPC list for the initial health check (handy when testing endpoints one-by-one). |
+| `SWAP_AMOUNT_MODE` | Default swap behaviour (`all` or `random`); the launcher prompt sets this for you. |
+| `JUPITER_SWAP_ENGINE` | Swap backend selector (`ultra` default, `lite` for the legacy quote/swap endpoints). |
+| `JUPITER_ULTRA_API_KEY` | Jupiter Ultra API key (defaults to `91233f8d-d064-48c7-a97a-87b5d4d8a511`; override with your own credentials). |
+| `JUPITER_ULTRA_API_BASE` | Override the Jupiter Ultra API base (defaults to `https://api.jup.ag/ultra/<JUPITER_ULTRA_API_KEY>` or `https://api.jup.ag/ultra/v1`). |
+| `JUPITER_PRICE_API_BASE` | Override the default Price API v3 base (`https://api.jup.ag/price/v3`). |
+| `JUPITER_TOKENS_API_BASE` | Override the default Tokens API v2 base (`https://api.jup.ag/tokens/v2`). |
+| `JUPITER_LEND_API_BASE` | Override the Jupiter Lend Earn API base (defaults to `https://lite-api.jup.ag/lend/v1/earn`; the CLI auto-falls back to integrator paths if a 404 occurs). |
+| `JUPITER_LEND_BORROW_API_BASE` | Override the Jupiter Lend Borrow API base (defaults to `https://lite-api.jup.ag/lend/v1/borrow`; the CLI auto-falls back to integrator paths if a 404 occurs). |
+| `JUPITER_PERPS_API_BASE` | Override the Jupiter Perps API base (defaults to `https://perps-api.jup.ag` once the feature flag is enabled). |
+| `PERPS_CONFIG_PATH` | Absolute or relative path to your `perps_config.json` file (defaults to `./perps_config.json` beside the CLI). |
+| `PERPS_KEEPER_ONLY` | Set to `1` to skip direct order placement and only poll/fulfil keeper tasks from the config. |
+| `PERPS_DRY_RUN` | Set to `1` to print perps payloads without submitting transactions (useful for sanity checks against staging). |
+| `PRINT_SECRET_KEYS` | Set to `1` to print base58 secrets when generating wallets. |
+| `GAS_RESERVE_LAMPORTS` | Lamports reserved for gas (default `1_000_000` ≈ 0.001 SOL). |
+| `JUPITER_SOL_BUFFER_LAMPORTS` | Extra lamports left behind when spending SOL to cover wrap rent + Jupiter route side-costs (default `2_000_000`). |
+| `JUPITER_SOL_RETRY_DELTA_LAMPORTS` | Lamports trimmed from the spending amount each time Jupiter reports “insufficient lamports” (default `200_000`). |
+| `JUPITER_SOL_MAX_RETRIES` | Number of retries (with reduced spend) permitted before giving up on a wallet when Jupiter reports “insufficient lamports” (default `3`). |
+| `SLIPPAGE_BPS` | Per-swap slippage tolerance in basis points (default `20`). |
+| `MAX_SLIPPAGE_RETRIES` | Number of times to refetch routes when Jupiter reports a slippage failure (default `5`). |
+| `MIN_SOL_PER_SWAP_LAMPORTS` | Minimum SOL a wallet must retain before SOL-based swaps are attempted (default `10_000_000`, ≈ 0.01 SOL). |
+| `MIN_TRANSFER_LAMPORTS` | Smallest lamport transfer allowed in redistribution/aggregation (default `50_000`). |
+| `ESTIMATED_GAS_PER_SWAP_LAMPORTS` | Estimated gas cost per swap transaction for multi-hop sequence planning (default `5_000`). |
+| `ESTIMATED_ATA_CREATION_LAMPORTS` | Estimated cost for creating Associated Token Accounts (default `2_000_000`). |
+| `NO_COLOR` | Set to `1` to disable colored console output. |
+| `NODE_NO_WARNINGS` | Set to `1` to suppress Node deprecation noise (the launcher sets this automatically). |
+| `JUPITER_SWAP_TOOL_TIMING` | Set to `1` to emit planning vs execution timings for Buckshot, Long Circle, BTC/ETH sweep, and perps loops. |
 
 ## Swap Engine
 - Default: Ultra (`/ultra/.../order` → `/ultra/.../execute`). By default we target `https://api.jup.ag/ultra/91233f8d-d064-48c7-a97a-87b5d4d8a511`; override `JUPITER_ULTRA_API_KEY` if you have your own credentials. Ultra handles transaction dispatch (the CLI still confirms via your configured RPC for finality checks).
@@ -87,6 +95,17 @@ You can experiment today from the CLI (`lend earn ...`, `lend borrow ...`) or fr
 Full design notes live in `ARCHITECTURE_PLAN.md` under “Jupiter Lend Integration”.
 
 
+## Jupiter Perps (Beta)
+The perps namespace mirrors Jupiter’s perpetual futures program and is guarded behind explicit config toggles so you can opt in deliberately.
+
+- **Environment flags:** point `PERPS_CONFIG_PATH` to your perps configuration file (defaults to `./perps_config.json`) and set `JUPITER_PERPS_API_BASE` if you need to target staging. Use `PERPS_KEEPER_ONLY=1` to operate as a passive keeper and `PERPS_DRY_RUN=1` to print payloads without submitting them.
+- **Config + usage:** copy `perps_config.sample.json` to `perps_config.json`, tailor the wallets/markets/leverage values, and keep the real file out of version control (it is now ignored via `.gitignore`). The CLI automatically loads this path when you run `perps …` commands.
+- **Keeper workflow:** designate a keeper wallet in the config. `perps keeper fulfil` polls Jupiter’s keeper queue, filters work items against the config (tags, reduce-only exits, etc.), and submits them with the keeper wallet—freeing trading wallets from running 24/7. Combine the command with cron/systemd for continuous monitoring.
+- **Reference material:** start with Jupiter’s [Perpetuals overview](https://station.jup.ag/docs/products/perpetuals/overview) and the [Keeper fulfilment guide](https://station.jup.ag/docs/products/perpetuals/keepers) to understand margin requirements, funding, and fulfilment responsibilities.
+
+Every perps action prints the wallet’s maintenance margin, leverage, and liquidation band before submission. Treat the logs as required reading—leveraged positions carry material loss risk.
+
+
 ### RPC Rotation
 If `rpc_endpoints.txt` sits next to `cli_trader.js`, the CLI will rotate through every non-empty URL in that file (one endpoint per line or comma-separated). The launcher-provided `RPC_URL` is always used first, and any duplicates are ignored. Rotation happens at connection time, so long-running commands naturally spread requests across the list. Set `RPC_LIST_FILE` to point at a different file if you want to keep multiple profiles.
 
@@ -123,6 +142,8 @@ Each swap hotkey expands to the equivalent `swap`/`swap-all` command so you stil
 ## CLI Commands
 Run these either from the launcher prompt or directly via `node cli_trader.js …`.
 
+-**Perps safety note:** perpetuals are leveraged instruments. Always pre-fund the trading wallet with sufficient USDC collateral, double-check your leverage caps, and monitor liquidation thresholds printed by the CLI before placing orders.
+
 - `generate <n> [prefix]` – create wallets (`prefix_1.json`, etc.). Use `PRINT_SECRET_KEYS=1` to print base58 secrets.
 - `import-wallet --secret <secret> [--prefix name] [--path path] [--force]` – import an existing Solana keypair from base58, JSON, or mnemonic (default derivation path `m/44'/501'/0'/0'`).
 - `list` – list all wallet filenames + public keys.
@@ -147,6 +168,11 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 - `reclaim-sol` – close all zero-balance associated token accounts for every wallet (legacy SPL + Token-2022). Accounts with withheld transfer fees remaining are skipped with an explanatory warning until the mint authority harvests the fees. Alias: `close-token-accounts`.
 - `lend earn …` / `lend borrow …` – interact with Jupiter Lend (Earn/Borrow beta). Examples: `lend earn tokens`, `lend earn deposit crew_1.json SOL 0.1`, `lend borrow open crew_1.json SOL USDC 1 0.5`. Passing `*` for the wallet, mint, or amount fans out across every active wallet, filters to eligible base assets/share tokens, and defaults to the maximum spendable balance (SOL keeps a rent/fee reserve automatically). Responses log status codes, request IDs, and payloads to help debug the still-beta endpoints. Use `lend borrow close <wallet> *` (or leave the launcher prompt blank) to close every borrow position for a wallet without hunting IDs. Deposits/withdrawals auto-submit returned transactions, auto-create missing ATAs, subtract a ~0.0022 SOL wrap buffer, and back off the deposit amount if the wallet is short on SOL; wallets with <0.005 SOL of headroom are skipped with guidance to top-up. Use `--no-send` to dry-run only.
 - `lend overview` – pull earn positions, earnings, and borrow positions for every discovered wallet in a single call.
+- `perps markets [--group <group>]` – list the perpetual markets Jupiter exposes for the selected group (defaults to `mainnet-beta`). Always confirm you have margin in a funded wallet before trading; liquidations can eat the full deposit.
+- `perps positions [wallet|*]` – print open positions and account health for one wallet or every configured wallet. The `*` wildcard fans across all wallets that appear in your perps config.
+- `perps open <wallet> <market> <long|short> <size>` – place a new perp order with optional flags like `--leverage <x>`, `--reduce-only`, or `--tag <label>`. The CLI enforces margin fraction thresholds from your config and refuses to submit if the wallet is underfunded.
+- `perps close <wallet> <market> [amount|all]` – reduce or fully close an existing position. Use `--reduce-only` for hedge adjustments and `--dry-run` (or `PERPS_DRY_RUN=1`) to preview the transaction payload.
+- `perps keeper fulfil [--path <config>] [--tag <label>]` – load `perps_config.json`, scan for orders that require off-chain keeper fulfilment (reduce-only exits, take-profit triggers, etc.), and submit them using the designated keeper wallet. Combine with `PERPS_KEEPER_ONLY=1` to run passive monitoring without direct trading commands.
 - `tokens --refresh` – force-refresh the token catalog via Jupiter Tokens API v2 before printing (fallback/local entries remain merged in).
 
 All swap commands print:
