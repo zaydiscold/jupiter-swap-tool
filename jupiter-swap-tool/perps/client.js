@@ -35,6 +35,17 @@ function coercePublicKey(value) {
   if (value instanceof PublicKey) {
     return value;
   }
+  if (typeof value?.toBase58 === "function") {
+    const base58 = String(value.toBase58()).trim();
+    if (!base58) {
+      return ZERO_PUBKEY;
+    }
+    try {
+      return new PublicKey(base58);
+    } catch (err) {
+      throw new Error(`Failed to parse public key from base58: ${err.message}`);
+    }
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -71,13 +82,39 @@ function readIdl() {
 function resolveWallet(options, fallbackWallet) {
   const providedWallet = options?.wallet;
   if (providedWallet) {
-    if (providedWallet.publicKey instanceof PublicKey) {
-      return providedWallet;
+    const normalizedPublicKey = coercePublicKey(
+      providedWallet.publicKey ?? providedWallet
+    );
+    const hasSignerCapabilities =
+      typeof providedWallet.signTransaction === "function" ||
+      typeof providedWallet.signAllTransactions === "function";
+
+    if (hasSignerCapabilities) {
+      if (providedWallet.publicKey instanceof PublicKey && providedWallet.publicKey === normalizedPublicKey) {
+        return providedWallet;
+      }
+
+      try {
+        providedWallet.publicKey = normalizedPublicKey;
+        return providedWallet;
+      } catch (err) {
+        /* ignore mutations on frozen wallet objects */
+      }
+
+      const normalizedWallet = Object.create(
+        Object.getPrototypeOf(providedWallet) || Object.prototype
+      );
+      Object.assign(normalizedWallet, providedWallet);
+      Object.defineProperty(normalizedWallet, "publicKey", {
+        value: normalizedPublicKey,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+      return normalizedWallet;
     }
-    if (providedWallet.publicKey) {
-      return new ReadOnlyWallet(providedWallet.publicKey);
-    }
-    return new ReadOnlyWallet(providedWallet);
+
+    return new ReadOnlyWallet(normalizedPublicKey);
   }
   if (fallbackWallet) return fallbackWallet;
   if (options?.publicKey) {
