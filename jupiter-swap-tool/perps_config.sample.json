@@ -1,0 +1,28 @@
+{
+  "group": "mainnet-beta",
+  "defaults": {
+    "wallet": "crew_1.json",
+    "leverage": 5,
+    "marginFractionBps": 1000,
+    "reduceOnly": false
+  },
+  "markets": [
+    {
+      "symbol": "SOL-PERP",
+      "side": "long",
+      "size": "0.5",
+      "tag": "intraday"
+    },
+    {
+      "symbol": "BTC-PERP",
+      "side": "short",
+      "size": "0.1",
+      "tag": "hedge"
+    }
+  ],
+  "keeper": {
+    "wallet": "keeper_1.json",
+    "fulfilOn": ["reduce-only", "take-profit"],
+    "pollIntervalMs": 5000
+  }
+}
