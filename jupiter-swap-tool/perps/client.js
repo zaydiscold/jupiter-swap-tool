@@ -18,6 +18,44 @@ const ZERO_PUBKEY = (() => {
   return new PublicKey(new Uint8Array(32));
 })();
 
+function isBytesLike(value) {
+  if (!value) return false;
+  if (value instanceof Uint8Array) return true;
+  if (typeof Buffer !== "undefined" && Buffer.isBuffer && Buffer.isBuffer(value)) {
+    return true;
+  }
+  return false;
+}
+
+function coercePublicKey(value) {
+  if (!value) return ZERO_PUBKEY;
+  if (value?.publicKey) {
+    return coercePublicKey(value.publicKey);
+  }
+  if (value instanceof PublicKey) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return ZERO_PUBKEY;
+    }
+    try {
+      return new PublicKey(trimmed);
+    } catch (err) {
+      throw new Error(`Failed to parse public key string: ${err.message}`);
+    }
+  }
+  if (isBytesLike(value)) {
+    try {
+      return new PublicKey(value);
+    } catch (err) {
+      throw new Error(`Failed to parse public key bytes: ${err.message}`);
+    }
+  }
+  throw new TypeError("Unsupported public key input type");
+}
+
 let cachedIdl = null;
 let cachedProgramIdString = null;
 let cachedProgramId = null;
@@ -31,9 +69,21 @@ function readIdl() {
 }
 
 function resolveWallet(options, fallbackWallet) {
-  if (options?.wallet) return options.wallet;
+  const providedWallet = options?.wallet;
+  if (providedWallet) {
+    if (providedWallet.publicKey instanceof PublicKey) {
+      return providedWallet;
+    }
+    if (providedWallet.publicKey) {
+      return new ReadOnlyWallet(providedWallet.publicKey);
+    }
+    return new ReadOnlyWallet(providedWallet);
+  }
   if (fallbackWallet) return fallbackWallet;
-  return new ReadOnlyWallet(options?.publicKey);
+  if (options?.publicKey) {
+    return new ReadOnlyWallet(options.publicKey);
+  }
+  return new ReadOnlyWallet();
 }
 
 function parseListEnv(value) {
@@ -115,7 +165,7 @@ export function getPerpsRpcConfig(overrides = {}) {
 
 export class ReadOnlyWallet {
   constructor(publicKey = ZERO_PUBKEY) {
-    this.publicKey = publicKey;
+    this.publicKey = coercePublicKey(publicKey);
   }
 
   async signTransaction(transaction) {
