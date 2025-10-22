@@ -52,6 +52,13 @@ import {
   truncatePlanToBudget,
   CAMPAIGNS,
 } from "./chains/solana/campaigns_runtime.js";
+import {
+  listWallets as sharedListWallets,
+  ensureAtaForMint as sharedEnsureAtaForMint,
+  ensureWrappedSolBalance as sharedEnsureWrappedSolBalance,
+  loadKeypairFromFile as sharedLoadKeypairFromFile,
+  configureWalletHelpers,
+} from "./shared/wallet_helpers.js";
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
@@ -98,6 +105,7 @@ const IS_MAIN_EXECUTION = (() => {
 })();
 
 const KEYPAIR_DIR = "./keypairs";
+const loadKeypairFromFile = sharedLoadKeypairFromFile;
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
@@ -2383,40 +2391,8 @@ function formatEarnPositionSnippet(entry) {
   return symbolStr;
 }
 
-async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, { label } = {}) {
-  const ata = await getAssociatedTokenAddress(
-    mintPubkey,
-    wallet.kp.publicKey,
-    false,
-    tokenProgram,
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  );
-  const info = await connection.getAccountInfo(ata);
-  if (info) return false;
-  const ix = createAssociatedTokenAccountInstruction(
-    wallet.kp.publicKey,
-    ata,
-    wallet.kp.publicKey,
-    mintPubkey,
-    tokenProgram,
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  );
-  const tx = new Transaction().add(ix);
-  tx.feePayer = wallet.kp.publicKey;
-  const { blockhash } = await connection.getLatestBlockhash();
-  tx.recentBlockhash = blockhash;
-  tx.sign(wallet.kp);
-  const sig = await connection.sendRawTransaction(tx.serialize());
-  await connection.confirmTransaction(sig, "confirmed");
-  const mintLabel = symbolForMint(mintPubkey.toBase58());
-  const contextLabel = label ? `${label}:` : "";
-  console.log(
-    paint(
-      `  ${contextLabel} created ATA ${ata.toBase58()} for mint ${mintLabel}.`,
-      "muted"
-    )
-  );
-  return true;
+async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options = {}) {
+  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
 }
 
 async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
@@ -2524,67 +2500,11 @@ async function ensureWrappedSolBalance(
   requiredLamports,
   existingLamportsOverride = null
 ) {
-  if (requiredLamports <= 0n) return;
-  const mintPubkey = new PublicKey(SOL_MINT);
-  const tokenProgram = TOKEN_PROGRAM_ID;
-  const ata = await getAssociatedTokenAddress(
-    mintPubkey,
-    wallet.kp.publicKey,
-    false,
-    tokenProgram,
-    ASSOCIATED_TOKEN_PROGRAM_ID
-  );
-  try {
-    await ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, {
-      label: "wrap",
-    });
-  } catch (err) {
-    console.error(
-      paint(
-        `  Failed to ensure SOL ATA for ${wallet.name}:`,
-        "error"
-      ),
-      err.message || err
-    );
-    throw err;
-  }
-  let existingLamports = 0n;
-  if (typeof existingLamportsOverride === "bigint") {
-    existingLamports = existingLamportsOverride;
-  } else {
-    try {
-      const balanceInfo = await connection.getTokenAccountBalance(ata);
-      existingLamports = BigInt(balanceInfo?.value?.amount ?? "0");
-    } catch (_) {}
-  }
-  if (existingLamports >= requiredLamports) return;
-  const lamportsToWrap = requiredLamports - existingLamports;
-  const humanAmount = formatBaseUnits(lamportsToWrap, 9);
-  console.log(
-    paint(
-      `  Wrapping ${humanAmount} SOL into wSOL for ${wallet.name} (existing ${formatBaseUnits(existingLamports, 9)} wSOL).`,
-      "muted"
-    )
-  );
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: wallet.kp.publicKey,
-      toPubkey: ata,
-      lamports: Number(lamportsToWrap),
-    }),
-    createSyncNativeInstruction(ata, TOKEN_PROGRAM_ID)
-  );
-  tx.feePayer = wallet.kp.publicKey;
-  const { blockhash } = await connection.getLatestBlockhash();
-  tx.recentBlockhash = blockhash;
-  tx.sign(wallet.kp);
-  const sig = await connection.sendRawTransaction(tx.serialize());
-  await connection.confirmTransaction(sig, "confirmed");
-  console.log(
-    paint(
-      `  Wrapped ${humanAmount} SOL for ${wallet.name} — tx ${sig}`,
-      "success"
-    )
+  return sharedEnsureWrappedSolBalance(
+    connection,
+    wallet,
+    requiredLamports,
+    existingLamportsOverride
   );
 }
 
@@ -4291,54 +4211,8 @@ function getWalletGuardSummary(options = {}) {
   };
 }
 
-function loadKeypairFromFile(filepath) {
-  const raw = fs.readFileSync(filepath, "utf8").trim();
-  try {
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      return Keypair.fromSecretKey(Uint8Array.from(parsed));
-    }
-    if (parsed && typeof parsed === "object") {
-      if (Array.isArray(parsed.secretKey)) {
-        return Keypair.fromSecretKey(Uint8Array.from(parsed.secretKey));
-      }
-      if (typeof parsed.secretKeyBase58 === "string") {
-        return Keypair.fromSecretKey(bs58.decode(parsed.secretKeyBase58));
-      }
-    }
-  } catch (e) {}
-  try {
-    const buf = bs58.decode(raw);
-    return Keypair.fromSecretKey(buf);
-  } catch (e) {
-    throw new Error(`Cannot parse keyfile ${filepath}: ${e.message}`);
-  }
-}
-
-function listWallets() {
-  if (!fs.existsSync(KEYPAIR_DIR)) return [];
-  const files = fs.readdirSync(KEYPAIR_DIR).filter((f) => !f.startsWith("."));
-  const wallets = [];
-  for (const f of files) {
-    const fp = path.join(KEYPAIR_DIR, f);
-    try {
-      const kp = loadKeypairFromFile(fp);
-      let birthMs = Date.now();
-      try {
-        const stats = fs.statSync(fp);
-        birthMs =
-          stats.birthtimeMs || stats.ctimeMs || stats.mtimeMs || birthMs;
-      } catch (_) {}
-      wallets.push({ name: f, kp, birthMs });
-    } catch (err) {
-      console.warn(paint(`Skipping invalid key file ${f}: ${err.message}`, "warn"));
-    }
-  }
-  wallets.sort((a, b) => {
-    if (a.birthMs !== b.birthMs) return a.birthMs - b.birthMs;
-    return a.name.localeCompare(b.name);
-  });
-  return wallets;
+function listWallets(...args) {
+  return sharedListWallets(...args);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -4748,6 +4622,15 @@ function formatSignedBaseUnits(amount, decimals) {
   const formatted = formatBaseUnits(negative ? -amount : amount, decimals);
   return negative ? `-${formatted}` : formatted;
 }
+
+configureWalletHelpers({
+  keypairDir: KEYPAIR_DIR,
+  loadKeypairFromFile,
+  paint,
+  formatBaseUnits,
+  symbolForMint,
+  logger: console,
+});
 
 // Present lamport deltas using the existing decimal formatter while preserving sign.
 function formatLamportsDelta(delta) {
