@@ -2,7 +2,7 @@
 
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import fetch from "node-fetch";
 import bs58 from "bs58";
 import readline from "readline";
@@ -40,6 +40,16 @@ const TOOL_VERSION = "1.1.2";
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+const IS_MAIN_EXECUTION = (() => {
+  const entry = process?.argv?.[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch (err) {
+    return false;
+  }
+})();
+
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -600,7 +610,9 @@ async function refreshTokenCatalogFromApi(options = {}) {
   return tokenCatalogRefreshPromise;
 }
 
-refreshTokenCatalogFromApi().catch(() => {});
+if (IS_MAIN_EXECUTION) {
+  refreshTokenCatalogFromApi().catch(() => {});
+}
 
 function tokenBySymbol(symbol) {
   if (!symbol) return null;
@@ -8556,4 +8568,8 @@ async function main() {
   process.exit(0);
 }
 
-main();
+if (IS_MAIN_EXECUTION) {
+  main();
+}
+
+export { listWallets, ensureAtaForMint, ensureWrappedSolBalance };
