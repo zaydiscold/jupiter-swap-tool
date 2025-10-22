@@ -2383,12 +2383,39 @@ function formatEarnPositionSnippet(entry) {
   return symbolStr;
 }
 
-async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, { label } = {}) {
+async function resolveTokenProgramForMint(connection, mintPubkey) {
+  const mintAccount = await connection.getAccountInfo(mintPubkey);
+  if (!mintAccount) {
+    throw new Error(
+      `Mint account ${mintPubkey.toBase58()} does not exist on the connected cluster`
+    );
+  }
+  const owner = mintAccount.owner;
+  if (owner.equals(TOKEN_PROGRAM_ID)) {
+    return TOKEN_PROGRAM_ID;
+  }
+  if (owner.equals(TOKEN_2022_PROGRAM_ID)) {
+    return TOKEN_2022_PROGRAM_ID;
+  }
+  throw new Error(
+    `Unsupported mint owner ${owner.toBase58()} for mint ${mintPubkey.toBase58()}`
+  );
+}
+
+async function ensureAtaForMint(
+  connection,
+  wallet,
+  mintPubkey,
+  tokenProgram,
+  { label } = {}
+) {
+  const resolvedProgram =
+    tokenProgram || (await resolveTokenProgramForMint(connection, mintPubkey));
   const ata = await getAssociatedTokenAddress(
     mintPubkey,
     wallet.kp.publicKey,
     false,
-    tokenProgram,
+    resolvedProgram,
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
   const info = await connection.getAccountInfo(ata);
@@ -2398,7 +2425,7 @@ async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, { 
     ata,
     wallet.kp.publicKey,
     mintPubkey,
-    tokenProgram,
+    resolvedProgram,
     ASSOCIATED_TOKEN_PROGRAM_ID
   );
   const tx = new Transaction().add(ix);
@@ -9675,9 +9702,19 @@ async function perpsIncreaseCommand(rawArgs) {
   if (inputMintPk.equals(NATIVE_MINT)) {
     await ensureWrappedSolBalance(connection, wallet, collateralTokenDelta);
   } else {
-    await ensureAtaForMint(connection, wallet, inputMintPk, TOKEN_PROGRAM_ID, {
-      label: "perps",
-    });
+    const inputMintTokenProgram = await runWithRpcRetry(
+      "resolve input mint owner",
+      () => resolveTokenProgramForMint(connection, inputMintPk)
+    );
+    await ensureAtaForMint(
+      connection,
+      wallet,
+      inputMintPk,
+      inputMintTokenProgram,
+      {
+        label: "perps",
+      }
+    );
   }
   const increaseResult = await buildIncreaseRequestInstruction({
     connection,
@@ -10043,9 +10080,19 @@ async function perpsDecreaseCommand(rawArgs) {
   const marketSymbol = symbolForMint(custodyAccount.mint.toBase58());
   const collateralSymbol = symbolForMint(collateralAccount.mint.toBase58());
   const desiredSymbol = symbolForMint(desiredMintPk.toBase58());
-  await ensureAtaForMint(connection, wallet, desiredMintPk, TOKEN_PROGRAM_ID, {
-    label: "perps",
-  });
+  const desiredMintTokenProgram = await runWithRpcRetry(
+    "resolve desired mint owner",
+    () => resolveTokenProgramForMint(connection, desiredMintPk)
+  );
+  await ensureAtaForMint(
+    connection,
+    wallet,
+    desiredMintPk,
+    desiredMintTokenProgram,
+    {
+      label: "perps",
+    }
+  );
   const decreaseResult = await buildDecreaseRequestInstruction({
     connection,
     owner: wallet.kp.publicKey,
@@ -10683,4 +10730,9 @@ if (IS_MAIN_EXECUTION) {
   main();
 }
 
-export { listWallets, ensureAtaForMint, ensureWrappedSolBalance };
+export {
+  listWallets,
+  ensureAtaForMint,
+  ensureWrappedSolBalance,
+  resolveTokenProgramForMint,
+};

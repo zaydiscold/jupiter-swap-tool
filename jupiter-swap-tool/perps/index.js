@@ -22,6 +22,7 @@ import {
   listWallets as cliListWallets,
   ensureAtaForMint as cliEnsureAtaForMint,
   ensureWrappedSolBalance as cliEnsureWrappedSolBalance,
+  resolveTokenProgramForMint as cliResolveTokenProgramForMint,
 } from "../cli_trader.js";
 
 export {
@@ -55,4 +56,8 @@ export function ensureAtaForMint(...args) {
 
 export function ensureWrappedSolBalance(...args) {
   return cliEnsureWrappedSolBalance(...args);
+}
+
+export function resolveTokenProgramForMint(...args) {
+  return cliResolveTokenProgramForMint(...args);
 }
