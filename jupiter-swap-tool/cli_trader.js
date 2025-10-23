@@ -5066,19 +5066,86 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+
+  const swapRange = definition.swapCountRange || {};
+  const swapsPerCycle = Math.max(
+    1,
+    Math.floor(
+      pickFirstDefined(
+        definition.swapsPerCycle,
+        definition.cycleSwapCount,
+        definition.cycleLength,
+        Array.isArray(definition.legs) ? definition.legs.length : 1
+      )
+    )
+  );
+  const swapRangeMin = Math.max(
+    swapsPerCycle,
+    Math.floor(swapRange.min ?? swapsPerCycle)
+  );
+  const swapRangeMax = Math.max(
+    swapRangeMin,
+    Math.floor(swapRange.max ?? swapRangeMin)
+  );
+
+  const swapTargetOverride = pickFirstDefined(
+    options.swapTarget,
+    options.swapCount,
+    options.targetSwapCount,
+    options.targetSwaps,
+    options.targetHopCount
+  );
+
+  const normalizedOverride = Number(swapTargetOverride);
+  const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
+  let sampledSwapTarget = hasOverride
+    ? Math.max(swapRangeMin, Math.floor(normalizedOverride))
+    : pickIntInclusive(rng, swapRangeMin, swapRangeMax);
+
+  const minimumCycles = Math.max(
+    1,
+    Math.floor(pickFirstDefined(options.minimumCycles, definition.minimumCycles, 1))
+  );
+  const minimumSwapCount = Math.max(
+    swapsPerCycle,
+    minimumCycles * swapsPerCycle,
+    swapRangeMin,
+    Math.floor(
+      pickFirstDefined(
+        options.minimumSwapCount,
+        definition.minimumSwapCount,
+        swapRangeMin
+      )
+    )
+  );
+
+  let effectiveSwapTarget = Math.max(sampledSwapTarget, minimumSwapCount);
+
   const loopsRaw = pickFirstDefined(
     options.loops,
     options.loopCount,
     options.loop,
     definition.defaultLoops,
-    1
+    null
   );
-  let loops = Number(loopsRaw);
-  if (!Number.isFinite(loops) || loops <= 0) {
-    loops = 1;
+  let loopsOverride = Number(loopsRaw);
+  if (!Number.isFinite(loopsOverride) || loopsOverride <= 0) {
+    loopsOverride = null;
+  } else {
+    loopsOverride = Math.max(1, Math.floor(loopsOverride));
   }
-  loops = Math.floor(loops);
-  if (loops <= 0) loops = 1;
+
+  let loops;
+  if (loopsOverride !== null) {
+    loops = Math.max(loopsOverride, minimumCycles);
+  } else {
+    loops = Math.ceil(effectiveSwapTarget / swapsPerCycle);
+    if (loops < minimumCycles) loops = minimumCycles;
+  }
+  if (!Number.isFinite(loops) || loops <= 0) {
+    loops = minimumCycles;
+  }
 
   const rng =
     typeof options.rng === "function"
@@ -5139,6 +5206,15 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     flowKey: normalizedKey,
     flowLabel: definition.label,
     loops,
+    swapsPerCycle,
+    swapTarget: {
+      sampled: sampledSwapTarget,
+      minimum: minimumSwapCount,
+      planned: plannedSwapTarget,
+      range: { min: swapRangeMin, max: swapRangeMax },
+      effective: effectiveSwapTarget,
+    },
+    requireTerminalSolHop: definition.requireTerminalSolHop === true,
     targetDurationMs: desiredDuration,
     totalPlannedWaitMs: finalTotal,
     rawSampledDurationMs: rawTotal,
@@ -7731,8 +7807,8 @@ function allocateHopDelays(totalDurationMs, hopCount, options = {}, rng = DEFAUL
   const delays = new Array(count).fill(0);
   if (count === 0) return delays;
 
-  const total = Math.max(0, Math.floor(Number(totalDurationMs) || 0));
-  if (total === 0) return delays;
+  const totalRequested = Math.max(0, Math.floor(Number(totalDurationMs) || 0));
+  if (totalRequested === 0) return delays;
 
   const rawMin = options.min ?? 0;
   const rawMax = options.max ?? null;
@@ -7760,73 +7836,96 @@ function allocateHopDelays(totalDurationMs, hopCount, options = {}, rng = DEFAUL
   }
 
   if (minMs > 0) {
-    let deficit = 0;
     for (let i = 0; i < count; i += 1) {
-      if (delays[i] < minMs) {
-        deficit += minMs - delays[i];
-        delays[i] = minMs;
-      }
-    }
-    if (deficit > 0) {
-      for (let i = 0; i < count && deficit > 0; i += 1) {
-        const available = Math.max(0, delays[i] - minMs);
-        if (available <= 0) continue;
-        const deduction = Math.min(available, deficit);
-        delays[i] -= deduction;
-        deficit -= deduction;
-      }
+      delays[i] = minMs;
     }
   }
 
-  if (maxMs !== null) {
-    let overflow = 0;
-    for (let i = 0; i < count; i += 1) {
-      if (delays[i] > maxMs) {
-        overflow += delays[i] - maxMs;
-        delays[i] = maxMs;
+  let remaining = targetTotal - minTotal;
+  if (remaining <= 0) {
+    return delays;
+  }
+
+  const capacities = new Array(count).fill(
+    maxMs === null ? Number.POSITIVE_INFINITY : Math.max(0, maxMs - minMs)
+  );
+
+  const weights = Array.from({ length: count }, () => Math.random() + 1e-9);
+  const weightTotal = weights.reduce((acc, value) => acc + value, 0);
+  let assigned = 0;
+  for (let i = 0; i < count; i += 1) {
+    if (remaining <= 0) break;
+    const desired = Math.floor((weights[i] / weightTotal) * remaining);
+    if (desired <= 0) continue;
+    const capacity = capacities[i];
+    const addition = Math.min(capacity, desired);
+    if (addition <= 0) continue;
+    delays[i] += addition;
+    capacities[i] = capacity - addition;
+    assigned += addition;
+  }
+
+  let leftover = remaining - assigned;
+  if (leftover > 0) {
+    let guard = 0;
+    const maxIterations = count * 12;
+    while (leftover > 0 && guard < maxIterations) {
+      let progress = false;
+      for (let i = 0; i < count && leftover > 0; i += 1) {
+        const capacity = capacities[i];
+        if (capacity <= 0) continue;
+        delays[i] += 1;
+        capacities[i] = capacity - 1;
+        leftover -= 1;
+        progress = true;
       }
-    }
-    if (overflow > 0) {
-      for (let i = 0; i < count && overflow > 0; i += 1) {
-        const headroom = maxMs - delays[i];
-        if (headroom <= 0) continue;
-        const addition = Math.min(headroom, overflow);
-        delays[i] += addition;
-        overflow -= addition;
-      }
+      if (!progress) break;
+      guard += 1;
     }
   }
 
-  const targetTotal = total;
-  let difference = targetTotal - delays.reduce((acc, value) => acc + value, 0);
-  let iteration = 0;
-  const maxIterations = count * 20;
-  const minBound = minMs > 0 ? minMs : 0;
-  const maxBound = maxMs ?? Number.MAX_SAFE_INTEGER;
-  while (difference !== 0 && iteration < maxIterations) {
-    const index = iteration % count;
-    if (difference > 0) {
-      if (delays[index] < maxBound) {
-        delays[index] += 1;
-        difference -= 1;
-      }
-    } else if (difference < 0) {
-      if (delays[index] > minBound) {
-        delays[index] -= 1;
-        difference += 1;
-      }
-    }
-    iteration += 1;
-  }
-
-  if (difference !== 0 && count > 0) {
+  if (leftover > 0) {
     const idx = count - 1;
-    const adjusted = Math.max(
-      minBound,
-      Math.min(maxBound, delays[idx] + difference)
-    );
-    difference -= adjusted - delays[idx];
-    delays[idx] = adjusted;
+    const cap = capacities[idx];
+    const addition = Math.min(cap, leftover);
+    if (addition > 0) {
+      delays[idx] += addition;
+      capacities[idx] = cap - addition;
+      leftover -= addition;
+    }
+  }
+
+  const currentTotal = delays.reduce((acc, value) => acc + value, 0);
+  let difference = targetTotal - currentTotal;
+  if (difference !== 0) {
+    const minBound = minMs;
+    const maxBound = maxMs === null ? Number.POSITIVE_INFINITY : maxMs;
+    let iteration = 0;
+    const maxIterations = count * 20;
+    while (difference !== 0 && iteration < maxIterations) {
+      const index = iteration % count;
+      if (difference > 0) {
+        if (delays[index] < maxBound) {
+          delays[index] += 1;
+          difference -= 1;
+        }
+      } else if (difference < 0) {
+        if (delays[index] > minBound) {
+          delays[index] -= 1;
+          difference += 1;
+        }
+      }
+      iteration += 1;
+    }
+    if (difference !== 0) {
+      const index = count - 1;
+      const adjusted = Math.max(
+        minBound,
+        Math.min(maxBound, delays[index] + difference)
+      );
+      difference -= adjusted - delays[index];
+      delays[index] = adjusted;
+    }
   }
 
   return delays;
