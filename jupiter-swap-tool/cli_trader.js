@@ -7996,23 +7996,54 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       flow.minimumSwapCount ?? runtimeProfile?.minimumSwapCount ?? rangeMinBase
     )
   );
-  const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
-  const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
+    const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
+    const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
 
-  let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
-  let partialCycleHops = desiredSwapTarget % cycleLength;
-  let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
-  if (executedCycles < minimumCycles) {
-    fullCycles = minimumCycles;
-    partialCycleHops = 0;
-    executedCycles = minimumCycles;
-  }
-  const executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
+    const startCandidate = pickFirstDefined(
+      options.startMint,
+      flow.startMint,
+      SOL_MINT
+    );
+    const normalizedStartMint =
+      typeof startCandidate === "string"
+        ? normaliseSolMint(startCandidate)
+        : null;
+    const templateTerminalMint =
+      cycleTemplate.length > 0
+        ? cycleTemplate[cycleTemplate.length - 1]?.toMint
+        : null;
+    const normalizedTemplateTerminalMint =
+      typeof templateTerminalMint === "string"
+        ? normaliseSolMint(templateTerminalMint)
+        : null;
 
-  const combinedRandomOptions = combineRandomMintOptions(
-    flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
-    options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
-  );
+    let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
+    let partialCycleHops = desiredSwapTarget % cycleLength;
+    let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
+    if (executedCycles < minimumCycles) {
+      fullCycles = minimumCycles;
+      partialCycleHops = 0;
+      executedCycles = minimumCycles;
+    }
+
+    let executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
+    if (
+      partialCycleHops > 0 &&
+      !flow.requireTerminalSolHop &&
+      normalizedStartMint &&
+      normalizedTemplateTerminalMint &&
+      normalizedStartMint === normalizedTemplateTerminalMint
+    ) {
+      fullCycles += 1;
+      partialCycleHops = 0;
+      executedCycles = Math.max(executedCycles, fullCycles);
+      executedSwapTarget = fullCycles * cycleLength;
+    }
+
+    const combinedRandomOptions = combineRandomMintOptions(
+      flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
+      options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+    );
   const logRandomResolutions = options.logRandomResolutions !== false;
   const resolutionHandler =
     typeof options.onRandomMintResolved === "function"
@@ -8021,16 +8052,11 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       ? logRandomMintResolution
       : null;
 
-  const startCandidate = pickFirstDefined(
-    options.startMint,
-    flow.startMint,
-    SOL_MINT
-  );
-  const startResult = resolveMintCandidate(startCandidate, {
-    fallbackMint: SOL_MINT,
-    rng: flowRng,
-    baseRandomOptions: combinedRandomOptions,
-    label: `${flow.label} start`,
+    const startResult = resolveMintCandidate(startCandidate, {
+      fallbackMint: SOL_MINT,
+      rng: flowRng,
+      baseRandomOptions: combinedRandomOptions,
+      label: `${flow.label} start`,
   });
   let currentMint = startResult.mint;
   if (startResult.resolution && resolutionHandler) {
