@@ -23,6 +23,17 @@ const SOL_TO_LAMPORTS = (value) => {
   return BigInt(scaled < 0 ? 0 : scaled);
 };
 
+function normaliseSolMint(mint) {
+  if (!mint) return null;
+  const asString =
+    typeof mint === "string" ? mint.trim() : typeof mint === "object" && mint?.toString
+    ? mint.toString()
+    : String(mint ?? "");
+  if (!asString) return null;
+  if (SOL_LIKE_MINTS.has(asString)) return WSOL_MINT;
+  return asString;
+}
+
 const GAS_BASE_RESERVE_LAMPORTS = SOL_TO_LAMPORTS(GAS_BASE_RESERVE_SOL);
 const WALLET_MIN_REST_LAMPORTS = SOL_TO_LAMPORTS(WALLET_MIN_REST_SOL);
 const ATA_RENT_EST_LAMPORTS = SOL_TO_LAMPORTS(ATA_RENT_EST_SOL);
@@ -673,6 +684,142 @@ let HOOKS = {
 
 export function registerHooks(nextHooks) {
   HOOKS = { ...HOOKS, ...nextHooks };
+}
+
+function buildRandomMintPool(randomMeta, planPoolMints = []) {
+  const pool = [];
+  const append = (mint) => {
+    const normalized = normaliseSolMint(mint);
+    if (!normalized || SOL_LIKE_MINTS.has(normalized)) return;
+    if (pool.includes(normalized)) return;
+    pool.push(normalized);
+  };
+  const rawPool = Array.isArray(randomMeta?.poolMints) && randomMeta.poolMints.length > 0
+    ? randomMeta.poolMints
+    : planPoolMints;
+  for (const entry of rawPool) {
+    if (!entry) continue;
+    if (typeof entry === "string") {
+      append(entry);
+    } else if (typeof entry === "object" && entry.mint) {
+      append(entry.mint);
+    }
+  }
+  return pool;
+}
+
+function resolveFromSession(sessionState, sessionKey) {
+  if (!sessionState || typeof sessionKey !== "string" || sessionKey.length === 0) {
+    return null;
+  }
+  if (!(sessionState instanceof Map)) return null;
+  return sessionState.get(sessionKey) || null;
+}
+
+export function resolveRandomizedStep(logicalStep, rng, options = {}) {
+  if (!logicalStep || typeof logicalStep !== "object") return null;
+  const randomMeta = logicalStep.randomization;
+  if (!randomMeta || typeof randomMeta !== "object") return null;
+
+  const mode = typeof randomMeta.mode === "string" ? randomMeta.mode.toLowerCase() : "";
+  const sessionState =
+    options.sessionState && options.sessionState instanceof Map ? options.sessionState : null;
+  const sessionKey = typeof randomMeta.sessionKey === "string" ? randomMeta.sessionKey : null;
+  const effectiveRng = typeof rng === "function" ? rng : Math.random;
+
+  if (mode === "sol-to-random") {
+    const existing = resolveFromSession(sessionState, sessionKey);
+    if (existing?.outMint) {
+      return {
+        inMint: existing.inMint ?? logicalStep.inMint ?? WSOL_MINT,
+        outMint: existing.outMint,
+        sourceBalance: existing.sourceBalance ?? logicalStep.sourceBalance ?? { kind: "sol" },
+      };
+    }
+
+    const planPoolMints = Array.isArray(options.poolMints) ? options.poolMints : [];
+    const pool = buildRandomMintPool(randomMeta, planPoolMints);
+    if (pool.length === 0) {
+      throw new Error("random mint pool is empty");
+    }
+
+    const excludeSet = new Set();
+    if (Array.isArray(randomMeta.excludeMints)) {
+      for (const value of randomMeta.excludeMints) {
+        const normalized = normaliseSolMint(value);
+        if (normalized) excludeSet.add(normalized);
+      }
+    }
+    const currentIn = normaliseSolMint(logicalStep.inMint ?? WSOL_MINT);
+    const currentOut = normaliseSolMint(logicalStep.outMint);
+    if (currentIn) excludeSet.add(currentIn);
+    if (currentOut) excludeSet.add(currentOut);
+
+    const selectMint = typeof options.selectMint === "function" ? options.selectMint : null;
+    let chosenMint = null;
+    if (selectMint) {
+      const selection = selectMint({
+        ...randomMeta,
+        excludeMints: Array.from(excludeSet),
+        poolMints: randomMeta.poolMints ?? planPoolMints,
+      });
+      if (selection) {
+        if (typeof selection === "string") {
+          chosenMint = selection;
+        } else if (typeof selection === "object" && selection.mint) {
+          chosenMint = selection.mint;
+        }
+      }
+    }
+
+    let candidates = pool.filter((mint) => !excludeSet.has(mint));
+    if (candidates.length === 0) {
+      candidates = pool;
+    }
+    if (!chosenMint) {
+      if (candidates.length === 0) {
+        throw new Error("no eligible mints available for randomization");
+      }
+      let roll = Number(effectiveRng());
+      if (!Number.isFinite(roll)) roll = Math.random();
+      if (roll < 0) roll = 0;
+      if (roll >= 1) roll = 1 - Number.EPSILON;
+      const index = Math.min(candidates.length - 1, Math.floor(roll * candidates.length));
+      chosenMint = candidates[index];
+    }
+
+    const normalizedChoice = normaliseSolMint(chosenMint);
+    if (!normalizedChoice) {
+      throw new Error("random mint selection produced an invalid result");
+    }
+
+    const record = {
+      inMint: currentIn ?? WSOL_MINT,
+      outMint: normalizedChoice,
+      sourceBalance: logicalStep.sourceBalance ?? { kind: "sol" },
+    };
+    if (sessionState && sessionKey) {
+      sessionState.set(sessionKey, { ...record });
+    }
+    return record;
+  }
+
+  if (mode === "session-to-sol") {
+    const existing = resolveFromSession(sessionState, sessionKey);
+    if (!existing || !existing.outMint) {
+      throw new Error("random session has no recorded mint");
+    }
+    return {
+      inMint: existing.outMint,
+      outMint: logicalStep.outMint ?? WSOL_MINT,
+      sourceBalance:
+        existing.sourceBalance && existing.sourceBalance.kind
+          ? existing.sourceBalance
+          : { kind: "spl", mint: existing.outMint },
+    };
+  }
+
+  return null;
 }
 
 export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {}) {
