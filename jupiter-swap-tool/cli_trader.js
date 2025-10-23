@@ -68,6 +68,12 @@ import {
 // --------------------------------------------------
 
 const TOOL_VERSION = "1.1.2";
+const GENERAL_USAGE_MESSAGE =
+  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+
+function printGeneralUsage() {
+  console.log(GENERAL_USAGE_MESSAGE);
+}
 
 // ---------------- Config ----------------
 // All of the CLI's tunable parameters live in this block so the rest of the
@@ -10182,19 +10188,33 @@ async function perpsDecreaseCommand(rawArgs) {
 // appropriate command implementation. New commands should be registered here.
 async function main() {
   const startupResources = ensureStartupResources();
+  const args = process.argv.slice(2);
+  const cmd = args[0];
+  const normalizedCmd =
+    typeof cmd === "string" ? cmd.trim().toLowerCase() : "";
   const skipBanner =
     process.env.JUPITER_SWAP_TOOL_NO_BANNER === "1" ||
-    process.env.JUPITER_NO_BANNER === "1";
+    process.env.JUPITER_NO_BANNER === "1" ||
+    normalizedCmd === "help" ||
+    normalizedCmd === "--help" ||
+    normalizedCmd === "-h" ||
+    normalizedCmd === "version" ||
+    normalizedCmd === "--version" ||
+    normalizedCmd === "-v";
   if (!skipBanner) {
     printStartupBanner();
   }
   announceStartupResources(startupResources, { skipBanner });
-  const args = process.argv.slice(2);
-  const cmd = args[0];
-  if (!cmd) {
-    console.log(
-      "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets"
-    );
+  if (!cmd || normalizedCmd === "help" || normalizedCmd === "--help" || normalizedCmd === "-h") {
+    printGeneralUsage();
+    process.exit(0);
+  }
+  if (
+    normalizedCmd === "version" ||
+    normalizedCmd === "--version" ||
+    normalizedCmd === "-v"
+  ) {
+    console.log(`Jupiter Swap Tool v${TOOL_VERSION}`);
     process.exit(0);
   }
 

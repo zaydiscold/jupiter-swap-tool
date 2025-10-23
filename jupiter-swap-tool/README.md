@@ -8,6 +8,8 @@
 5. Open wallet tools with hotkey `1` to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
 6. Use the hotkeys listed below to run funding, sweeping, swap, lend, or perps routines.
 
+Run `node cli_trader.js --help` at any time to print the full command summary, or `node cli_trader.js --version` to confirm the CLI build you have installed.
+
 **Note**: The `keypairs/` directory is excluded from git and will be created automatically when you generate your first wallet.
 
 Node/CLI tool for managing batches of Solana wallets, funding them, and copying swaps through Jupiter. This sheet lists the essentials so you can launch the script without digging into the source.
