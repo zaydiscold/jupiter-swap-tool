@@ -45,6 +45,7 @@ function defaultSymbolForMint(mint) {
 
 function defaultLoadKeypairFromFile(filepath) {
   const raw = fs.readFileSync(filepath, "utf8");
+  let jsonError;
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
@@ -55,16 +56,28 @@ function defaultLoadKeypairFromFile(filepath) {
         return Keypair.fromSecretKey(Uint8Array.from(parsed.secretKey));
       }
       if (typeof parsed.secretKeyBase58 === "string") {
-        return Keypair.fromSecretKey(bs58.decode(parsed.secretKeyBase58));
+        const base58 = parsed.secretKeyBase58.trim();
+        if (!base58) {
+          throw new Error("secretKeyBase58 is empty");
+        }
+        return Keypair.fromSecretKey(bs58.decode(base58));
       }
     }
   } catch (e) {
+    jsonError = e;
     // Fall through to attempt base58 decoding below
   }
   try {
-    const buf = bs58.decode(raw);
+    const rawTrimmed = raw.trim();
+    if (!rawTrimmed) {
+      throw new Error("Key file is empty");
+    }
+    const buf = bs58.decode(rawTrimmed);
     return Keypair.fromSecretKey(buf);
   } catch (err) {
+    if (jsonError && !(jsonError instanceof SyntaxError)) {
+      throw new Error(`Cannot parse keyfile ${filepath}: ${jsonError.message}`);
+    }
     throw new Error(`Cannot parse keyfile ${filepath}: ${err.message}`);
   }
 }
