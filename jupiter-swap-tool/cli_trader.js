@@ -51,6 +51,8 @@ import {
   registerHooks as registerCampaignHooks,
   truncatePlanToBudget,
   CAMPAIGNS,
+  RANDOM_MINT_PLACEHOLDER,
+  resolveRandomizedStep,
 } from "./chains/solana/campaigns_runtime.js";
 import {
   listWallets as sharedListWallets,
@@ -67,7 +69,7 @@ import {
 
 const TOOL_VERSION = "1.1.2";
 const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
@@ -4968,7 +4970,7 @@ async function handleCampaignCommand(rawArgs) {
   const [campaignKeyRaw, durationKeyRaw] = rest;
   if (!campaignKeyRaw || !durationKeyRaw) {
     throw new Error(
-      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
+      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
     );
   }
   const campaignKey = campaignKeyRaw.toLowerCase();
@@ -5042,7 +5044,12 @@ async function handleCampaignCommand(rawArgs) {
       );
       continue;
     }
-    preparedPlans.set(pubkey, { schedule: truncated, rng: plan.rng });
+      preparedPlans.set(pubkey, {
+        schedule: truncated,
+        rng: plan.rng,
+        randomSessions: plan.randomSessions,
+        poolMints: plan.poolMints,
+      });
   }
 
   if (preparedPlans.size === 0) {
@@ -6343,6 +6350,135 @@ const PREWRITTEN_FLOW_DEFINITIONS = new Map([
       defaultDurationMs: 45 * 60 * 1000,
     },
   ],
+  [
+    "icarus",
+    {
+      key: "icarus",
+      label: "Icarus",
+      description:
+        "High-tempo random meme rotations that return to SOL between bursts.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.08, max: 0.22 },
+          description: "Deploy SOL into a random fanout token",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "icarus-core",
+            poolTags: ["fanout", "default-sweep", "long-circle"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest the random position back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "icarus-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 18, max: 120 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 35_000, max: 95_000 },
+      defaultDurationMs: 40 * 60 * 1000,
+    },
+  ],
+  [
+    "zenith",
+    {
+      key: "zenith",
+      label: "Zenith",
+      description:
+        "Mid-tempo rotations that pivot between random pools before settling in SOL.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.1, max: 0.28 },
+          description: "Seed a random long-circle token from SOL",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "zenith-core",
+            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: "random",
+          description: "Rotate into another random pool before returning",
+          randomization: {
+            mode: "session-to-random",
+            sessionGroup: "zenith-core",
+            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Realise the position back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "zenith-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 24, max: 150 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 45_000, max: 120_000 },
+      defaultDurationMs: 55 * 60 * 1000,
+    },
+  ],
+  [
+    "aurora",
+    {
+      key: "aurora",
+      label: "Aurora",
+      description:
+        "Slow and steady random accumulations cycling through secondary pools.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.05, max: 0.16 },
+          description: "Feather SOL into a random secondary token",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "aurora-core",
+            poolTags: ["fanout", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Rebalance back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "aurora-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 12, max: 90 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 60_000, max: 150_000 },
+      defaultDurationMs: 70 * 60 * 1000,
+    },
+  ],
 ]);
 
 function normalizePrewrittenFlowKey(key) {
@@ -6533,6 +6669,52 @@ async function runPrewrittenFlow(flowKey, options = {}) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
 
+  const flowRandomSessions = new Map();
+  const flowRng = typeof options.rng === "function" ? options.rng : Math.random;
+  const selectMintForFlow = (randomMeta = {}) => {
+    let pool = TOKEN_CATALOG.filter((entry) => entry && entry.mint);
+    if (Array.isArray(randomMeta.poolTags) && randomMeta.poolTags.length > 0) {
+      const tagSet = new Set(
+        randomMeta.poolTags
+          .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : ""))
+          .filter((tag) => tag.length > 0)
+      );
+      pool = pool.filter((entry) =>
+        Array.isArray(entry.tags) && entry.tags.some((tag) => tagSet.has(tag))
+      );
+    }
+    if (Array.isArray(randomMeta.poolMints) && randomMeta.poolMints.length > 0) {
+      const allowed = new Set(
+        randomMeta.poolMints
+          .map((mint) => (typeof mint === "string" ? mint : null))
+          .filter(Boolean)
+      );
+      pool = pool.filter((entry) => allowed.has(entry.mint));
+    }
+    const excludeSet = new Set(
+      (randomMeta.excludeMints || [])
+        .map((mint) => (typeof mint === "string" ? normaliseSolMint(mint) : null))
+        .filter(Boolean)
+    );
+    const candidates = pool.filter((entry) => {
+      if (!entry || !entry.mint) return false;
+      const normalized = normaliseSolMint(entry.mint);
+      if (excludeSet.has(normalized)) return false;
+      return !SOL_LIKE_MINTS.has(entry.mint);
+    });
+    if (candidates.length === 0) {
+      return null;
+    }
+    const pickIndex = Math.floor(flowRng() * candidates.length) % candidates.length;
+    const pick = candidates[pickIndex] || candidates[0];
+    if (!pick) return null;
+    return {
+      mint: pick.mint,
+      symbol: pick.symbol,
+      decimals: pick.decimals ?? 6,
+    };
+  };
+
   let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
     ? options.wallets
     : listWallets();
@@ -6578,18 +6760,69 @@ async function runPrewrittenFlow(flowKey, options = {}) {
   const schedule = [];
   let currentMint = options.startMint || flow.startMint || SOL_MINT;
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
-    for (const step of cycleTemplate) {
+    const sessionGroups = new Map();
+    for (let stepIndex = 0; stepIndex < cycleTemplate.length; stepIndex += 1) {
+      const step = cycleTemplate[stepIndex];
       const fromMint = step.fromMint || currentMint;
       const toMint = step.toMint;
       if (!toMint) {
         throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
       const amount = cloneFlowAmount(step.amount);
+      let randomization = null;
+      if (step.randomization) {
+        randomization = { ...step.randomization };
+        if (Array.isArray(step.randomization.poolTags)) {
+          randomization.poolTags = step.randomization.poolTags
+            .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : ""))
+            .filter((tag, idx, arr) => tag.length > 0 && arr.indexOf(tag) === idx);
+        }
+        if (Array.isArray(step.randomization.poolMints)) {
+          const seen = new Set();
+          randomization.poolMints = step.randomization.poolMints
+            .map((mint) => (typeof mint === "string" ? mint : null))
+            .filter((mint) => {
+              if (!mint || seen.has(mint)) return false;
+              seen.add(mint);
+              return true;
+            });
+        }
+        if (Array.isArray(step.randomization.excludeMints)) {
+          const seen = new Set();
+          randomization.excludeMints = step.randomization.excludeMints
+            .map((mint) => (typeof mint === "string" ? normaliseSolMint(mint) : null))
+            .filter((mint) => {
+              if (!mint || seen.has(mint)) return false;
+              seen.add(mint);
+              return true;
+            });
+        }
+        const groupLabel =
+          typeof randomization.sessionGroup === "string"
+            ? randomization.sessionGroup.trim()
+            : "";
+        if (groupLabel.length > 0) {
+          let assigned = sessionGroups.get(groupLabel);
+          if (!assigned) {
+            assigned = `${flow.key}-${groupLabel}-${cycleIndex}`;
+            sessionGroups.set(groupLabel, assigned);
+          }
+          randomization.sessionKey = assigned;
+        } else if (
+          typeof randomization.sessionKey === "string" &&
+          randomization.sessionKey.length > 0
+        ) {
+          randomization.sessionKey = `${randomization.sessionKey}-${cycleIndex}-${stepIndex}`;
+        } else {
+          randomization.sessionKey = `${flow.key}-${cycleIndex}-${stepIndex}`;
+        }
+      }
       const entry = {
         ...step,
         fromMint,
         toMint,
         amount,
+        randomization,
       };
       schedule.push(entry);
       currentMint = toMint;
@@ -6660,16 +6893,30 @@ async function runPrewrittenFlow(flowKey, options = {}) {
     const normalizedAmount = normalizeFlowAmount(step.amount);
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
+    let resolvedStep;
+    try {
+      resolvedStep = resolveRandomizedStep(step, flowRng, {
+        sessionState: flowRandomSessions,
+        selectMint: selectMintForFlow,
+      });
+    } catch (err) {
+      console.error(
+        paint(`  Flow hop skipped: ${err?.message || err}`, "warn")
+      );
+      continue;
+    }
+    const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
+    const resolvedToMint = resolvedStep?.outMint ?? step.toMint;
     const descriptionParts = [
       hopLabel,
-      `${describeMintLabel(step.fromMint)} → ${describeMintLabel(step.toMint)}`,
+      `${describeMintLabel(resolvedFromMint)} → ${describeMintLabel(resolvedToMint)}`,
       amountLabel,
     ];
     if (step.description) descriptionParts.push(`— ${step.description}`);
     console.log(paint(descriptionParts.join(" "), "info"));
 
     try {
-      await doSwapAcross(step.fromMint, step.toMint, normalizedAmount, {
+      await doSwapAcross(resolvedFromMint, resolvedToMint, normalizedAmount, {
         wallets: walletList,
         quietSkips: true,
         suppressMetadata: true,
@@ -6679,7 +6926,7 @@ async function runPrewrittenFlow(flowKey, options = {}) {
           options.walletDelayMs ??
           DELAY_BETWEEN_CALLS_MS,
       });
-      currentMint = step.toMint;
+      currentMint = resolvedToMint;
     } catch (err) {
       console.error(
         paint(`  Flow hop failed: ${err?.message || err}`, "error")
