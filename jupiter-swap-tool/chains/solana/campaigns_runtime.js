@@ -101,6 +101,21 @@ export function pickPortionLamports(rng, spendableLamports, options = {}) {
   return amount > 0n ? amount : 0n;
 }
 
+function pickSpendFraction(rng) {
+  const baseDenominator = pickInt(rng, 4, 9);
+  const base = 1 / baseDenominator;
+  const jitter = 0.8 + rng() * 0.4;
+  const raw = base * jitter;
+  return Math.min(0.65, Math.max(0.08, raw));
+}
+
+function clampSpendFraction(value) {
+  if (!Number.isFinite(value)) {
+    return 0.25;
+  }
+  return Math.min(0.65, Math.max(0.05, value));
+}
+
 function estimateStepCostLamports(step) {
   let total = FEE_LAMPORTS + JUP_BUFFER_LAMPORTS;
   if (step?.logicalStep?.requiresAta) {
@@ -182,14 +197,14 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
+  let basePath = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      basePath = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
         inMint: WSOL_MINT,
@@ -210,7 +225,7 @@ export function buildTimedPlanForWallet({
     });
   }
 
-  if (!logicalSteps.length) {
+  if (!basePath.length) {
     return { schedule: [] };
   }
 
@@ -218,10 +233,24 @@ export function buildTimedPlanForWallet({
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
+  let pathIdx = 0;
+  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
   for (let idx = 0; idx < safeTarget; idx += 1) {
-    const logical = logicalSteps[idx % logicalSteps.length];
+    const template = basePath[pathIdx % basePath.length];
+    const toMint = template?.toMint;
+    if (!toMint) {
+      break;
+    }
+    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
+    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
+    const logical = {
+      fromMint: fromMintForStep,
+      toMint,
+      spendFraction,
+      requiresAta: toMint !== WSOL_MINT,
+    };
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
@@ -233,6 +262,8 @@ export function buildTimedPlanForWallet({
       idx,
     });
     sinceCheckpoint += 1;
+    currentFromMint = toMint;
+    pathIdx = (pathIdx + 1) % basePath.length;
     if (sinceCheckpoint >= checkpointEvery) {
       sinceCheckpoint = 0;
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
@@ -242,6 +273,7 @@ export function buildTimedPlanForWallet({
         logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false, sourceBalance: { kind: "sol" } },
         idx: idx + 0.1,
       });
+      currentFromMint = WSOL_MINT;
     }
   }
 
