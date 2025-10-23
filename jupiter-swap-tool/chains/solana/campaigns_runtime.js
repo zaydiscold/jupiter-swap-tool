@@ -297,64 +297,41 @@ export function resolveScheduledLogicalStep(logicalStep, rng) {
 }
 
 function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
-  if (!Number.isFinite(hopCount) || hopCount <= 0) {
-    return [];
-  }
-
   const normalizedPool = Array.isArray(poolMints)
-    ? poolMints.filter((entry) => entry?.mint && entry.mint !== WSOL_MINT)
+    ? poolMints
+        .map((entry) => entry?.mint)
+        .filter((mint) => mint && mint !== WSOL_MINT)
     : [];
-  if (normalizedPool.length === 0) {
-    return [];
-  }
-
-  const shuffled = shuffle(rng, normalizedPool);
-  const cycle = [];
-  for (const entry of shuffled) {
-    if (entry.mint && !cycle.includes(entry.mint)) {
-      cycle.push(entry.mint);
-    }
-  }
-  if (cycle.length === 0) {
-    return [];
-  }
+  const fallbackCycle =
+    normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
 
   const steps = [];
   let currentMint = WSOL_MINT;
-  let cycleIdx = 0;
-  const safeHopCount = Math.max(1, Math.floor(hopCount));
-
-  for (let hop = 0; hop < safeHopCount; hop += 1) {
-    const isFinalHop = hop === safeHopCount - 1;
-    let nextMint;
-
-    if (currentMint === WSOL_MINT) {
-      nextMint = cycle[cycleIdx % cycle.length];
-      cycleIdx += 1;
-      if (!nextMint || nextMint === WSOL_MINT) {
-        const alt = cycle.find((mint) => mint !== WSOL_MINT);
-        if (!alt) {
-          break;
-        }
-        nextMint = alt;
-      }
-    } else if (isFinalHop && cycle.length > 1) {
-      const candidate = cycle[cycleIdx % cycle.length];
-      cycleIdx += 1;
-      if (candidate && candidate !== currentMint) {
-        nextMint = candidate;
-      }
-    }
-
-    if (!nextMint || nextMint === currentMint) {
-      nextMint = WSOL_MINT;
-    }
-
-    if (nextMint === currentMint || (isFinalHop && nextMint === currentMint)) {
+  for (let hop = 0; hop < hopCount; hop += 1) {
+    const isFinalHop = hop === hopCount - 1;
+    if (isFinalHop && currentMint === WSOL_MINT) {
       break;
     }
 
-    steps.push({
+    let nextMint;
+    if (currentMint === WSOL_MINT) {
+      const candidateIdx = hop % fallbackCycle.length;
+      nextMint = fallbackCycle[candidateIdx] ?? WSOL_MINT;
+      if (!nextMint || nextMint === WSOL_MINT) {
+        nextMint = fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
+      }
+      if (!nextMint) {
+        nextMint = RANDOM_MINT_PLACEHOLDER;
+      }
+    } else {
+      nextMint = WSOL_MINT;
+    }
+
+    if (!nextMint || nextMint === currentMint) {
+      continue;
+    }
+
+    const step = {
       inMint: currentMint,
       outMint: nextMint,
       requiresAta: nextMint !== WSOL_MINT,
