@@ -4271,10 +4271,32 @@ function ensureCampaignHooksRegistered() {
       const entry = getCampaignWallet(pubkeyBase58);
       const connection = createRpcConnection("confirmed");
       try {
+        const mintPubkey = new PublicKey(mint);
+        let programId = KNOWN_MINTS.get(mint)?.programId || mintMetadataCache.get(mint)?.programId || null;
+        if (!programId) {
+          try {
+            const mintInfo = await connection.getAccountInfo(mintPubkey);
+            const owner = mintInfo?.owner;
+            if (owner?.equals?.(TOKEN_PROGRAM_ID) || owner?.equals?.(TOKEN_2022_PROGRAM_ID)) {
+              programId = owner;
+              const cached = KNOWN_MINTS.get(mint);
+              if (cached && cached.programId !== owner) {
+                KNOWN_MINTS.set(mint, { ...cached, programId: owner });
+              }
+              const cachedMeta = mintMetadataCache.get(mint);
+              if (cachedMeta && cachedMeta.programId !== owner) {
+                mintMetadataCache.set(mint, { ...cachedMeta, programId: owner });
+              }
+            }
+          } catch (err) {
+            if (isRateLimitError(err)) throw err;
+          }
+        }
         return await getTokenBalanceBaseUnits(
           connection,
           entry.wallet.kp.publicKey,
-          new PublicKey(mint)
+          mintPubkey,
+          programId || TOKEN_PROGRAM_ID
         );
       } finally {
         try {
