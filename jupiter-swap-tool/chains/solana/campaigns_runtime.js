@@ -161,6 +161,130 @@ export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   return accepted;
 }
 
+function applyTagFilters(pool, includeSets, excludeTags) {
+  const safePool = Array.isArray(pool) ? pool : [];
+  const includeList = Array.isArray(includeSets) ? includeSets : [];
+  const fallbackSets = includeList.length > 0 ? [...includeList, null] : [null];
+  const excludes = Array.isArray(excludeTags) ? excludeTags : [];
+
+  const applyExclude = (entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return [];
+    }
+    if (!excludes.length) {
+      return entries.filter((entry) => entry && entry.mint);
+    }
+    const filtered = entries.filter((entry) => {
+      if (!entry || !entry.mint) return false;
+      const tags = Array.isArray(entry.tags) ? entry.tags : [];
+      const excluded = tags.some((tag) => excludes.includes(tag));
+      return !excluded;
+    });
+    return filtered.length > 0 ? filtered : entries.filter((entry) => entry && entry.mint);
+  };
+
+  for (const tagSet of fallbackSets) {
+    let candidates = safePool;
+    if (Array.isArray(tagSet) && tagSet.length > 0) {
+      candidates = safePool.filter((entry) => {
+        if (!entry || !entry.mint) return false;
+        const tags = Array.isArray(entry.tags) ? entry.tags : [];
+        return tags.some((tag) => tagSet.includes(tag));
+      });
+    }
+    const afterExclude = applyExclude(candidates);
+    if (afterExclude.length > 0) {
+      return afterExclude;
+    }
+  }
+
+  return applyExclude(safePool);
+}
+
+export function resolveScheduledLogicalStep(logicalStep, rng) {
+  if (!logicalStep) {
+    return null;
+  }
+  if (logicalStep.resolved && logicalStep.resolved.outMint) {
+    return logicalStep.resolved;
+  }
+  if (logicalStep.resolver !== "RANDOM") {
+    return logicalStep;
+  }
+
+  const pool = Array.isArray(logicalStep.pool) ? logicalStep.pool : [];
+  const validPool = pool.filter((entry) => entry && entry.mint);
+  if (validPool.length === 0) {
+    throw new Error("random logical step has empty pool");
+  }
+
+  const includeSets = [];
+  if (Array.isArray(logicalStep.includeTags) && logicalStep.includeTags.length > 0) {
+    includeSets.push(logicalStep.includeTags);
+  }
+  if (
+    Array.isArray(logicalStep.fallbackIncludeTags) &&
+    logicalStep.fallbackIncludeTags.length > 0
+  ) {
+    includeSets.push(logicalStep.fallbackIncludeTags);
+  }
+
+  const excludeTags = Array.isArray(logicalStep.excludeTags)
+    ? logicalStep.excludeTags
+    : [];
+
+  let candidates = applyTagFilters(validPool, includeSets, excludeTags);
+  const disallow = new Set();
+  if (logicalStep.inMint) {
+    disallow.add(logicalStep.inMint);
+  }
+  if (Array.isArray(logicalStep.disallowMints)) {
+    for (const mint of logicalStep.disallowMints) {
+      if (mint) disallow.add(mint);
+    }
+  }
+  if (disallow.size > 0) {
+    const filtered = candidates.filter((entry) => !disallow.has(entry.mint));
+    if (filtered.length > 0) {
+      candidates = filtered;
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new Error("random logical step has no eligible candidates");
+  }
+
+  const randomFn = typeof rng === "function" ? rng : Math.random;
+  const idx = Math.floor(randomFn() * candidates.length);
+  const chosen = candidates[Math.min(idx, candidates.length - 1)];
+  if (!chosen?.mint) {
+    throw new Error("random logical step produced invalid candidate");
+  }
+
+  const baseSource =
+    logicalStep.sourceBalance && typeof logicalStep.sourceBalance === "object"
+      ? { ...logicalStep.sourceBalance }
+      : { kind: "sol" };
+
+  const resolved = {
+    inMint: logicalStep.inMint ?? WSOL_MINT,
+    outMint: chosen.mint,
+    requiresAta: chosen.mint !== WSOL_MINT,
+    sourceBalance: baseSource,
+    metadata: {
+      random: true,
+      flow: logicalStep.flow ?? null,
+      symbol: chosen.symbol ?? null,
+      tags: Array.isArray(chosen.tags) ? chosen.tags.slice() : [],
+    },
+  };
+
+  logicalStep.resolved = resolved;
+  logicalStep.requiresAta = resolved.requiresAta;
+  logicalStep.resolvedCandidate = chosen;
+  return resolved;
+}
+
 function planLongChainSteps(rng, poolMints) {
   if (!Array.isArray(poolMints) || poolMints.length === 0) {
     return [];
@@ -504,6 +628,7 @@ export function instantiateCampaignForWallets({
       mint: token.mint,
       symbol: token.symbol,
       decimals: token.decimals ?? 6,
+      tags: Array.isArray(token.tags) ? token.tags.slice() : [],
     }))
     .filter((entry) => entry.mint);
 
@@ -601,7 +726,7 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports);
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports, resolvedStep);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {

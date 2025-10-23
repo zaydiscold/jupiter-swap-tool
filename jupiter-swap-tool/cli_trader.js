@@ -50,6 +50,7 @@ import {
   executeTimedPlansAcrossWallets,
   registerHooks as registerCampaignHooks,
   truncatePlanToBudget,
+  resolveScheduledLogicalStep,
   CAMPAIGNS,
   RANDOM_MINT_PLACEHOLDER,
   resolveRandomizedStep,
@@ -5751,7 +5752,8 @@ async function handleCampaignCommand(rawArgs) {
 
   campaignDryRun = dryRun;
   const swapCounts = [];
-  for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+  for (const [pubkey, planEntry] of preparedPlans.entries()) {
+    const schedule = Array.isArray(planEntry.schedule) ? planEntry.schedule : [];
     const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
     const fanOutSteps = schedule.filter((step) => step.kind === "fanOutSwap").length;
     const sweepSteps = schedule.filter((step) => step.kind === "sweepToSOL").length;
