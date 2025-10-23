@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+export const RANDOM_MINT_PLACEHOLDER = "RANDOM";
 export const MAX_INFLIGHT = 4;
 export const JITTER_FRACTION = 0.6;
 export const CHECKPOINT_SOL_EVERY_MIN = 5;
@@ -264,6 +265,35 @@ export function buildTimedPlanForWallet({
         sourceBalance: { kind: "sol" },
       }));
     }
+  } else if (kind === "icarus" || kind === "zenith" || kind === "aurora") {
+    const pairs = Math.max(1, Math.ceil(safeTarget / 2));
+    const steps = [];
+    for (let pairIndex = 0; pairIndex < pairs; pairIndex += 1) {
+      const sessionKey = `${kind}-${pubkey}-${pairIndex}`;
+      steps.push({
+        inMint: WSOL_MINT,
+        outMint: RANDOM_MINT_PLACEHOLDER,
+        requiresAta: true,
+        sourceBalance: { kind: "sol" },
+        randomization: {
+          mode: "sol-to-random",
+          sessionKey,
+          poolMints,
+          excludeMints: [WSOL_MINT],
+        },
+      });
+      steps.push({
+        inMint: RANDOM_MINT_PLACEHOLDER,
+        outMint: WSOL_MINT,
+        requiresAta: false,
+        sourceBalance: {},
+        randomization: {
+          mode: "session-to-sol",
+          sessionKey,
+        },
+      });
+    }
+    logicalSteps = steps;
   } else {
     logicalSteps = Array.from({ length: safeTarget }, () => {
       const choice = poolMints[Math.floor(rng() * poolMints.length)]?.mint;
@@ -378,6 +408,36 @@ export const CAMPAIGNS = {
       "6h": [260, 520],
     },
   },
+  icarus: {
+    kind: "icarus",
+    tokenTags: ["fanout", "default-sweep", "long-circle"],
+    durations: {
+      "30m": [24, 64],
+      "1h": [60, 140],
+      "2h": [140, 320],
+      "6h": [360, 720],
+    },
+  },
+  zenith: {
+    kind: "zenith",
+    tokenTags: ["default-sweep", "long-circle", "secondary-pool"],
+    durations: {
+      "30m": [18, 42],
+      "1h": [48, 108],
+      "2h": [110, 240],
+      "6h": [280, 560],
+    },
+  },
+  aurora: {
+    kind: "aurora",
+    tokenTags: ["fanout", "secondary-pool"],
+    durations: {
+      "30m": [12, 32],
+      "1h": [36, 80],
+      "2h": [90, 180],
+      "6h": [220, 420],
+    },
+  },
 };
 
 export function instantiateCampaignForWallets({
@@ -434,7 +494,12 @@ export function instantiateCampaignForWallets({
       holdings,
       solBalanceLamports,
     });
-    plansByWallet.set(pubkey, { schedule: plan.schedule, rng });
+    plansByWallet.set(pubkey, {
+      schedule: plan.schedule,
+      rng,
+      randomSessions: new Map(),
+      poolMints,
+    });
   }
 
   return {
@@ -456,13 +521,17 @@ export function registerHooks(nextHooks) {
   HOOKS = { ...HOOKS, ...nextHooks };
 }
 
-export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
+export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {}) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
-  const outMint = logicalStep?.outMint;
-  const inMint = logicalStep?.inMint ?? WSOL_MINT;
-  const sourceMeta = logicalStep?.sourceBalance;
+  const resolved = resolveRandomizedStep(logicalStep, rng, {
+    sessionState: planContext?.randomSessions,
+    poolMints: planContext?.poolMints,
+  });
+  const outMint = resolved?.outMint ?? logicalStep?.outMint;
+  const inMint = resolved?.inMint ?? logicalStep?.inMint ?? WSOL_MINT;
+  const sourceMeta = resolved?.sourceBalance ?? logicalStep?.sourceBalance;
   const usesSol = sourceMeta?.kind === "sol" || inMint === WSOL_MINT;
   if (!outMint) {
     throw new Error("missing out mint");
@@ -699,7 +768,9 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
       } else if (step.kind === "fanOutSwap") {
         await withBackoff(() => doFanoutSwapStep(current.pubkey, step.logicalStep, current.rng, planStates));
       } else {
-        await withBackoff(() => doSwapStep(current.pubkey, step.logicalStep, current.rng));
+        await withBackoff(() =>
+          doSwapStep(current.pubkey, step.logicalStep, current.rng, plan)
+        );
       }
     } catch (err) {
       console.warn(`[${current.pubkey}] step ${step.idx ?? "?"} failed: ${err?.message ?? err}`);
