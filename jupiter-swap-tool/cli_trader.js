@@ -140,6 +140,9 @@ const JUPITER_SWAP_API_BASE =
   process.env.JUPITER_SWAP_API_BASE || "https://lite-api.jup.ag";
 const JUPITER_SWAP_QUOTE_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/quote`;
 const JUPITER_SWAP_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/swap`;
+const JUP_HTTP_TIMEOUT_MS = process.env.JUP_HTTP_TIMEOUT_MS
+  ? Math.max(1_000, parseInt(process.env.JUP_HTTP_TIMEOUT_MS, 10) || 15_000)
+  : 15_000;
 const JUPITER_ULTRA_DEFAULT_BASE = (() => {
   if (JUPITER_ULTRA_API_KEY) {
     return `https://api.jup.ag/ultra/${JUPITER_ULTRA_API_KEY}`;
@@ -2612,7 +2615,7 @@ async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, op
   if (existing) {
     return false;
   }
-  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
+  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, programId, options);
 }
 
 async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
@@ -8517,6 +8520,22 @@ function extractUltraSignature(response) {
 }
 
 // Legacy Lite API helpers --------------------------------------------------
+async function fetchWithTimeout(resource, options = {}, { timeoutMs = JUP_HTTP_TIMEOUT_MS, timeoutMessage } = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timeoutId.unref === "function") timeoutId.unref();
+  try {
+    return await fetch(resource, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(timeoutMessage || `Request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function fetchLegacyQuote(inputMint, outputMint, amountLamports, userPubkey, slippageBps = SLIPPAGE_BPS) {
   const params = new URLSearchParams({
     inputMint,
@@ -8530,7 +8549,9 @@ async function fetchLegacyQuote(inputMint, outputMint, amountLamports, userPubke
 
   let res;
   try {
-    res = await fetch(`${JUPITER_SWAP_QUOTE_URL}?${params.toString()}`);
+    res = await fetchWithTimeout(`${JUPITER_SWAP_QUOTE_URL}?${params.toString()}`, {}, {
+      timeoutMessage: `Quote request timed out after ${JUP_HTTP_TIMEOUT_MS}ms`,
+    });
   } catch (err) {
     throw new Error(`Quote request failed to reach Jupiter: ${err.message}`);
   }
@@ -8567,11 +8588,15 @@ async function fetchLegacySwap(quoteResponse, userPublicKey, wrapAndUnwrapSol) {
 
   let res;
   try {
-    res = await fetch(JUPITER_SWAP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    res = await fetchWithTimeout(
+      JUPITER_SWAP_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      { timeoutMessage: `Swap request timed out after ${JUP_HTTP_TIMEOUT_MS}ms` }
+    );
   } catch (err) {
     throw new Error(`Swap request failed to reach Jupiter: ${err.message}`);
   }
