@@ -26,6 +26,7 @@ const WALLET_MIN_REST_LAMPORTS = SOL_TO_LAMPORTS(WALLET_MIN_REST_SOL);
 const ATA_RENT_EST_LAMPORTS = SOL_TO_LAMPORTS(ATA_RENT_EST_SOL);
 const FEE_LAMPORTS = SOL_TO_LAMPORTS(0.00001);
 const JUP_BUFFER_LAMPORTS = SOL_TO_LAMPORTS(0.0005);
+const BPS_SCALE = 10_000n;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -358,11 +359,15 @@ export function buildTimedPlanForWallet({
       logicalStep: normalizedLogical,
       idx,
     });
+    sequenceIdx += 1;
     sinceCheckpoint += 1;
     currentFromMint = toMint;
     pathIdx = (pathIdx + 1) % basePath.length;
     if (sinceCheckpoint >= checkpointEvery) {
       sinceCheckpoint = 0;
+    }
+
+    if (!checkpointForced && sinceCheckpoint >= checkpointEvery) {
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
       schedule.push({
         kind: "checkpointToSOL",
@@ -374,7 +379,7 @@ export function buildTimedPlanForWallet({
     }
   }
 
-  return { schedule, checkpointEvery };
+  return { schedule, checkpointEvery, ...planMeta };
 }
 
 export const CAMPAIGNS = {
