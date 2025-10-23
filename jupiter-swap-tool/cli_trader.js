@@ -8019,6 +8019,17 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
     let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
     let partialCycleHops = desiredSwapTarget % cycleLength;
+    const normalizedPartialCycleTerminalMint =
+      partialCycleHops > 0 && partialCycleHops <= cycleTemplate.length
+        ? (() => {
+            const terminalStep = cycleTemplate[partialCycleHops - 1] || null;
+            const terminalMint =
+              typeof terminalStep?.toMint === "string"
+                ? terminalStep.toMint
+                : null;
+            return terminalMint ? normaliseSolMint(terminalMint) : null;
+          })()
+        : null;
     let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
     if (executedCycles < minimumCycles) {
       fullCycles = minimumCycles;
@@ -8034,10 +8045,16 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       normalizedTemplateTerminalMint &&
       normalizedStartMint === normalizedTemplateTerminalMint
     ) {
-      fullCycles += 1;
-      partialCycleHops = 0;
-      executedCycles = Math.max(executedCycles, fullCycles);
-      executedSwapTarget = fullCycles * cycleLength;
+      const shouldClosePartialCycle =
+        !normalizedPartialCycleTerminalMint ||
+        normalizedPartialCycleTerminalMint !== normalizedTemplateTerminalMint;
+
+      if (shouldClosePartialCycle) {
+        fullCycles += 1;
+        partialCycleHops = 0;
+        executedCycles = Math.max(executedCycles, fullCycles);
+        executedSwapTarget = fullCycles * cycleLength;
+      }
     }
 
     const combinedRandomOptions = combineRandomMintOptions(
