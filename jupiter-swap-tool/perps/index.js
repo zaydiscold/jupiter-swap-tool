@@ -19,11 +19,10 @@ import {
 } from "./data.js";
 import { structuredLog, toSerializable, toPublicKey } from "./utils.js";
 import {
-  listWallets as cliListWallets,
-  ensureAtaForMint as cliEnsureAtaForMint,
-  ensureWrappedSolBalance as cliEnsureWrappedSolBalance,
-  resolveTokenProgramForMint as cliResolveTokenProgramForMint,
-} from "../cli_trader.js";
+  listWallets as helperListWallets,
+  ensureAtaForMint as helperEnsureAtaForMint,
+  ensureWrappedSolBalance as helperEnsureWrappedSolBalance,
+} from "../shared/wallet_helpers.js";
 
 export {
   createPerpetualsProgram,
@@ -47,15 +46,15 @@ export {
 };
 
 export function listWallets(...args) {
-  return cliListWallets(...args);
+  return helperListWallets(...args);
 }
 
 export function ensureAtaForMint(...args) {
-  return cliEnsureAtaForMint(...args);
+  return helperEnsureAtaForMint(...args);
 }
 
 export function ensureWrappedSolBalance(...args) {
-  return cliEnsureWrappedSolBalance(...args);
+  return helperEnsureWrappedSolBalance(...args);
 }
 
 export function resolveTokenProgramForMint(...args) {
