@@ -4706,6 +4706,9 @@ function ensureCampaignHooksRegistered() {
         } catch (_) {}
       }
     },
+    getSplLamports: async (pubkeyBase58, mint) => {
+      return campaignGetSplLamports(pubkeyBase58, mint);
+    },
     jupiterLiteSwap: async (pubkeyBase58, inMint, outMint, lamports) => {
       return performCampaignSwap({
         pubkeyBase58,

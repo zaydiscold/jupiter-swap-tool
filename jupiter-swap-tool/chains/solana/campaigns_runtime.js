@@ -13,6 +13,7 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
   const scaled = Math.ceil(numeric * 1_000_000_000);
@@ -444,6 +445,7 @@ export function instantiateCampaignForWallets({
 
 let HOOKS = {
   getSolLamports: null,
+  getSplLamports: null,
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
