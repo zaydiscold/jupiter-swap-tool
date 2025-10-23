@@ -1049,6 +1049,18 @@ async function fetchPricesForMints(mints) {
   }
 }
 
+function buildJsonApiHeaders(headers = {}, { includeUltraKey = false } = {}) {
+  const baseHeaders = {
+    accept: "application/json",
+    "content-type": "application/json",
+    ...(headers || {}),
+  };
+  if (includeUltraKey && SHOULD_SEND_ULTRA_HEADER) {
+    baseHeaders["x-api-key"] = JUPITER_ULTRA_API_KEY;
+  }
+  return baseHeaders;
+}
+
 async function namespaceApiRequest({
   base,
   path,
@@ -1070,14 +1082,7 @@ async function namespaceApiRequest({
       url.searchParams.set(key, String(value));
     }
   }
-  const baseHeaders = {
-    accept: "application/json",
-    "content-type": "application/json",
-    ...(headers || {}),
-  };
-  if (SHOULD_SEND_ULTRA_HEADER) {
-    baseHeaders["x-api-key"] = JUPITER_ULTRA_API_KEY;
-  }
+  const baseHeaders = buildJsonApiHeaders(headers, { includeUltraKey: true });
   const init = {
     method,
     headers: baseHeaders,
@@ -6488,11 +6493,7 @@ async function ultraApiRequest({ path, method = "POST", body, query, headers } =
   }
   const init = {
     method,
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      ...(headers || {}),
-    },
+    headers: buildJsonApiHeaders(headers, { includeUltraKey: true }),
   };
   if (method && method.toUpperCase() !== "GET") {
     init.body = JSON.stringify(body ?? {});
