@@ -5066,7 +5066,8 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
-  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const targetSampleRng =
+    typeof options.rng === "function" ? options.rng : Math.random;
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
@@ -5101,7 +5102,7 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
   let sampledSwapTarget = hasOverride
     ? Math.max(swapRangeMin, Math.floor(normalizedOverride))
-    : pickIntInclusive(rng, swapRangeMin, swapRangeMax);
+    : pickIntInclusive(targetSampleRng, swapRangeMin, swapRangeMax);
 
   const minimumCycles = Math.max(
     1,
@@ -5149,7 +5150,17 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
 
   const legs = Array.isArray(definition.legs) ? definition.legs : [];
   const legCount = legs.length;
-  const plannedSwapTarget = legCount > 0 ? loops * swapsPerCycle : 0;
+  const swapsPerCycleInt = Math.max(1, Math.floor(swapsPerCycle));
+  const cycleLegSequence = [];
+  if (legCount > 0) {
+    for (let cycleIndex = 0; cycleIndex < swapsPerCycleInt; cycleIndex += 1) {
+      const legIndex = cycleIndex % legCount;
+      const leg = legs[legIndex];
+      cycleLegSequence.push({ cycleIndex, legIndex, leg });
+    }
+  }
+
+  const plannedSwapTarget = cycleLegSequence.length > 0 ? loops * cycleLegSequence.length : 0;
   if (plannedSwapTarget > 0) {
     effectiveSwapTarget = plannedSwapTarget;
   }
@@ -5160,25 +5171,27 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
       : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const sampledSegments = [];
-  if (legCount > 0) {
-    for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
-      for (let cycleIndex = 0; cycleIndex < swapsPerCycle; cycleIndex += 1) {
-        const legIndex = cycleIndex % legCount;
-        const leg = legs[legIndex];
-        const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
-        const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
-        const waitMs = pickIntInclusive(rng, minMs, maxMs);
-        sampledSegments.push({
-          flowKey: normalizedKey,
-          loopIndex,
-          legIndex,
-          legKey: leg?.key,
-          label: leg?.label,
-          minMs,
-          maxMs,
-          waitMs,
-        });
-      }
+  if (cycleLegSequence.length > 0) {
+    const cycleLength = cycleLegSequence.length;
+    const totalSegments = loops * cycleLength;
+    for (let segmentIndex = 0; segmentIndex < totalSegments; segmentIndex += 1) {
+      const loopIndex = Math.floor(segmentIndex / cycleLength);
+      const cycleIndex = segmentIndex % cycleLength;
+      const { legIndex, leg } = cycleLegSequence[cycleIndex] || {};
+      const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
+      const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
+      const waitMs = pickIntInclusive(rng, minMs, maxMs);
+      sampledSegments.push({
+        flowKey: normalizedKey,
+        loopIndex,
+        cycleIndex,
+        legIndex,
+        legKey: leg?.key,
+        label: leg?.label,
+        minMs,
+        maxMs,
+        waitMs,
+      });
     }
   }
 
