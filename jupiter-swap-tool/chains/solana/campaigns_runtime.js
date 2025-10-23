@@ -14,6 +14,7 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
   const scaled = Math.ceil(numeric * 1_000_000_000);
@@ -102,6 +103,21 @@ export function pickPortionLamports(rng, spendableLamports, options = {}) {
   return amount > 0n ? amount : 0n;
 }
 
+function pickSpendFraction(rng) {
+  const baseDenominator = pickInt(rng, 4, 9);
+  const base = 1 / baseDenominator;
+  const jitter = 0.8 + rng() * 0.4;
+  const raw = base * jitter;
+  return Math.min(0.65, Math.max(0.08, raw));
+}
+
+function clampSpendFraction(value) {
+  if (!Number.isFinite(value)) {
+    return 0.25;
+  }
+  return Math.min(0.65, Math.max(0.05, value));
+}
+
 function estimateStepCostLamports(step) {
   let total = FEE_LAMPORTS + JUP_BUFFER_LAMPORTS;
   if (step?.logicalStep?.requiresAta) {
@@ -171,164 +187,53 @@ function planBuckshotScatterTargets(rng, poolMints, count) {
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
-function pickRandomMintFromPool(rng, poolMints, options = {}) {
-  const pool = Array.isArray(poolMints) ? poolMints : [];
-  if (pool.length === 0) {
-    return null;
-  }
-  const excludeSet = new Set(
-    (options.excludeMints || []).filter((mint) => typeof mint === "string" && mint.length > 0)
-  );
-  let attempts = pool.length * 2;
-  while (attempts > 0) {
-    const pick = pool[Math.floor(rng() * pool.length)];
-    attempts -= 1;
-    if (!pick || !pick.mint || excludeSet.has(pick.mint)) {
+function normalizeHoldings(rawHoldings) {
+  if (!Array.isArray(rawHoldings)) return [];
+  const results = [];
+  for (const entry of rawHoldings) {
+    const mint = entry?.mint;
+    if (!mint || mint === WSOL_MINT) continue;
+    let amountLamports = entry?.amountLamports ?? entry?.amount ?? entry?.uiAmount ?? 0;
+    if (typeof amountLamports === "string") {
+      try {
+        amountLamports = BigInt(amountLamports);
+      } catch (_) {
+        amountLamports = 0n;
+      }
+    }
+    if (typeof amountLamports === "number") {
+      amountLamports = BigInt(Math.max(0, Math.floor(amountLamports)));
+    }
+    if (typeof amountLamports !== "bigint") {
       continue;
     }
-    return pick;
+    if (amountLamports <= 0n) continue;
+    const locked = entry?.locked === true || entry?.isFrozen === true;
+    if (locked) continue;
+    const decimals = typeof entry?.decimals === "number" ? entry.decimals : 0;
+    results.push({ mint, amountLamports, decimals });
   }
-  for (const entry of pool) {
-    if (entry && entry.mint && !excludeSet.has(entry.mint)) {
-      return entry;
-    }
-  }
-  return null;
+  return results;
 }
 
-function mergeSourceBalance(base, overrides = {}) {
-  if (!base || typeof base !== "object") {
-    base = {};
+function pickCycleFanTargets(rng, poolMints) {
+  if (!Array.isArray(poolMints) || poolMints.length === 0) {
+    return [];
   }
-  const result = { ...base };
-  if (typeof overrides.minRestLamports === "bigint") {
-    result.minRestLamports = overrides.minRestLamports;
-  }
-  if (typeof overrides.dustFloorLamports === "bigint") {
-    result.dustFloorLamports = overrides.dustFloorLamports;
-  }
-  return result;
+  const shuffled = shuffle(rng, poolMints);
+  const minTargets = Math.min(2, shuffled.length);
+  const maxTargets = Math.min(3, shuffled.length);
+  const count = Math.max(minTargets, pickInt(rng, minTargets, maxTargets || minTargets));
+  const picks = shuffled.slice(0, count);
+  const weighted = rng() < 0.5;
+  return picks.map((entry) => ({
+    mint: entry.mint,
+    weight: weighted ? pickInt(rng, 1, 100) : 1,
+  }));
 }
 
-export function resolveRandomizedStep(logicalStep, rng, context = {}) {
-  if (!logicalStep || typeof logicalStep !== "object") {
-    return null;
-  }
-  const randomization = logicalStep.randomization;
-  if (!randomization) {
-    const inMint = logicalStep.inMint ?? WSOL_MINT;
-    const outMint = logicalStep.outMint;
-    return {
-      inMint,
-      outMint,
-      requiresAta:
-        typeof logicalStep.requiresAta === "boolean"
-          ? logicalStep.requiresAta
-          : outMint !== WSOL_MINT,
-      sourceBalance: logicalStep.sourceBalance,
-    };
-  }
-
-  const rngFn = typeof rng === "function" ? rng : Math.random;
-  const sessionState =
-    context.sessionState instanceof Map ? context.sessionState : null;
-  const pool = Array.isArray(randomization.poolMints)
-    ? randomization.poolMints
-    : Array.isArray(context.poolMints)
-    ? context.poolMints
-    : [];
-  const selectMint =
-    typeof context.selectMint === "function"
-      ? (options = randomization, overrideRng = rngFn) =>
-          context.selectMint(
-            { ...randomization, ...(options || {}) },
-            typeof overrideRng === "function" ? overrideRng : rngFn
-          )
-      : (options = randomization, overrideRng = rngFn) =>
-          pickRandomMintFromPool(
-            typeof overrideRng === "function" ? overrideRng : rngFn,
-            pool,
-            { ...randomization, ...(options || {}) }
-          );
-
-  const sessionKey = randomization.sessionKey || null;
-  const excludeMints = randomization.excludeMints || [];
-
-  if (randomization.mode === "sol-to-random") {
-    const pick = selectMint(randomization, rngFn);
-    if (!pick || !pick.mint) {
-      throw new Error("unable to resolve random output mint");
-    }
-    if (sessionState && sessionKey) {
-      sessionState.set(sessionKey, pick.mint);
-    }
-    const source = mergeSourceBalance(logicalStep.sourceBalance, {
-      minRestLamports: logicalStep.sourceBalance?.minRestLamports,
-      dustFloorLamports: logicalStep.sourceBalance?.dustFloorLamports,
-    });
-    return {
-      inMint: WSOL_MINT,
-      outMint: pick.mint,
-      requiresAta: pick.mint !== WSOL_MINT,
-      sourceBalance: { kind: "sol", ...source },
-    };
-  }
-
-  if (randomization.mode === "session-to-sol") {
-    if (!sessionState || !sessionKey || !sessionState.has(sessionKey)) {
-      throw new Error("random session mint unavailable");
-    }
-    const mint = sessionState.get(sessionKey);
-    const source = mergeSourceBalance(logicalStep.sourceBalance, {
-      minRestLamports: logicalStep.sourceBalance?.minRestLamports,
-      dustFloorLamports: logicalStep.sourceBalance?.dustFloorLamports,
-    });
-    return {
-      inMint: mint,
-      outMint: WSOL_MINT,
-      requiresAta: false,
-      sourceBalance: { kind: "spl", mint, ...source },
-    };
-  }
-
-  if (randomization.mode === "session-to-random") {
-    if (!sessionState || !sessionKey || !sessionState.has(sessionKey)) {
-      throw new Error("random session mint unavailable");
-    }
-    const currentMint = sessionState.get(sessionKey);
-    const extendedExclude = Array.isArray(excludeMints)
-      ? [...excludeMints, currentMint]
-      : [currentMint];
-    const pick = selectMint(
-      { ...randomization, excludeMints: extendedExclude },
-      rngFn
-    );
-    if (!pick || !pick.mint) {
-      throw new Error("unable to resolve random hop mint");
-    }
-    sessionState.set(sessionKey, pick.mint);
-    const source = mergeSourceBalance(logicalStep.sourceBalance, {
-      minRestLamports: logicalStep.sourceBalance?.minRestLamports,
-      dustFloorLamports: logicalStep.sourceBalance?.dustFloorLamports,
-    });
-    return {
-      inMint: currentMint,
-      outMint: pick.mint,
-      requiresAta: pick.mint !== WSOL_MINT,
-      sourceBalance: { kind: "spl", mint: currentMint, ...source },
-    };
-  }
-
-  return {
-    inMint: logicalStep.inMint ?? WSOL_MINT,
-    outMint: logicalStep.outMint,
-    requiresAta:
-      typeof logicalStep.requiresAta === "boolean"
-        ? logicalStep.requiresAta
-        : logicalStep.outMint !== WSOL_MINT,
-    sourceBalance: logicalStep.sourceBalance,
-  };
-}
+const SWEEP_MIN_DELAY_MS = 5_000;
+const SWEEP_MAX_DELAY_MS = 10_000;
 
 export function buildTimedPlanForWallet({
   pubkey,
@@ -337,19 +242,21 @@ export function buildTimedPlanForWallet({
   durationMs,
   kind,
   poolMints,
+  holdings = [],
+  solBalanceLamports = 0n,
 }) {
   if (!pubkey || !rng || !Number.isFinite(targetSwaps) || targetSwaps <= 0) {
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
+  let basePath = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      basePath = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
         inMint: WSOL_MINT,
@@ -399,30 +306,61 @@ export function buildTimedPlanForWallet({
     });
   }
 
-  if (!logicalSteps.length) {
+  if (!basePath.length) {
     return { schedule: [] };
   }
 
-  const totalSteps = logicalSteps.length;
-  const baseInterval = Math.max(10_000, Math.floor(durationMs / Math.max(1, totalSteps)));
+  const fanSteps = logicalSteps.filter((step) => step.kind === "fanOutSwap" || !step.kind).length;
+  const swapCountForInterval = kind === "btc-eth-circuit" && fanSteps > 0 ? fanSteps : safeTarget;
+  const baseInterval = Math.max(10_000, Math.floor(durationMs / Math.max(1, swapCountForInterval)));
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
+  let pathIdx = 0;
+  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
-  for (let idx = 0; idx < totalSteps; idx += 1) {
-    const logical = logicalSteps[idx % totalSteps];
+  for (let idx = 0; idx < safeTarget; idx += 1) {
+    const template = basePath[pathIdx % basePath.length];
+    const toMint = template?.toMint;
+    if (!toMint) {
+      break;
+    }
+    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
+    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
+    const logical = {
+      fromMint: fromMintForStep,
+      toMint,
+      spendFraction,
+      requiresAta: toMint !== WSOL_MINT,
+    };
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
-    const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
+    const delta =
+      kind === "btc-eth-circuit" && logical?.kind === "sweepToSOL"
+        ? pickInt(rng, SWEEP_MIN_DELAY_MS, SWEEP_MAX_DELAY_MS)
+        : Math.max(3_000, Math.floor(baseInterval * jitterAmount));
     dueAt += delta;
+    if (logical?.kind === "sweepToSOL") {
+      schedule.push({
+        kind: "sweepToSOL",
+        dueAt,
+        logicalStep: logical.logicalStep,
+        idx,
+      });
+      continue;
+    }
+
+    const normalizedLogical = logical?.logicalStep ? logical.logicalStep : logical;
     schedule.push({
-      kind: "swapHop",
+      kind: logical?.kind === "fanOutSwap" ? "fanOutSwap" : "swapHop",
       dueAt,
-      logicalStep: logical,
+      logicalStep: normalizedLogical,
       idx,
     });
     sinceCheckpoint += 1;
+    currentFromMint = toMint;
+    pathIdx = (pathIdx + 1) % basePath.length;
     if (sinceCheckpoint >= checkpointEvery) {
       sinceCheckpoint = 0;
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
@@ -432,6 +370,7 @@ export function buildTimedPlanForWallet({
         logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false, sourceBalance: { kind: "sol" } },
         idx: idx + 0.1,
       });
+      currentFromMint = WSOL_MINT;
     }
   }
 
@@ -505,6 +444,8 @@ export function instantiateCampaignForWallets({
   campaignKey,
   durationKey,
   walletPubkeys,
+  walletHoldings = new Map(),
+  walletSolBalances = new Map(),
 }) {
   const preset = CAMPAIGNS[campaignKey];
   if (!preset) {
@@ -541,6 +482,8 @@ export function instantiateCampaignForWallets({
   for (const pubkey of walletPubkeys) {
     const rng = walletSeededRng(pubkey);
     const targetSwaps = pickInt(rng, minSwaps, maxSwaps);
+    const holdings = walletHoldings instanceof Map ? walletHoldings.get(pubkey) : null;
+    const solBalanceLamports = walletSolBalances instanceof Map ? walletSolBalances.get(pubkey) : null;
     const plan = buildTimedPlanForWallet({
       pubkey,
       rng,
@@ -548,6 +491,8 @@ export function instantiateCampaignForWallets({
       durationMs,
       kind: preset.kind,
       poolMints,
+      holdings,
+      solBalanceLamports,
     });
     plansByWallet.set(pubkey, {
       schedule: plan.schedule,
@@ -565,6 +510,7 @@ export function instantiateCampaignForWallets({
 
 let HOOKS = {
   getSolLamports: null,
+  getSplLamports: null,
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
@@ -650,6 +596,112 @@ export async function doCheckpointToSOL(pubkeyBase58, rng) {
   return HOOKS.jupiterLiteSwap(pubkeyBase58, holding.mint, WSOL_MINT, lamportsIn);
 }
 
+async function doSweepToSOLStep(pubkeyBase58, logicalStep) {
+  if (!HOOKS.listSweepableHoldings || !HOOKS.jupiterLiteSwap) {
+    return null;
+  }
+  const mint = logicalStep?.mint;
+  if (!mint || mint === WSOL_MINT) {
+    return null;
+  }
+  const holdings = await HOOKS.listSweepableHoldings(pubkeyBase58);
+  if (!Array.isArray(holdings) || holdings.length === 0) {
+    return null;
+  }
+  const target = holdings.find((entry) => entry?.mint === mint);
+  if (!target) {
+    return null;
+  }
+  let amountLamports = target?.amountLamports ?? target?.amount ?? 0n;
+  if (typeof amountLamports === "string") {
+    try {
+      amountLamports = BigInt(amountLamports);
+    } catch (_) {
+      amountLamports = 0n;
+    }
+  }
+  if (typeof amountLamports === "number") {
+    amountLamports = BigInt(Math.max(0, Math.floor(amountLamports)));
+  }
+  if (typeof amountLamports !== "bigint" || amountLamports <= 0n) {
+    return null;
+  }
+  const dustFloor = logicalStep?.dustFloorLamports;
+  if (typeof dustFloor === "number" && dustFloor > 0 && amountLamports < BigInt(Math.floor(dustFloor))) {
+    return null;
+  }
+  if (typeof dustFloor === "bigint" && amountLamports < dustFloor) {
+    return null;
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, mint, WSOL_MINT, amountLamports);
+}
+
+function ensurePlanState(planStates, pubkey) {
+  if (!planStates.has(pubkey)) {
+    planStates.set(pubkey, {
+      fanOutCycles: new Map(),
+    });
+  }
+  return planStates.get(pubkey);
+}
+
+async function doFanoutSwapStep(pubkeyBase58, logicalStep, rng, planStates) {
+  if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
+    throw new Error("campaign hooks not registered");
+  }
+  const cycleId = logicalStep?.cycleId ?? 0;
+  const state = ensurePlanState(planStates, pubkeyBase58);
+  const cycleState = state.fanOutCycles.get(cycleId) || {
+    totalSpendable: null,
+    remaining: null,
+    allocations: new Map(),
+  };
+  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+  if (balanceLamports <= baseReserve) {
+    throw new Error("insufficient spendable SOL for fan-out");
+  }
+  const spendable = balanceLamports - baseReserve;
+  if (cycleState.totalSpendable === null || logicalStep?.targetIndex === 0) {
+    cycleState.totalSpendable = spendable;
+    cycleState.remaining = spendable;
+    cycleState.allocations.clear();
+  }
+  if (cycleState.remaining === null || cycleState.remaining <= 0n) {
+    state.fanOutCycles.set(cycleId, cycleState);
+    return null;
+  }
+  const totalTargets = logicalStep?.totalTargets ?? 1;
+  const weight = BigInt(logicalStep?.weight ?? 0);
+  const totalWeight = BigInt(logicalStep?.totalWeight ?? 0);
+  let amountLamports = 0n;
+  if (logicalStep?.targetIndex === totalTargets - 1) {
+    amountLamports = cycleState.remaining;
+  } else if (totalWeight > 0n) {
+    amountLamports = (cycleState.totalSpendable * weight) / totalWeight;
+  } else {
+    amountLamports = pickPortionLamports(rng, cycleState.remaining);
+  }
+  if (amountLamports > cycleState.remaining) {
+    amountLamports = cycleState.remaining;
+  }
+  if (amountLamports <= 0n) {
+    state.fanOutCycles.set(cycleId, cycleState);
+    return null;
+  }
+  cycleState.remaining -= amountLamports;
+  cycleState.allocations.set(logicalStep?.targetIndex ?? 0, amountLamports);
+  state.fanOutCycles.set(cycleId, cycleState);
+  if (logicalStep?.targetIndex === totalTargets - 1) {
+    state.fanOutCycles.delete(cycleId);
+  }
+  const outMint = logicalStep?.outMint;
+  if (!outMint) {
+    throw new Error("missing fan-out target mint");
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+}
+
 async function withBackoff(fn) {
   const delays = [400, 900, 1800, 3600];
   let lastError = null;
@@ -679,6 +731,7 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
     throw new Error("plansByWallet must be a Map");
   }
   const inflight = new Set();
+  const planStates = new Map();
   const queue = [];
   for (const [pubkey, { schedule, rng }] of plansByWallet.entries()) {
     if (Array.isArray(schedule) && schedule.length > 0) {
@@ -710,6 +763,10 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
     try {
       if (step.kind === "checkpointToSOL") {
         await withBackoff(() => doCheckpointToSOL(current.pubkey, current.rng));
+      } else if (step.kind === "sweepToSOL") {
+        await withBackoff(() => doSweepToSOLStep(current.pubkey, step.logicalStep));
+      } else if (step.kind === "fanOutSwap") {
+        await withBackoff(() => doFanoutSwapStep(current.pubkey, step.logicalStep, current.rng, planStates));
       } else {
         await withBackoff(() =>
           doSwapStep(current.pubkey, step.logicalStep, current.rng, plan)
@@ -734,8 +791,29 @@ export function estimateCampaignVolumeSOL({ plansByWallet }) {
   let lamports = 0n;
   for (const { schedule } of plansByWallet.values()) {
     if (!Array.isArray(schedule)) continue;
-    const swaps = schedule.filter((step) => step.kind === "swapHop").length;
-    lamports += BigInt(swaps) * 10_000_000n;
+    for (const step of schedule) {
+      if (!step || typeof step !== "object") continue;
+      if (step.kind === "fanOutSwap" || step.kind === "swapHop") {
+        let estimated = step?.logicalStep?.estimatedLamports;
+        if (typeof estimated === "string") {
+          try {
+            estimated = BigInt(estimated);
+          } catch (_) {
+            estimated = null;
+          }
+        }
+        if (typeof estimated === "number") {
+          estimated = BigInt(Math.max(0, Math.floor(estimated)));
+        }
+        if (typeof estimated === "bigint" && estimated > 0n) {
+          lamports += estimated;
+        } else {
+          lamports += 10_000_000n;
+        }
+      } else if (step.kind === "sweepToSOL") {
+        lamports += 5_000_000n;
+      }
+    }
   }
   return Number(lamports) / 1_000_000_000;
 }
