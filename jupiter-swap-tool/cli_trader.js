@@ -4267,6 +4267,21 @@ function ensureCampaignHooksRegistered() {
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },
+    getSplTokenLamports: async (pubkeyBase58, mint) => {
+      const entry = getCampaignWallet(pubkeyBase58);
+      const connection = createRpcConnection("confirmed");
+      try {
+        return await getTokenBalanceBaseUnits(
+          connection,
+          entry.wallet.kp.publicKey,
+          new PublicKey(mint)
+        );
+      } finally {
+        try {
+          connection?.destroy?.();
+        } catch (_) {}
+      }
+    },
   });
   campaignHooksRegistered = true;
 }

@@ -97,6 +97,21 @@ export function pickPortionLamports(rng, spendableLamports) {
   return amount > 0n ? amount : 0n;
 }
 
+function pickSpendFraction(rng) {
+  const baseDenominator = pickInt(rng, 4, 9);
+  const base = 1 / baseDenominator;
+  const jitter = 0.8 + rng() * 0.4;
+  const raw = base * jitter;
+  return Math.min(0.65, Math.max(0.08, raw));
+}
+
+function clampSpendFraction(value) {
+  if (!Number.isFinite(value)) {
+    return 0.25;
+  }
+  return Math.min(0.65, Math.max(0.05, value));
+}
+
 function estimateStepCostLamports(step) {
   let total = FEE_LAMPORTS + JUP_BUFFER_LAMPORTS;
   if (step?.logicalStep?.requiresAta) {
@@ -130,23 +145,67 @@ function planLongChainMints(rng, poolMints, length) {
   if (!Array.isArray(poolMints) || poolMints.length === 0) {
     return [];
   }
-  const sequence = [];
-  let last = null;
-  let prev = null;
-  for (let i = 0; i < length; i += 1) {
+
+  const targetLength = Math.max(10, Math.min(Math.max(length || 0, 10), 25));
+  const hops = [];
+  let fromMint = WSOL_MINT;
+  const recentToMints = [];
+
+  for (let i = 0; i < targetLength; i += 1) {
     const shuffled = shuffle(rng, poolMints);
-    let pick = shuffled[0];
-    if (last && pick?.mint === last.mint && shuffled[1]) {
-      pick = shuffled[1];
+    let pick = shuffled.find(
+      (entry) =>
+        entry?.mint &&
+        entry.mint !== fromMint &&
+        !recentToMints.includes(entry.mint)
+    );
+    if (!pick) {
+      pick = shuffled.find((entry) => entry?.mint && entry.mint !== fromMint);
     }
-    if (prev && pick?.mint === prev.mint && shuffled[2]) {
-      pick = shuffled[2];
+    if (!pick) {
+      pick = shuffled.find((entry) => entry?.mint);
     }
-    sequence.push(pick);
-    prev = last;
-    last = pick;
+    if (!pick?.mint) {
+      break;
+    }
+
+    hops.push({
+      fromMint,
+      toMint: pick.mint,
+      spendFraction: pickSpendFraction(rng),
+      forceFromSol: false,
+    });
+
+    recentToMints.push(pick.mint);
+    while (recentToMints.length > 3) {
+      recentToMints.shift();
+    }
+    fromMint = pick.mint;
   }
-  return sequence;
+
+  if (hops.length > 0) {
+    const tailWindow = hops.slice(-3).map((entry) => entry.toMint);
+    const firstToMint = hops[0].toMint;
+    if (tailWindow.includes(firstToMint)) {
+      const shuffled = shuffle(rng, poolMints);
+      const alternate = shuffled.find(
+        (entry) =>
+          entry?.mint &&
+          entry.mint !== hops[hops.length - 1].toMint &&
+          entry.mint !== firstToMint
+      );
+      if (alternate?.mint) {
+        hops[hops.length - 1] = {
+          fromMint: hops[hops.length - 1].fromMint,
+          toMint: alternate.mint,
+          spendFraction: hops[hops.length - 1].spendFraction,
+          forceFromSol: false,
+        };
+      }
+    }
+  }
+
+  return hops;
 }
 
 function planBuckshotScatterTargets(rng, poolMints, count) {
@@ -169,33 +228,28 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
+  let basePath = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     const chainLength = Math.max(safeTarget, 12);
-    const chain = planLongChainMints(rng, poolMints, chainLength);
-    logicalSteps = chain.map((entry) => ({
-      outMint: entry?.mint,
-      requiresAta: entry?.mint !== WSOL_MINT,
-    }));
+    basePath = planLongChainMints(rng, poolMints, chainLength);
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      basePath = [];
     } else {
-      logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
-        outMint: picks[idx % picks.length].mint,
-        requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
+      basePath = picks.map((pick) => ({
+        fromMint: WSOL_MINT,
+        toMint: pick.mint,
+        spendFraction: pickSpendFraction(rng),
+        forceFromSol: true,
       }));
     }
   } else {
-    logicalSteps = Array.from({ length: safeTarget }, () => ({
-      outMint: poolMints[Math.floor(rng() * poolMints.length)]?.mint,
-      requiresAta: true,
-    }));
+    basePath = planLongChainMints(rng, poolMints, Math.max(safeTarget, 10));
   }
 
-  if (!logicalSteps.length) {
+  if (!basePath.length) {
     return { schedule: [] };
   }
 
@@ -203,10 +257,24 @@ export function buildTimedPlanForWallet({
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
+  let pathIdx = 0;
+  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
   for (let idx = 0; idx < safeTarget; idx += 1) {
-    const logical = logicalSteps[idx % logicalSteps.length];
+    const template = basePath[pathIdx % basePath.length];
+    const toMint = template?.toMint;
+    if (!toMint) {
+      break;
+    }
+    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
+    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
+    const logical = {
+      fromMint: fromMintForStep,
+      toMint,
+      spendFraction,
+      requiresAta: toMint !== WSOL_MINT,
+    };
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
@@ -218,15 +286,23 @@ export function buildTimedPlanForWallet({
       idx,
     });
     sinceCheckpoint += 1;
+    currentFromMint = toMint;
+    pathIdx = (pathIdx + 1) % basePath.length;
     if (sinceCheckpoint >= checkpointEvery) {
       sinceCheckpoint = 0;
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
       schedule.push({
         kind: "checkpointToSOL",
         dueAt: dueAt + checkpointDelay,
-        logicalStep: { outMint: WSOL_MINT, requiresAta: false },
+        logicalStep: {
+          fromMint: currentFromMint,
+          toMint: WSOL_MINT,
+          spendFraction: 1,
+          requiresAta: false,
+        },
         idx: idx + 0.1,
       });
+      currentFromMint = WSOL_MINT;
     }
   }
 
@@ -328,6 +404,7 @@ let HOOKS = {
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
+  getSplTokenLamports: null,
 };
 
 export function registerHooks(nextHooks) {
@@ -338,21 +415,54 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
-  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
-  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-  const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
-  if (spendable <= 0n) {
-    throw new Error("insufficient spendable SOL");
+  const fromMint = logicalStep?.fromMint || WSOL_MINT;
+  const toMint = logicalStep?.toMint;
+  const spendFraction = clampSpendFraction(
+    typeof logicalStep?.spendFraction === "number" ? logicalStep.spendFraction : pickSpendFraction(rng)
+  );
+  if (!toMint) {
+    throw new Error("missing destination mint");
   }
-  const amountLamports = pickPortionLamports(rng, spendable);
+
+  let amountLamports = 0n;
+  if (fromMint === WSOL_MINT) {
+    const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+    const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+    const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+    if (spendable <= 0n) {
+      throw new Error("insufficient spendable SOL");
+    }
+    const scaledFraction = BigInt(Math.floor(spendFraction * 10_000));
+    amountLamports = (spendable * scaledFraction) / 10_000n;
+    if (amountLamports < 10_000n) {
+      amountLamports = pickPortionLamports(rng, spendable);
+    }
+    if (amountLamports > spendable) {
+      amountLamports = spendable;
+    }
+  } else {
+    if (!HOOKS.getSplTokenLamports) {
+      throw new Error("spl balance hook not registered");
+    }
+    const balanceLamports = await HOOKS.getSplTokenLamports(pubkeyBase58, fromMint);
+    if (balanceLamports <= 0n) {
+      throw new Error("insufficient SPL balance for hop");
+    }
+    const scaledFraction = BigInt(Math.floor(spendFraction * 10_000));
+    amountLamports = (balanceLamports * scaledFraction) / 10_000n;
+    if (amountLamports <= 0n) {
+      amountLamports = balanceLamports / 2n;
+    }
+    if (amountLamports > balanceLamports) {
+      amountLamports = balanceLamports;
+    }
+  }
+
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
-  const outMint = logicalStep?.outMint;
-  if (!outMint) {
-    throw new Error("missing out mint");
-  }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, fromMint, toMint, amountLamports);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {
