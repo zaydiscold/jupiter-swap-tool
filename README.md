@@ -128,9 +128,9 @@ Double-click `run_cli_trader.command` (right-click → **Open** the first time t
 - `9` – advanced trade tools (target loop, long circle, RPC tester, crew_1 cycle, BTC/ETH sweep, SOL→USDC→POPCAT lap, and the prewritten Arpeggio/Horizon/Echo flows).
 
   Prewritten flow defaults:
-  - **Arpeggio** – ~15 minutes end-to-end (legs wait 2–4 min, 3–5 min, 4–6 min, then 2–4 min).
-  - **Horizon** – ~60 minutes (legs wait 8–12 min, 10–14 min, 12–18 min, 10–16 min, then 8–12 min).
-  - **Echo** – ~6 hours (legs wait 35–55 min, 45–75 min, 60–90 min, 55–95 min, 45–75 min, then 35–55 min).
+  - **Arpeggio** – ~15 minutes end-to-end (legs wait 2–3 min, 3–4 min, 4–5 min, then 3–4 min).
+  - **Horizon** – ~60 minutes (legs wait 9–12 min, 11–15 min, 13–18 min, 11–16 min, then 9–12 min).
+  - **Echo** – ~6 hours (legs wait 38–55 min, 48–72 min, 58–88 min, 53–85 min, 45–70 min, then 38–55 min).
 
   Launching them through the CLI honours `--loops`, `--duration-min`, `--duration`, and `--duration-max` so you can stretch or compress the schedule while the per-leg waits keep their random jitter inside the windows above.
 - `0` – quit immediately.
