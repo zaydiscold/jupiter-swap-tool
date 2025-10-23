@@ -4289,26 +4289,48 @@ function getWalletGuardSummary(options = {}) {
 }
 
 function loadKeypairFromFile(filepath) {
-  const raw = fs.readFileSync(filepath, "utf8").trim();
+  const raw = fs.readFileSync(filepath, "utf8");
+  let jsonError = null;
   try {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
+      if (parsed.length === 0) {
+        throw new Error("Key file is empty");
+      }
       return Keypair.fromSecretKey(Uint8Array.from(parsed));
     }
     if (parsed && typeof parsed === "object") {
       if (Array.isArray(parsed.secretKey)) {
+        if (parsed.secretKey.length === 0) {
+          throw new Error("Key file is empty");
+        }
         return Keypair.fromSecretKey(Uint8Array.from(parsed.secretKey));
       }
       if (typeof parsed.secretKeyBase58 === "string") {
+        if (parsed.secretKeyBase58.length === 0) {
+          throw new Error("Key file is empty");
+        }
         return Keypair.fromSecretKey(bs58.decode(parsed.secretKeyBase58));
       }
     }
-  } catch (e) {}
+  } catch (err) {
+    jsonError = err;
+  }
+  const rawTrimmed = raw.trim();
   try {
-    const buf = bs58.decode(raw);
+    if (rawTrimmed.length === 0) {
+      throw new Error("Key file is empty");
+    }
+    const buf = bs58.decode(rawTrimmed);
+    if (buf.length === 0) {
+      throw new Error("Key file is empty");
+    }
     return Keypair.fromSecretKey(buf);
-  } catch (e) {
-    throw new Error(`Cannot parse keyfile ${filepath}: ${e.message}`);
+  } catch (err) {
+    if (jsonError && !(jsonError instanceof SyntaxError)) {
+      throw new Error(`Cannot parse keyfile ${filepath}: ${jsonError.message}`);
+    }
+    throw new Error(`Cannot parse keyfile ${filepath}: ${err.message}`);
   }
 }
 
