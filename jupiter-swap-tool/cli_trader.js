@@ -65,6 +65,9 @@ const TOOL_VERSION = "1.1.2";
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
+
 // Normalise a filesystem path for equality comparisons that tolerate symlinks.
 const toComparablePath = (rawPath) => {
   if (!rawPath) return null;
@@ -82,9 +85,6 @@ const toComparablePath = (rawPath) => {
     return path.normalize(normalizedInput);
   }
 };
-
-const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
-const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const SCRIPT_COMPARABLE_PATH =
   toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
 
