@@ -222,6 +222,15 @@ export function derivePerpetualsPda() {
   return { pubkey, bump };
 }
 
+export function deriveEventAuthorityPda() {
+  const programId = getPerpsProgramId();
+  const [pubkey, bump] = PublicKey.findProgramAddressSync(
+    [Buffer.from("__event_authority")],
+    programId
+  );
+  return { pubkey, bump };
+}
+
 export function derivePositionPda({
   wallet,
   custody,
@@ -377,6 +386,7 @@ export async function buildIncreaseRequestInstruction({
     counter: counterBn,
   };
   const { pubkey: perpetuals } = derivePerpetualsPda();
+  const { pubkey: eventAuthority } = deriveEventAuthorityPda();
   const ix = await program.methods
     .createIncreasePositionMarketRequest(params)
     .accounts({
@@ -391,7 +401,7 @@ export async function buildIncreaseRequestInstruction({
       collateralCustody: collateralPk,
       inputMint: inputMintPk,
       referral,
-      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      eventAuthority,
       program: programId,
     })
     .instruction();
@@ -453,6 +463,7 @@ export async function buildDecreaseRequestInstruction({
     counter: counterBn,
   };
   const { pubkey: perpetuals } = derivePerpetualsPda();
+  const { pubkey: eventAuthority } = deriveEventAuthorityPda();
   const ix = await program.methods
     .createDecreasePositionMarketRequest(params)
     .accounts({
@@ -467,7 +478,7 @@ export async function buildDecreaseRequestInstruction({
       collateralCustody: positionAccount.collateralCustody,
       desiredMint: desiredMintPk,
       referral,
-      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      eventAuthority,
       program: programId,
     })
     .instruction();
