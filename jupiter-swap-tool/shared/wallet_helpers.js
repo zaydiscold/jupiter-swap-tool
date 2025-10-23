@@ -62,7 +62,11 @@ function defaultLoadKeypairFromFile(filepath) {
     // Fall through to attempt base58 decoding below
   }
   try {
-    const buf = bs58.decode(raw);
+    const rawTrimmed = raw.trim();
+    if (!rawTrimmed) {
+      throw new Error("Key file is empty");
+    }
+    const buf = bs58.decode(rawTrimmed);
     return Keypair.fromSecretKey(buf);
   } catch (err) {
     throw new Error(`Cannot parse keyfile ${filepath}: ${err.message}`);
