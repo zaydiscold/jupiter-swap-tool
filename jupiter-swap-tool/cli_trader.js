@@ -725,6 +725,10 @@ let TOKEN_CATALOG_BY_MINT = new Map(
   TOKEN_CATALOG.map((entry) => [entry.mint, entry])
 );
 
+function snapshotTokenCatalog() {
+  return TOKEN_CATALOG.map((entry) => ({ ...entry }));
+}
+
 function rebuildTokenCatalog(primaryTokens, sourceLabel) {
   TOKEN_CATALOG = mergeTokenSources(primaryTokens, FILE_TOKEN_CATALOG, NORMALISED_FALLBACK_TOKENS);
   TOKEN_CATALOG_BY_SYMBOL = new Map(
@@ -734,6 +738,43 @@ function rebuildTokenCatalog(primaryTokens, sourceLabel) {
     TOKEN_CATALOG.map((entry) => [entry.mint, entry])
   );
   tokenCatalogSourceLabel = sourceLabel;
+}
+
+function resolveRandomCatalogMint(options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const candidates = TOKEN_CATALOG.filter(
+    (entry) => entry?.mint && entry.mint !== SOL_MINT
+  );
+  if (candidates.length === 0) {
+    throw new Error("Token catalog does not contain any non-SOL mints");
+  }
+  const excludeSet = (() => {
+    const raw = options.exclude;
+    const set = new Set();
+    if (!raw) return set;
+    const values = raw instanceof Set ? Array.from(raw) : Array.isArray(raw) ? raw : [raw];
+    for (const value of values) {
+      if (typeof value !== "string") continue;
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      set.add(trimmed === SOL_MINT ? SOL_MINT : trimmed);
+    }
+    return set;
+  })();
+  let pool = candidates.filter((entry) => !excludeSet.has(entry.mint));
+  if (pool.length === 0) {
+    pool = candidates;
+  }
+  let randomValue = typeof rng === "function" ? rng() : Math.random();
+  if (!Number.isFinite(randomValue)) {
+    randomValue = Math.random();
+  }
+  if (randomValue < 0) randomValue = 0;
+  if (randomValue >= 1) randomValue = 1 - Number.EPSILON;
+  const span = pool.length;
+  const pick = Math.floor(randomValue * span);
+  const index = Math.min(span - 1, Math.max(0, pick));
+  return pool[index].mint;
 }
 
 let jupiterTokenMapPromise = null;
@@ -5673,12 +5714,51 @@ const BUCKSHOT_TOKEN_MINTS = Array.from(
   )
 );
 
+function isRandomMintSentinel(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return trimmed.toLowerCase() === "random";
+}
+
+function toMintExclusionSet(raw) {
+  const set = new Set();
+  if (!raw) return set;
+  const values = raw instanceof Set ? Array.from(raw) : Array.isArray(raw) ? raw : [raw];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    set.add(trimmed === SOL_MINT ? SOL_MINT : trimmed);
+  }
+  return set;
+}
+
 function stepsFromMints(mints, options = {}) {
   const steps = [];
   if (!Array.isArray(mints) || mints.length < 2) return steps;
-  for (let i = 0; i < mints.length - 1; i += 1) {
-    const from = normaliseSolMint(mints[i]);
-    const to = normaliseSolMint(mints[i + 1]);
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const globalExclude = toMintExclusionSet(options.exclude);
+  const resolved = [];
+  for (let i = 0; i < mints.length; i += 1) {
+    const rawMint = mints[i];
+    if (isRandomMintSentinel(rawMint)) {
+      const exclude = new Set(globalExclude);
+      if (resolved.length > 0) {
+        const previous = resolved[resolved.length - 1];
+        if (typeof previous === "string" && previous) {
+          exclude.add(previous === SOL_MINT ? SOL_MINT : previous);
+        }
+      }
+      const resolvedMint = resolveRandomCatalogMint({ rng, exclude });
+      resolved.push(resolvedMint);
+    } else {
+      resolved.push(rawMint);
+    }
+  }
+  for (let i = 0; i < resolved.length - 1; i += 1) {
+    const from = normaliseSolMint(resolved[i]);
+    const to = normaliseSolMint(resolved[i + 1]);
     if (from === to) continue;
     steps.push({
       from,
@@ -5690,11 +5770,14 @@ function stepsFromMints(mints, options = {}) {
   return steps;
 }
 
-function flattenSegmentsToSteps(segments) {
+function flattenSegmentsToSteps(segments, options = {}) {
   const steps = [];
   for (const segment of segments) {
     steps.push(
-      ...stepsFromMints(segment.mints, { forceAll: segment.forceAll })
+      ...stepsFromMints(segment.mints, {
+        ...options,
+        forceAll: segment.forceAll,
+      })
     );
   }
   return steps;
@@ -6289,7 +6372,7 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
-const PREWRITTEN_FLOW_DEFINITIONS = new Map([
+const PREWRITTEN_FLOW_PLAN_MAP = new Map([
   [
     "arpeggio",
     {
@@ -6524,11 +6607,11 @@ function describeFlowAmount(normalizedAmount) {
   return `(amount ${normalizedAmount})`;
 }
 
-async function runPrewrittenFlow(flowKey, options = {}) {
+async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
-    PREWRITTEN_FLOW_DEFINITIONS.get(normalizedKey) ||
-    PREWRITTEN_FLOW_DEFINITIONS.get(flowKey);
+    PREWRITTEN_FLOW_PLAN_MAP.get(normalizedKey) ||
+    PREWRITTEN_FLOW_PLAN_MAP.get(flowKey);
   if (!flow) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
@@ -11568,6 +11651,7 @@ export {
   ensureAtaForMint,
   ensureWrappedSolBalance,
   resolveTokenProgramForMint,
-  runPrewrittenFlow,
-  PREWRITTEN_FLOW_DEFINITIONS,
+  resolveRandomCatalogMint,
+  stepsFromMints,
+  snapshotTokenCatalog,
 };
