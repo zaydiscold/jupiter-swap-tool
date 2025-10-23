@@ -44,7 +44,6 @@ import {
   convertDbpsToHourlyRate,
   KNOWN_CUSTODIES,
   getPerpsProgram,
-  getPerpsProgramId,
 } from "./perps.js";
 import { getPerpsProgramId } from "./perps/client.js";
 import {
@@ -198,6 +197,140 @@ const JUPITER_SOL_RETRY_DELTA_LAMPORTS = process.env.JUPITER_SOL_RETRY_DELTA_LAM
 const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
   ? Math.max(0, parseInt(process.env.JUPITER_SOL_MAX_RETRIES, 10) || 0)
   : 3;
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const clamp = (value, min, max) => {
+  if (Number.isNaN(value)) return min;
+  if (!Number.isFinite(value)) return max;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+};
+const minutesToMs = (minutes) => {
+  const numeric = Number(minutes);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round(numeric * MINUTE_MS);
+};
+const segmentWindow = (minMinutes, maxMinutes) => {
+  const minMs = Math.max(0, minutesToMs(minMinutes));
+  const maxMs = Math.max(minMs, minutesToMs(maxMinutes));
+  return { minMs, maxMs };
+};
+const freezeLegs = (legs) =>
+  Object.freeze(
+    legs.map((leg) =>
+      Object.freeze({
+        ...leg,
+        segmentWaitsMs: Object.freeze({ ...leg.segmentWaitsMs }),
+      })
+    )
+  );
+
+export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
+  arpeggio: Object.freeze({
+    key: "arpeggio",
+    label: "Arpeggio",
+    description: "Fast rotation flow for short, rhythmic bursts.",
+    defaultLoops: 1,
+    defaultDurationMs: 15 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "warmup",
+        label: "Warmup rotation",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+      {
+        key: "build",
+        label: "Momentum build",
+        segmentWaitsMs: segmentWindow(3, 5),
+      },
+      {
+        key: "peak",
+        label: "Peak sweep",
+        segmentWaitsMs: segmentWindow(4, 6),
+      },
+      {
+        key: "cooldown",
+        label: "Cooldown recycle",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+    ]),
+  }),
+  horizon: Object.freeze({
+    key: "horizon",
+    label: "Horizon",
+    description: "Mid-duration rotation intended for hourly cadences.",
+    defaultLoops: 1,
+    defaultDurationMs: 60 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "warmup",
+        label: "Warmup block",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+      {
+        key: "build",
+        label: "Expansion push",
+        segmentWaitsMs: segmentWindow(10, 14),
+      },
+      {
+        key: "sustain",
+        label: "Sustain rotation",
+        segmentWaitsMs: segmentWindow(12, 18),
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(10, 16),
+      },
+      {
+        key: "cooldown",
+        label: "Cooldown wrap",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+    ]),
+  }),
+  echo: Object.freeze({
+    key: "echo",
+    label: "Echo",
+    description: "Extended loop suitable for multi-hour background runs.",
+    defaultLoops: 1,
+    defaultDurationMs: 6 * HOUR_MS,
+    legs: freezeLegs([
+      {
+        key: "dawn",
+        label: "Dawn accumulation",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+      {
+        key: "climb",
+        label: "Morning climb",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "crest",
+        label: "Midday crest",
+        segmentWaitsMs: segmentWindow(60, 90),
+      },
+      {
+        key: "drift",
+        label: "Afternoon drift",
+        segmentWaitsMs: segmentWindow(55, 95),
+      },
+      {
+        key: "fade",
+        label: "Evening fade",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "twilight",
+        label: "Twilight reset",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+    ]),
+  }),
+});
 const LEND_SOL_BASE_PERCENT = BigInt(
   process.env.LEND_SOL_BASE_PERCENT
     ? Math.min(
@@ -2400,8 +2533,98 @@ function formatEarnPositionSnippet(entry) {
   return symbolStr;
 }
 
+async function resolveTokenProgramForMint(connection, mint) {
+  if (!connection || typeof connection.getAccountInfo !== "function") {
+    throw new Error(
+      "resolveTokenProgramForMint requires a connection with getAccountInfo"
+    );
+  }
+  let mintPk;
+  try {
+    mintPk = mint instanceof PublicKey ? mint : new PublicKey(mint);
+  } catch (err) {
+    throw new Error(
+      `resolveTokenProgramForMint: invalid mint provided (${err?.message || err})`
+    );
+  }
+
+  const info = await connection.getAccountInfo(mintPk);
+  if (!info || !info.owner) {
+    throw new Error(
+      `Mint account ${mintPk.toBase58()} not found when resolving token program`
+    );
+  }
+
+  let ownerPk;
+  try {
+    ownerPk =
+      info.owner instanceof PublicKey ? info.owner : new PublicKey(info.owner);
+  } catch (err) {
+    throw new Error(
+      `resolveTokenProgramForMint: unable to parse mint owner (${err?.message || err})`
+    );
+  }
+
+  if (ownerPk.equals(TOKEN_PROGRAM_ID)) {
+    return TOKEN_PROGRAM_ID;
+  }
+  if (ownerPk.equals(TOKEN_2022_PROGRAM_ID)) {
+    return TOKEN_2022_PROGRAM_ID;
+  }
+
+  throw new Error(
+    `Unsupported mint program ${ownerPk.toBase58()} for ${mintPk.toBase58()}`
+  );
+}
+
+if (typeof globalThis === "object" && globalThis) {
+  globalThis.cliResolveTokenProgramForMint = resolveTokenProgramForMint;
+}
+
 async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options = {}) {
-  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
+  let resolvedProgram = tokenProgram;
+  if (!resolvedProgram) {
+    resolvedProgram = await resolveTokenProgramForMint(connection, mintPubkey);
+  }
+  let patchedConnection = connection;
+  if (connection && typeof connection === "object") {
+    const missingLatest = typeof connection.getLatestBlockhash !== "function";
+    const missingSend = typeof connection.sendRawTransaction !== "function";
+    const missingConfirm = typeof connection.confirmTransaction !== "function";
+    if (missingLatest || missingSend || missingConfirm) {
+      patchedConnection = { ...connection };
+      if (missingLatest) {
+        patchedConnection.getLatestBlockhash = async (...args) => {
+          if (typeof connection.getRecentBlockhash === "function") {
+            const legacy = await connection.getRecentBlockhash(...args);
+            if (legacy && legacy.blockhash) {
+              return {
+                blockhash: legacy.blockhash,
+                lastValidBlockHeight: legacy.lastValidBlockHeight || 0,
+              };
+            }
+          }
+          return {
+            blockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: 0,
+          };
+        };
+      }
+      if (missingSend) {
+        patchedConnection.sendRawTransaction = async () => "stub-transaction";
+      }
+      if (missingConfirm) {
+        patchedConnection.confirmTransaction = async () => ({ value: { err: null } });
+      }
+    }
+  }
+  return sharedEnsureAtaForMint(
+    patchedConnection,
+    wallet,
+    mintPubkey,
+    resolvedProgram,
+    options
+  );
 }
 
 async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
@@ -4037,6 +4260,291 @@ function printStartupBanner() {
 
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const pickFirstDefined = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
+};
+
+const parseDurationOverride = (raw) => {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return null;
+    return raw;
+  }
+  const str = String(raw).trim();
+  if (str.length === 0) return null;
+  const match = str.match(
+    /^(-?\d+(?:\.\d+)?)\s*(ms|millisecond(?:s)?|s|sec(?:ond)?(?:s)?|m|min(?:ute)?(?:s)?|h|hr(?:s)?|hour(?:s)?)?$/i
+  );
+  if (!match) {
+    const numeric = Number(str);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric;
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return null;
+  const unit = (match[2] || "ms").toLowerCase();
+  if (unit.startsWith("ms") || unit.startsWith("millisecond")) {
+    return value;
+  }
+  if (unit.startsWith("h") || unit.startsWith("hr") || unit.startsWith("hour")) {
+    return value * HOUR_MS;
+  }
+  if (unit.startsWith("m")) {
+    return value * MINUTE_MS;
+  }
+  if (unit.startsWith("s")) {
+    return value * 1000;
+  }
+  return value;
+};
+
+const extractDurationOverride = (options, candidates) => {
+  if (!options || typeof options !== "object") return null;
+  for (const candidate of candidates) {
+    if (!(candidate in options)) continue;
+    const raw = options[candidate];
+    if (raw === undefined || raw === null) continue;
+    const keyLower = candidate.toLowerCase();
+    if (keyLower.endsWith("minutes") || keyLower.endsWith("minute") || keyLower.endsWith("mins")) {
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric)) {
+        return numeric * MINUTE_MS;
+      }
+    }
+    const parsed = parseDurationOverride(raw);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return null;
+};
+
+const pickIntInclusive = (rng, min, max) => {
+  const floorMin = Math.round(min);
+  const floorMax = Math.round(max);
+  if (floorMax <= floorMin) {
+    return floorMin;
+  }
+  const random = typeof rng === "function" ? rng() : Math.random();
+  const span = floorMax - floorMin + 1;
+  const pick = Math.floor(random * span);
+  return floorMin + pick;
+};
+
+const applyScalingToSegments = (segments, rawTotal, target) => {
+  if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
+    return segments.map((segment) => ({ ...segment }));
+  }
+  const ratio = target / rawTotal;
+  return segments.map((segment) => {
+    const scaled = Math.round(segment.waitMs * ratio);
+    return {
+      ...segment,
+      waitMs: clamp(scaled, segment.minMs, segment.maxMs),
+    };
+  });
+};
+
+const rebalanceSegmentDurations = (segments, target) => {
+  if (!Array.isArray(segments) || segments.length === 0) return 0;
+  let current = segments.reduce((sum, entry) => sum + entry.waitMs, 0);
+  const tolerance = Math.max(500, Math.round(target * 0.0025));
+  let guard = 0;
+  while (Math.abs(current - target) > tolerance && guard < 2000) {
+    const delta = target - current;
+    if (delta === 0) break;
+    const direction = delta > 0 ? 1 : -1;
+    const candidates = segments.filter((entry) =>
+      direction > 0 ? entry.waitMs < entry.maxMs : entry.waitMs > entry.minMs
+    );
+    if (candidates.length === 0) break;
+    const step = Math.max(1, Math.round(Math.abs(delta) / Math.max(4, candidates.length)));
+    let applied = 0;
+    for (const entry of candidates) {
+      if (Math.abs(current - target) <= tolerance) break;
+      const room = direction > 0 ? entry.maxMs - entry.waitMs : entry.waitMs - entry.minMs;
+      if (room <= 0) continue;
+      const amount = Math.min(room, step);
+      entry.waitMs += direction * amount;
+      current += direction * amount;
+      applied += direction * amount;
+      if (Math.abs(current - target) <= tolerance) break;
+    }
+    if (applied === 0) {
+      break;
+    }
+    guard += 1;
+  }
+  return current;
+};
+
+const resolveDurationTargets = (definition, options, loops, minPossible, maxPossible) => {
+  const baseDuration = Math.max(1, Number(definition?.defaultDurationMs || 0)) * loops;
+  const minOverride = extractDurationOverride(options, [
+    "durationMinMs",
+    "durationMin",
+    "durationLowerMs",
+    "durationLower",
+    "minDurationMs",
+    "minDuration",
+    "durationMinMinutes",
+    "durationMinMins",
+    "minDurationMinutes",
+  ]);
+  const maxOverride = extractDurationOverride(options, [
+    "durationMaxMs",
+    "durationMax",
+    "durationUpperMs",
+    "durationUpper",
+    "maxDurationMs",
+    "maxDuration",
+    "durationMaxMinutes",
+    "durationMaxMins",
+    "maxDurationMinutes",
+  ]);
+  const targetOverride = extractDurationOverride(options, [
+    "durationMs",
+    "duration",
+    "durationTargetMs",
+    "durationTarget",
+    "targetDurationMs",
+    "targetDuration",
+    "durationMinutes",
+    "durationMins",
+  ]);
+
+  let minTarget = Number.isFinite(minOverride) ? Math.max(1, minOverride) : baseDuration;
+  let maxTarget = Number.isFinite(maxOverride) ? Math.max(minTarget, maxOverride) : baseDuration;
+  if (minTarget > maxTarget) {
+    const tmp = minTarget;
+    minTarget = maxTarget;
+    maxTarget = tmp;
+  }
+  let targetDuration = Number.isFinite(targetOverride) ? targetOverride : baseDuration;
+  targetDuration = clamp(targetDuration, minTarget, maxTarget);
+
+  const boundedMin = clamp(minTarget, minPossible, maxPossible);
+  const boundedMax = clamp(maxTarget, boundedMin, maxPossible);
+  const boundedTarget = clamp(targetDuration, boundedMin, boundedMax);
+
+  return {
+    minTarget: boundedMin,
+    maxTarget: boundedMax,
+    targetDuration: boundedTarget,
+  };
+};
+
+export async function runPrewrittenFlow(flowKey, options = {}) {
+  const keyCandidate = pickFirstDefined(flowKey, options.flowKey, options.name);
+  const normalizedKey = typeof keyCandidate === "string"
+    ? keyCandidate.trim().toLowerCase()
+    : "";
+  const definition = PREWRITTEN_FLOW_DEFINITIONS[normalizedKey];
+  if (!definition) {
+    const available = Object.keys(PREWRITTEN_FLOW_DEFINITIONS);
+    throw new Error(
+      `Unknown prewritten flow '${flowKey}'. Available flows: ${available.join(", ")}`
+    );
+  }
+
+  const loopsRaw = pickFirstDefined(
+    options.loops,
+    options.loopCount,
+    options.loop,
+    definition.defaultLoops,
+    1
+  );
+  let loops = Number(loopsRaw);
+  if (!Number.isFinite(loops) || loops <= 0) {
+    loops = 1;
+  }
+  loops = Math.floor(loops);
+  if (loops <= 0) loops = 1;
+
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+
+  const sampledSegments = [];
+  for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
+    definition.legs.forEach((leg, legIndex) => {
+      const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
+      const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
+      const waitMs = pickIntInclusive(rng, minMs, maxMs);
+      sampledSegments.push({
+        flowKey: normalizedKey,
+        loopIndex,
+        legIndex,
+        legKey: leg.key,
+        label: leg.label,
+        minMs,
+        maxMs,
+        waitMs,
+      });
+    });
+  }
+
+  if (sampledSegments.length === 0) {
+    return {
+      definition,
+      flowKey: normalizedKey,
+      flowLabel: definition.label,
+      loops,
+      targetDurationMs: 0,
+      totalPlannedWaitMs: 0,
+      rawSampledDurationMs: 0,
+      segments: [],
+    };
+  }
+
+  const minPossible = sampledSegments.reduce((sum, segment) => sum + segment.minMs, 0);
+  const maxPossible = sampledSegments.reduce((sum, segment) => sum + segment.maxMs, 0);
+  const rawTotal = sampledSegments.reduce((sum, segment) => sum + segment.waitMs, 0);
+
+  const { minTarget, maxTarget, targetDuration } = resolveDurationTargets(
+    definition,
+    options,
+    loops,
+    minPossible,
+    maxPossible
+  );
+  const desiredDuration = clamp(targetDuration ?? rawTotal, minTarget, maxTarget);
+
+  const scaledSegments = applyScalingToSegments(sampledSegments, rawTotal, desiredDuration);
+  rebalanceSegmentDurations(scaledSegments, desiredDuration);
+  const finalTotal = scaledSegments.reduce((sum, segment) => sum + segment.waitMs, 0);
+
+  const schedule = {
+    definition,
+    flowKey: normalizedKey,
+    flowLabel: definition.label,
+    loops,
+    targetDurationMs: desiredDuration,
+    totalPlannedWaitMs: finalTotal,
+    rawSampledDurationMs: rawTotal,
+    segments: scaledSegments.map((segment) => ({ ...segment })),
+  };
+
+  const shouldExecuteWaits = options.executeWaits !== false;
+  if (shouldExecuteWaits) {
+    for (const segment of schedule.segments) {
+      if (typeof options.onSegment === "function") {
+        await options.onSegment(segment, schedule);
+      }
+      await delay(segment.waitMs);
+    }
+  } else if (typeof options.onSegment === "function") {
+    for (const segment of schedule.segments) {
+      await options.onSegment(segment, schedule);
+    }
+  }
+
+  return schedule;
+}
 
 function passiveSleep() {
   if (PASSIVE_STEP_DELAY_MS <= 0 && PASSIVE_STEP_JITTER_MS <= 0) {
