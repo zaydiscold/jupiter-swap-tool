@@ -46,6 +46,7 @@ import {
   getPerpsProgram,
   getPerpsProgramId,
 } from "./perps.js";
+import { getPerpsProgramId } from "./perps/client.js";
 import {
   instantiateCampaignForWallets,
   executeTimedPlansAcrossWallets,
@@ -9150,6 +9151,32 @@ function printPerpsUsage() {
       "muted"
     )
   );
+}
+
+function ensurePerpsProgramMatchesConfig(connection) {
+  const program = getPerpsProgram(connection);
+  const resolvedProgramId = program?.programId;
+  if (!resolvedProgramId) {
+    throw new Error(
+      "Unable to resolve the Jupiter perps program ID from the Anchor program"
+    );
+  }
+  const expectedProgramId = getPerpsProgramId();
+  if (!resolvedProgramId.equals(expectedProgramId)) {
+    throw new Error(
+      `Perps program mismatch: Anchor loaded ${resolvedProgramId.toBase58()} but resolver returned ${expectedProgramId.toBase58()}`
+    );
+  }
+  const configuredProgramId = JUPITER_PERPS_PROGRAM_ID;
+  if (
+    configuredProgramId &&
+    resolvedProgramId.toBase58() !== configuredProgramId
+  ) {
+    throw new Error(
+      `Perps program mismatch: configured ${configuredProgramId} but loaded ${resolvedProgramId.toBase58()}`
+    );
+  }
+  return program;
 }
 
 async function perpsPositionsCommand(rawArgs) {

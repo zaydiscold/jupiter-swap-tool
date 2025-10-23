@@ -377,6 +377,7 @@ export async function buildIncreaseRequestInstruction({
     counter: counterBn,
   };
   const { pubkey: perpetuals } = derivePerpetualsPda();
+  const { pubkey: eventAuthority } = deriveEventAuthorityPda();
   const ix = await program.methods
     .createIncreasePositionMarketRequest(params)
     .accounts({
@@ -453,6 +454,7 @@ export async function buildDecreaseRequestInstruction({
     counter: counterBn,
   };
   const { pubkey: perpetuals } = derivePerpetualsPda();
+  const { pubkey: eventAuthority } = deriveEventAuthorityPda();
   const ix = await program.methods
     .createDecreasePositionMarketRequest(params)
     .accounts({
