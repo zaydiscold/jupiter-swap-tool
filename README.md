@@ -185,7 +185,7 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 
 ### Prewritten flows
 
-Automation presets (for example the Arpeggio rotation) are backed by `runPrewrittenFlow`. Each flow now owns a `swapCountRange` describing the hop window it should randomise across and an optional `requireTerminalSolHop` flag to guarantee the final leg returns to SOL. When invoked, the helper samples a hop target inside the declared range, converts it into whole cycles (six hops per cycle for Arpeggio), and enforces the per-flow minimum so runs never look abnormally short. The requested session duration is partitioned into random per-hop waits so the cumulative pause budget stays close to the operator’s target while still injecting jitter between swaps.
+Automation presets (for example the Arpeggio rotation) are backed by `runPrewrittenFlow`. Each flow owns a `swapCountRange` describing the hop window it should randomise across, a `minimumSwapCount` safeguard, and an optional `requireTerminalSolHop` flag to guarantee the final leg returns to SOL. When invoked, the helper samples a hop target inside the declared range, converts it into whole cycles (six hops per cycle for Arpeggio by default), and clamps the plan to the per-flow minimum so runs never look abnormally short. The requested session duration is partitioned into bounded, randomised per-hop waits — honouring each flow’s min/max wait constraints — so the cumulative pause budget stays close to the operator’s target while still injecting organic jitter between swaps.
 
 All swap commands print:
 - Input/output mint metadata (program ID + decimals).
