@@ -50,6 +50,7 @@ import {
   executeTimedPlansAcrossWallets,
   registerHooks as registerCampaignHooks,
   truncatePlanToBudget,
+  resolveScheduledLogicalStep,
   CAMPAIGNS,
   RANDOM_MINT_PLACEHOLDER,
   resolveRandomizedStep,
@@ -64,10 +65,10 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.1.2
+// version 1.1.3
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.1.2";
+const TOOL_VERSION = "1.1.3";
 const GENERAL_USAGE_MESSAGE =
   "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
 
@@ -140,6 +141,9 @@ const JUPITER_SWAP_API_BASE =
   process.env.JUPITER_SWAP_API_BASE || "https://lite-api.jup.ag";
 const JUPITER_SWAP_QUOTE_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/quote`;
 const JUPITER_SWAP_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/swap`;
+const JUP_HTTP_TIMEOUT_MS = process.env.JUP_HTTP_TIMEOUT_MS
+  ? Math.max(1_000, parseInt(process.env.JUP_HTTP_TIMEOUT_MS, 10) || 15_000)
+  : 15_000;
 const JUPITER_ULTRA_DEFAULT_BASE = (() => {
   if (JUPITER_ULTRA_API_KEY) {
     return `https://api.jup.ag/ultra/${JUPITER_ULTRA_API_KEY}`;
@@ -201,6 +205,222 @@ const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+
+const DEFAULT_RNG = Math.random;
+
+function normaliseRng(rng) {
+  return typeof rng === "function" ? rng : DEFAULT_RNG;
+}
+
+function randomFloat(rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
+  let value = generator();
+  if (!Number.isFinite(value)) value = 0;
+  if (value >= 1 || value <= -1) {
+    value = value % 1;
+  }
+  if (value < 0) value += 1;
+  if (value >= 1) value = 0;
+  return value;
+}
+
+function randomIntInclusive(minValue, maxValue, rng = DEFAULT_RNG) {
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    return 0;
+  }
+  const lower = Math.ceil(Math.min(minValue, maxValue));
+  const upper = Math.floor(Math.max(minValue, maxValue));
+  if (upper <= lower) return lower;
+  const span = upper - lower + 1;
+  const pick = Math.floor(randomFloat(rng) * span);
+  return lower + Math.min(span - 1, pick);
+}
+
+function createDeterministicRng(seedInput) {
+  const seedString =
+    typeof seedInput === "string"
+      ? seedInput
+      : JSON.stringify(seedInput ?? "");
+  let h = 1779033703 ^ seedString.length;
+  for (let i = 0; i < seedString.length; i += 1) {
+    h = Math.imul(h ^ seedString.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return function deterministicRng() {
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    const result = (h ^= h >>> 16) >>> 0;
+    return result / 4294967296;
+  };
+}
+
+const EMPTY_RANDOM_MINT_OPTIONS = Object.freeze({
+  includeTags: [],
+  excludeTags: [],
+  excludeMints: [],
+  excludeSymbols: [],
+  allowSol: false,
+  matchAnyTags: false,
+});
+
+function normaliseTagList(tags) {
+  if (!tags) return [];
+  const list = Array.isArray(tags) ? tags : [tags];
+  return list
+    .map((tag) =>
+      typeof tag === "string" ? tag.trim().toLowerCase() : ""
+    )
+    .filter((tag) => tag.length > 0);
+}
+
+function normaliseSymbolList(symbols) {
+  if (!symbols) return [];
+  const list = Array.isArray(symbols) ? symbols : [symbols];
+  return list
+    .map((symbol) =>
+      typeof symbol === "string" ? symbol.trim().toUpperCase() : ""
+    )
+    .filter((symbol) => symbol.length > 0);
+}
+
+function normaliseMintValue(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  try {
+    return new PublicKey(trimmed).toBase58();
+  } catch (_) {
+    return trimmed;
+  }
+}
+
+function normaliseMintList(values) {
+  if (!values) return [];
+  const list = Array.isArray(values) ? values : [values];
+  const result = [];
+  for (const value of list) {
+    const normalised = normaliseMintValue(
+      typeof value === "string" ? value : String(value ?? "")
+    );
+    if (normalised) result.push(normalised);
+  }
+  return result;
+}
+
+function normaliseRandomMintOptions(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...EMPTY_RANDOM_MINT_OPTIONS };
+  }
+  const includeTags = normaliseTagList(
+    raw.includeTags ?? raw.tags ?? raw.withTags
+  );
+  const excludeTags = normaliseTagList(raw.excludeTags ?? raw.withoutTags);
+  const excludeMints = normaliseMintList(raw.excludeMints ?? raw.exclude);
+  const excludeSymbols = normaliseSymbolList(raw.excludeSymbols);
+  const allowSol = raw.allowSol === true;
+  const matchAnyTags =
+    raw.matchAnyTags === true ||
+    raw.matchAny === true ||
+    raw.anyTag === true;
+  return {
+    includeTags,
+    excludeTags,
+    excludeMints,
+    excludeSymbols,
+    allowSol,
+    matchAnyTags,
+  };
+}
+
+function combineRandomMintOptions(...sources) {
+  const combined = {
+    includeTags: new Set(),
+    excludeTags: new Set(),
+    excludeMints: new Set(),
+    excludeSymbols: new Set(),
+    allowSol: false,
+    matchAnyTags: false,
+  };
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const normalised = normaliseRandomMintOptions(source);
+    for (const tag of normalised.includeTags) combined.includeTags.add(tag);
+    for (const tag of normalised.excludeTags) combined.excludeTags.add(tag);
+    for (const mint of normalised.excludeMints)
+      combined.excludeMints.add(mint);
+    for (const symbol of normalised.excludeSymbols)
+      combined.excludeSymbols.add(symbol);
+    if (normalised.allowSol) combined.allowSol = true;
+    if (normalised.matchAnyTags) combined.matchAnyTags = true;
+  }
+  return {
+    includeTags: Array.from(combined.includeTags),
+    excludeTags: Array.from(combined.excludeTags),
+    excludeMints: Array.from(combined.excludeMints),
+    excludeSymbols: Array.from(combined.excludeSymbols),
+    allowSol: combined.allowSol,
+    matchAnyTags: combined.matchAnyTags,
+  };
+}
+
+function parseRandomMintRequest(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return null;
+    if (trimmed.toLowerCase() !== "random") return null;
+    return {
+      placeholder: raw,
+      ...EMPTY_RANDOM_MINT_OPTIONS,
+    };
+  }
+  if (typeof raw === "object") {
+    const mode =
+      typeof raw.mode === "string" ? raw.mode.trim().toLowerCase() : null;
+    const mintField =
+      typeof raw.mint === "string" ? raw.mint.trim().toLowerCase() : null;
+    const randomFlag =
+      raw.random === true ||
+      mode === "random" ||
+      mintField === "random";
+    if (!randomFlag) return null;
+    const options = normaliseRandomMintOptions(raw);
+    return {
+      placeholder: raw,
+      ...options,
+    };
+  }
+  return null;
+}
+
+function resolveRandomMintRequest(request, context = {}) {
+  const baseOptions = combineRandomMintOptions(
+    EMPTY_RANDOM_MINT_OPTIONS,
+    context.baseOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    request || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const additionalExclusions = normaliseMintList(
+    context.additionalExclusions || []
+  );
+  const excludeMints = new Set([
+    ...baseOptions.excludeMints,
+    ...additionalExclusions,
+  ]);
+  const entry = pickRandomCatalogMint({
+    includeTags: baseOptions.includeTags,
+    matchAnyTags: baseOptions.matchAnyTags,
+    excludeTags: baseOptions.excludeTags,
+    excludeMints: Array.from(excludeMints),
+    excludeSymbols: baseOptions.excludeSymbols,
+    allowSol: baseOptions.allowSol,
+    rng: context.rng,
+  });
+  return {
+    entry,
+    options: baseOptions,
+  };
+}
+
 const clamp = (value, min, max) => {
   if (Number.isNaN(value)) return min;
   if (!Number.isFinite(value)) return max;
@@ -228,6 +448,44 @@ const freezeLegs = (legs) =>
     )
   );
 
+const freezeRuntimeProfile = (profile) => {
+  if (!profile || typeof profile !== "object") {
+    return Object.freeze({
+      swapCountRange: Object.freeze({ min: 0, max: 0 }),
+    });
+  }
+  const swapRange = Object.freeze({
+    min: Math.max(0, Math.floor(profile.swapCountRange?.min ?? 0)),
+    max: Math.max(
+      Math.max(0, Math.floor(profile.swapCountRange?.min ?? 0)),
+      Math.floor(profile.swapCountRange?.max ?? profile.swapCountRange?.min ?? 0)
+    ),
+  });
+  const targetDurationMs = (() => {
+    if (Number.isFinite(profile.targetDurationMs)) {
+      return Math.max(0, Math.floor(profile.targetDurationMs));
+    }
+    if (Number.isFinite(profile.targetMinutes)) {
+      return Math.max(0, Math.floor(minutesToMs(profile.targetMinutes)));
+    }
+    return undefined;
+  })();
+  const minimumSwapCount = Math.max(
+    0,
+    Math.floor(
+      profile.minimumSwapCount ??
+        profile.swapCountRange?.min ??
+        0
+    )
+  );
+  return Object.freeze({
+    ...profile,
+    targetDurationMs,
+    swapCountRange: swapRange,
+    minimumSwapCount,
+  });
+};
+
 export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
   arpeggio: Object.freeze({
     key: "arpeggio",
@@ -235,31 +493,32 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Fast rotation flow for short, rhythmic bursts.",
     defaultLoops: 1,
     defaultDurationMs: 15 * MINUTE_MS,
-    swapCountRange: Object.freeze({ min: 10, max: 100 }),
-    swapsPerCycle: 6,
-    minimumCycles: 2,
-    minimumSwapCount: 12,
-    requireTerminalSolHop: true,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈15 minute coverage",
+      targetMinutes: 15,
+      swapCountRange: { min: 10, max: 100 },
+      minimumSwapCount: 10,
+    }),
     legs: freezeLegs([
       {
         key: "warmup",
         label: "Warmup rotation",
-        segmentWaitsMs: segmentWindow(2, 4),
+        segmentWaitsMs: segmentWindow(2, 3),
       },
       {
         key: "build",
         label: "Momentum build",
-        segmentWaitsMs: segmentWindow(3, 5),
+        segmentWaitsMs: segmentWindow(3, 4),
       },
       {
         key: "peak",
         label: "Peak sweep",
-        segmentWaitsMs: segmentWindow(4, 6),
+        segmentWaitsMs: segmentWindow(4, 5),
       },
       {
         key: "cooldown",
         label: "Cooldown recycle",
-        segmentWaitsMs: segmentWindow(2, 4),
+        segmentWaitsMs: segmentWindow(3, 4),
       },
     ]),
   }),
@@ -269,36 +528,37 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Mid-duration rotation intended for hourly cadences.",
     defaultLoops: 1,
     defaultDurationMs: 60 * MINUTE_MS,
-    swapCountRange: Object.freeze({ min: 36, max: 220 }),
-    swapsPerCycle: 6,
-    minimumCycles: 3,
-    minimumSwapCount: 36,
-    requireTerminalSolHop: true,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈60 minute coverage",
+      targetMinutes: 60,
+      swapCountRange: { min: 50, max: 300 },
+      minimumSwapCount: 50,
+    }),
     legs: freezeLegs([
       {
         key: "warmup",
         label: "Warmup block",
-        segmentWaitsMs: segmentWindow(8, 12),
+        segmentWaitsMs: segmentWindow(9, 12),
       },
       {
         key: "build",
         label: "Expansion push",
-        segmentWaitsMs: segmentWindow(10, 14),
+        segmentWaitsMs: segmentWindow(11, 15),
       },
       {
         key: "sustain",
         label: "Sustain rotation",
-        segmentWaitsMs: segmentWindow(12, 18),
+        segmentWaitsMs: segmentWindow(13, 18),
       },
       {
         key: "rebalance",
         label: "Rebalance sweep",
-        segmentWaitsMs: segmentWindow(10, 16),
+        segmentWaitsMs: segmentWindow(11, 16),
       },
       {
         key: "cooldown",
         label: "Cooldown wrap",
-        segmentWaitsMs: segmentWindow(8, 12),
+        segmentWaitsMs: segmentWindow(9, 12),
       },
     ]),
   }),
@@ -308,40 +568,146 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Extended loop suitable for multi-hour background runs.",
     defaultLoops: 1,
     defaultDurationMs: 6 * HOUR_MS,
-    swapCountRange: Object.freeze({ min: 120, max: 480 }),
-    swapsPerCycle: 6,
-    minimumCycles: 6,
-    minimumSwapCount: 120,
-    requireTerminalSolHop: true,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈6 hour coverage",
+      targetMinutes: 6 * 60,
+      swapCountRange: { min: 250, max: 750 },
+      minimumSwapCount: 250,
+    }),
     legs: freezeLegs([
       {
         key: "dawn",
         label: "Dawn accumulation",
-        segmentWaitsMs: segmentWindow(35, 55),
+        segmentWaitsMs: segmentWindow(38, 55),
       },
       {
         key: "climb",
         label: "Morning climb",
-        segmentWaitsMs: segmentWindow(45, 75),
+        segmentWaitsMs: segmentWindow(48, 72),
       },
       {
         key: "crest",
         label: "Midday crest",
-        segmentWaitsMs: segmentWindow(60, 90),
+        segmentWaitsMs: segmentWindow(58, 88),
       },
       {
         key: "drift",
         label: "Afternoon drift",
-        segmentWaitsMs: segmentWindow(55, 95),
+        segmentWaitsMs: segmentWindow(53, 85),
       },
       {
         key: "fade",
         label: "Evening fade",
-        segmentWaitsMs: segmentWindow(45, 75),
+        segmentWaitsMs: segmentWindow(45, 70),
       },
       {
         key: "twilight",
         label: "Twilight reset",
+        segmentWaitsMs: segmentWindow(38, 55),
+      },
+    ]),
+  }),
+  icarus: Object.freeze({
+    key: "icarus",
+    label: "Icarus",
+    description:
+      "Fast rotation that mirrors Arpeggio's pacing while sampling random catalog tokens each hop.",
+    defaultLoops: 1,
+    defaultDurationMs: 15 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "ignite",
+        label: "Ignition cadence",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+      {
+        key: "soar",
+        label: "Ascent shuffle",
+        segmentWaitsMs: segmentWindow(3, 5),
+      },
+      {
+        key: "apex",
+        label: "Apex recycle",
+        segmentWaitsMs: segmentWindow(4, 6),
+      },
+      {
+        key: "glide",
+        label: "Glide cooldown",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+    ]),
+  }),
+  zenith: Object.freeze({
+    key: "zenith",
+    label: "Zenith",
+    description:
+      "Hourly cadence companion to Horizon that rotates through randomised catalog picks.",
+    defaultLoops: 1,
+    defaultDurationMs: 60 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "glow",
+        label: "Glow block",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+      {
+        key: "rise",
+        label: "Rise push",
+        segmentWaitsMs: segmentWindow(10, 14),
+      },
+      {
+        key: "halo",
+        label: "Halo sustain",
+        segmentWaitsMs: segmentWindow(12, 18),
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(10, 16),
+      },
+      {
+        key: "anchor",
+        label: "Anchor wrap",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+    ]),
+  }),
+  aurora: Object.freeze({
+    key: "aurora",
+    label: "Aurora",
+    description:
+      "Echo's long-form schedule with dynamic mint sampling for each rotation leg.",
+    defaultLoops: 1,
+    defaultDurationMs: 6 * HOUR_MS,
+    legs: freezeLegs([
+      {
+        key: "spark",
+        label: "Spark accumulation",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+      {
+        key: "arc",
+        label: "Arc climb",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "zenith",
+        label: "Zenith crest",
+        segmentWaitsMs: segmentWindow(60, 90),
+      },
+      {
+        key: "drift",
+        label: "Drift glide",
+        segmentWaitsMs: segmentWindow(55, 95),
+      },
+      {
+        key: "veil",
+        label: "Veil fade",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "reset",
+        label: "Reset twilight",
         segmentWaitsMs: segmentWindow(35, 55),
       },
     ]),
@@ -881,6 +1247,51 @@ function mintBySymbol(symbol, fallbackMint) {
   if (token && token.mint) return token.mint;
   if (fallbackMint) return fallbackMint;
   throw new Error(`Token catalog is missing symbol ${symbol}`);
+}
+
+function pickRandomCatalogMint(options = {}) {
+  const normalized = normaliseRandomMintOptions(options);
+  const allowSol = options.allowSol === true || normalized.allowSol === true;
+  const matchAnyTags =
+    options.matchAnyTags === true || normalized.matchAnyTags === true;
+  const includeTags = normalized.includeTags;
+  const excludeTags = normalized.excludeTags;
+  const excludeSymbols = new Set(normalized.excludeSymbols);
+  const excludeMints = new Set(normalized.excludeMints);
+  const rng = options.rng;
+
+  const candidates = TOKEN_CATALOG.filter((entry) => {
+    if (!entry || typeof entry.mint !== "string") return false;
+    if (!allowSol && SOL_LIKE_MINTS.has(entry.mint)) return false;
+    if (excludeMints.has(entry.mint)) return false;
+    if (entry.symbol && excludeSymbols.has(entry.symbol)) return false;
+    const tags = Array.isArray(entry.tags) ? entry.tags : [];
+    if (includeTags.length > 0) {
+      if (matchAnyTags) {
+        if (!includeTags.some((tag) => tags.includes(tag))) return false;
+      } else {
+        for (const tag of includeTags) {
+          if (!tags.includes(tag)) return false;
+        }
+      }
+    }
+    if (excludeTags.length > 0) {
+      for (const tag of excludeTags) {
+        if (tags.includes(tag)) return false;
+      }
+    }
+    return true;
+  });
+
+  if (candidates.length === 0) {
+    throw new Error("No matching tokens found in catalog for random selection");
+  }
+
+  const index = Math.min(
+    candidates.length - 1,
+    Math.floor(randomFloat(rng) * candidates.length)
+  );
+  return candidates[index];
 }
 
 async function loadJupiterTokenMap() {
@@ -2627,7 +3038,7 @@ async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, op
   if (existing) {
     return false;
   }
-  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
+  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, programId, options);
 }
 
 async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
@@ -3975,6 +4386,18 @@ function listTokenCatalog(options = {}) {
   }
 }
 
+function logRandomMintResolution(resolution) {
+  if (!resolution || !resolution.entry) return;
+  const descriptor = resolution.entry.symbol
+    ? `${resolution.entry.symbol} (${resolution.entry.mint})`
+    : resolution.entry.mint;
+  const label =
+    typeof resolution.label === "string" && resolution.label.length > 0
+      ? ` (${resolution.label})`
+      : "";
+  console.log(paint(`  Random mint resolved${label}: ${descriptor}`, "muted"));
+}
+
 function logDetailedError(prefix, err) {
   const baseMsg = err?.message || String(err);
   const key = `${prefix}::${baseMsg}`;
@@ -4522,17 +4945,8 @@ const extractDurationOverride = (options, candidates) => {
   return null;
 };
 
-const pickIntInclusive = (rng, min, max) => {
-  const floorMin = Math.round(min);
-  const floorMax = Math.round(max);
-  if (floorMax <= floorMin) {
-    return floorMin;
-  }
-  const random = typeof rng === "function" ? rng() : Math.random();
-  const span = floorMax - floorMin + 1;
-  const pick = Math.floor(random * span);
-  return floorMin + pick;
-};
+const pickIntInclusive = (rng, min, max) =>
+  randomIntInclusive(min, max, rng);
 
 const randomIntInclusive = (min, max) => pickIntInclusive(Math.random, min, max);
 
@@ -4733,13 +5147,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     loops = minimumCycles;
   }
 
-  const plannedSwapTarget = Math.max(loops * swapsPerCycle, minimumSwapCount);
-  if (plannedSwapTarget > effectiveSwapTarget) {
-    effectiveSwapTarget = plannedSwapTarget;
-  }
-  if (loopsOverride !== null && plannedSwapTarget < effectiveSwapTarget) {
-    effectiveSwapTarget = plannedSwapTarget;
-  }
+  const rng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const sampledSegments = [];
   for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
@@ -4848,10 +5259,14 @@ function balanceRpcDelay() {
   return delay(BALANCE_RPC_DELAY_MS);
 }
 
+function shuffleArray(array, rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
 function shuffleArray(array, rng = Math.random) {
   const result = [...array];
   const randomFn = typeof rng === "function" ? rng : Math.random;
   for (let i = result.length - 1; i > 0; i -= 1) {
+    const randomValue = randomFloat(generator);
+    const j = Math.floor(randomValue * (i + 1));
     const j = Math.floor(randomFn() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
@@ -5309,6 +5724,7 @@ function filterWalletsByBatch(wallets, batchRaw) {
 async function handleCampaignCommand(rawArgs) {
   const { options, rest } = parseCliOptions(rawArgs);
   const [campaignKeyRaw, durationKeyRaw] = rest;
+  const RANDOM_PLACEHOLDER = "RANDOM";
   if (!campaignKeyRaw || !durationKeyRaw) {
     throw new Error(
       "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
@@ -5471,13 +5887,48 @@ async function handleCampaignCommand(rawArgs) {
 
   campaignDryRun = dryRun;
   const swapCounts = [];
-  for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+  for (const [pubkey, planEntry] of preparedPlans.entries()) {
+    const schedule = Array.isArray(planEntry.schedule) ? planEntry.schedule : [];
     const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
     const fanOutSteps = schedule.filter((step) => step.kind === "fanOutSwap").length;
     const sweepSteps = schedule.filter((step) => step.kind === "sweepToSOL").length;
     const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
     const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
     swapCounts.push({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps });
+  }
+
+  if (dryRun) {
+    console.log(paint("Dry-run hop preview (per wallet):", "info"));
+    for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+      const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+      let previewLastMint = SOL_MINT;
+      const hops = [];
+      for (const step of schedule) {
+        if (step.kind !== "swapHop") continue;
+        const logical = step.logicalStep || {};
+        let fromMint = logical.inMint ?? previewLastMint ?? SOL_MINT;
+        if (fromMint === RANDOM_PLACEHOLDER) {
+          fromMint = previewLastMint ?? SOL_MINT;
+        }
+        let toMint = logical.outMint ?? SOL_MINT;
+        if (toMint === RANDOM_PLACEHOLDER) {
+          toMint = previewLastMint ?? SOL_MINT;
+        }
+        hops.push(`${symbolForMint(fromMint)}→${symbolForMint(toMint)}`);
+        previewLastMint = toMint || SOL_MINT;
+      }
+      const MAX_PREVIEW_HOPS = 40;
+      let preview;
+      if (hops.length === 0) {
+        preview = "(no swaps scheduled)";
+      } else if (hops.length > MAX_PREVIEW_HOPS) {
+        const visible = hops.slice(0, MAX_PREVIEW_HOPS).join(" | ");
+        preview = `${visible} | ... (+${hops.length - MAX_PREVIEW_HOPS} more)`;
+      } else {
+        preview = hops.join(" | ");
+      }
+      console.log(paint(`  ${label}: ${preview}`, "muted"));
+    }
   }
 
   console.log(
@@ -6739,8 +7190,12 @@ async function runLongCircle(options = {}) {
       let steps = flattenSegmentsToSteps(segments, { rng, exclude: usedMints });
       if (randomMode && steps.length < 3) {
         const extended = new Set(segments);
+        let attempt = 0;
         for (const segment of LONG_CHAIN_SEGMENTS_BASE) {
-          if (extended.has(segment)) continue;
+          if (extended.has(segment)) {
+            attempt += 1;
+            continue;
+          }
           extended.add(segment);
           const candidateSegments = Array.from(extended);
           const candidateUsedMints = new Set();
@@ -6756,10 +7211,14 @@ async function runLongCircle(options = {}) {
           }
         }
       }
+
+      const finalSteps = flattenSegmentsToSteps(segments, {
+        rng: createDeterministicRng(`${walletSeed}:long-circle:steps-final`),
+      });
       return {
         wallet,
-        steps,
-        summary: describeStepSequence(steps),
+        steps: finalSteps,
+        summary: describeStepSequence(finalSteps),
         skipRegistry: new Set(),
         rng,
         usedMints,
@@ -7132,6 +7591,7 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
+const PREWRITTEN_FLOW_DEFINITIONS_MAP = new Map([
 const PREWRITTEN_FLOW_PLAN_MAP = new Map([
   [
     "arpeggio",
@@ -7322,11 +7782,11 @@ function normalizePrewrittenFlowKey(key) {
   return key.trim().toLowerCase();
 }
 
-function sampleIntegerInRange(minValue, maxValue) {
+function sampleIntegerInRange(minValue, maxValue, rng = DEFAULT_RNG) {
   const min = Math.max(0, Math.floor(minValue));
   const max = Math.max(min, Math.floor(maxValue));
   if (max === min) return min;
-  return min + Math.floor(Math.random() * (max - min + 1));
+  return randomIntInclusive(min, max, rng);
 }
 
 function formatDurationMs(totalMs) {
@@ -7342,7 +7802,7 @@ function formatDurationMs(totalMs) {
   return parts.join(" ");
 }
 
-function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
+function allocateHopDelays(totalDurationMs, hopCount, options = {}, rng = DEFAULT_RNG) {
   const count = Math.max(0, hopCount | 0);
   const delays = new Array(count).fill(0);
   if (count === 0) return delays;
@@ -7358,10 +7818,22 @@ function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
       ? null
       : Math.max(minMs, Math.floor(Number(rawMax) || 0));
 
-  const minTotal = minMs * count;
-  const maxTotal =
-    maxMs === null ? Number.POSITIVE_INFINITY : Math.max(minTotal, maxMs * count);
-  const targetTotal = clamp(totalRequested, minTotal, maxTotal);
+  const weights = Array.from({ length: count }, () => randomFloat(rng) + 0.01);
+  const weightTotal = weights.reduce((acc, value) => acc + value, 0);
+  let allocated = 0;
+  for (let i = 0; i < count; i += 1) {
+    const share = Math.floor((weights[i] / weightTotal) * total);
+    delays[i] = share;
+    allocated += share;
+  }
+
+  let remainder = total - allocated;
+  let cursor = 0;
+  while (remainder > 0) {
+    delays[cursor % count] += 1;
+    remainder -= 1;
+    cursor += 1;
+  }
 
   if (minMs > 0) {
     for (let i = 0; i < count; i += 1) {
@@ -7466,7 +7938,8 @@ function cloneFlowAmount(amount) {
   return amount;
 }
 
-function normalizeFlowAmount(amount) {
+function normalizeFlowAmount(amount, options = {}) {
+  const rng = options.rng;
   const source = cloneFlowAmount(amount);
   if (source === null || source === undefined) return null;
   if (typeof source === "string") {
@@ -7489,7 +7962,7 @@ function normalizeFlowAmount(amount) {
       if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
       const lower = Math.min(min, max);
       const upper = Math.max(min, max);
-      const sampled = lower + Math.random() * (upper - lower);
+      const sampled = lower + randomFloat(rng) * (upper - lower);
       return sampled.toString();
     }
     if (source.value !== undefined && source.value !== null) {
@@ -7518,6 +7991,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
   const flowRandomSessions = new Map();
   const flowRng = typeof options.rng === "function" ? options.rng : Math.random;
+  const runtimeProfile = PREWRITTEN_FLOW_DEFINITIONS?.[normalizedKey]?.runtimeProfile;
   const selectMintForFlow = (randomMeta = {}) => {
     let pool = TOKEN_CATALOG.filter((entry) => entry && entry.mint);
     if (Array.isArray(randomMeta.poolTags) && randomMeta.poolTags.length > 0) {
@@ -7577,44 +8051,114 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     };
   }
 
-  const cycleTemplate = Array.isArray(flow.cycleTemplate) ? flow.cycleTemplate : [];
+  const cycleTemplate = Array.isArray(flow.cycleTemplate)
+    ? flow.cycleTemplate
+    : [];
   if (cycleTemplate.length === 0) {
-    throw new Error(`Prewritten flow ${flow.label} has no cycle template defined`);
+    throw new Error(
+      `Prewritten flow ${flow.label} has no cycle template defined`
+    );
   }
 
-  const swapRange = flow.swapCountRange || {};
+  const swapRange = flow.swapCountRange || runtimeProfile?.swapCountRange || {};
   const cycleLength = cycleTemplate.length;
-  const rangeMin = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
-  const rangeMax = Math.max(rangeMin, Math.floor(swapRange.max ?? rangeMin));
+  const rangeMinBase = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
+  const rangeMaxBase = Math.max(rangeMinBase, Math.floor(swapRange.max ?? rangeMinBase));
+  const clampSwapTarget = (value) => {
+    const numeric = Math.floor(Number(value) || 0);
+    if (!Number.isFinite(numeric)) return rangeMinBase;
+    return Math.max(rangeMinBase, Math.min(rangeMaxBase, numeric));
+  };
   const overrideTarget = options.swapTarget ?? options.swapCount ?? null;
+
+  const seedSource =
+    walletList[0]?.kp?.publicKey?.toBase58?.() ?? flow.key ?? "prewritten";
+  const flowRng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${flow.key}:${seedSource}:flow`);
+
   let sampledTarget;
   if (overrideTarget !== null && overrideTarget !== undefined) {
-    sampledTarget = Math.max(rangeMin, Math.floor(Number(overrideTarget) || rangeMin));
+    sampledTarget = Math.max(
+      rangeMin,
+      Math.floor(Number(overrideTarget) || rangeMin)
+    );
   } else {
-    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax);
+    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax, flowRng);
   }
 
   const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
-  const minimumSwapCount = Math.max(
-    cycleLength,
-    minimumCycles * cycleLength,
-    flow.minimumSwapCount ? Math.floor(flow.minimumSwapCount) : cycleLength
+  const perFlowMinimumSwaps = Math.max(
+    0,
+    Math.floor(
+      flow.minimumSwapCount ?? runtimeProfile?.minimumSwapCount ?? rangeMinBase
+    )
   );
-  const effectiveSwapTarget = Math.max(sampledTarget, minimumSwapCount);
-  let cycles = Math.ceil(effectiveSwapTarget / cycleLength);
-  if (cycles < minimumCycles) cycles = minimumCycles;
+  const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
+  const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
+
+  let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
+  let partialCycleHops = desiredSwapTarget % cycleLength;
+  let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
+  if (executedCycles < minimumCycles) {
+    fullCycles = minimumCycles;
+    partialCycleHops = 0;
+    executedCycles = minimumCycles;
+  }
+  const executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
+
+  const combinedRandomOptions = combineRandomMintOptions(
+    flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const logRandomResolutions = options.logRandomResolutions !== false;
+  const resolutionHandler =
+    typeof options.onRandomMintResolved === "function"
+      ? options.onRandomMintResolved
+      : logRandomResolutions
+      ? logRandomMintResolution
+      : null;
+
+  const startCandidate = pickFirstDefined(
+    options.startMint,
+    flow.startMint,
+    SOL_MINT
+  );
+  const startResult = resolveMintCandidate(startCandidate, {
+    fallbackMint: SOL_MINT,
+    rng: flowRng,
+    baseRandomOptions: combinedRandomOptions,
+    label: `${flow.label} start`,
+  });
+  let currentMint = startResult.mint;
+  if (startResult.resolution && resolutionHandler) {
+    resolutionHandler({
+      ...startResult.resolution,
+      role: "start",
+      stepIndex: -1,
+    });
+  }
 
   const schedule = [];
-  let currentMint = options.startMint || flow.startMint || SOL_MINT;
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     const sessionGroups = new Map();
-    for (let stepIndex = 0; stepIndex < cycleTemplate.length; stepIndex += 1) {
+    const limit = Math.min(stepLimit, cycleTemplate.length);
+    for (let stepIndex = 0; stepIndex < limit; stepIndex += 1) {
       const step = cycleTemplate[stepIndex];
       const fromMint = step.fromMint || currentMint;
       const toMint = step.toMint;
-      if (!toMint) {
+      const resolvedToMint = mintResolver.resolveMint(toMint, {
+        exclude: [
+          resolvedFromMint,
+          currentMint,
+          ...(Array.isArray(step.avoidMints) ? step.avoidMints : []),
+        ],
+      });
+      if (!resolvedToMint) {
         throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
+
       const amount = cloneFlowAmount(step.amount);
       let randomization = null;
       if (step.randomization) {
@@ -7666,14 +8210,24 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       }
       const entry = {
         ...step,
-        fromMint,
-        toMint,
+        fromMint: resolvedFromMint,
+        toMint: resolvedToMint,
         amount,
         randomization,
       };
+      if (randomResolutions.length > 0) {
+        entry.randomResolutions = randomResolutions;
+      }
       schedule.push(entry);
-      currentMint = toMint;
+      currentMint = resolvedToMint;
     }
+  };
+
+  for (let cycleIndex = 0; cycleIndex < fullCycles; cycleIndex += 1) {
+    appendCycleSteps(cycleIndex, cycleTemplate.length);
+  }
+  if (partialCycleHops > 0) {
+    appendCycleSteps(fullCycles, partialCycleHops);
   }
 
   if (flow.requireTerminalSolHop && currentMint !== SOL_MINT) {
@@ -7687,6 +8241,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     currentMint = SOL_MINT;
   }
 
+  const swapExecutionCount = schedule.length;
   const plannedSwaps = schedule.length;
   const requestedDurationMsRaw =
     options.totalDurationMs ??
@@ -7705,19 +8260,50 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const perHopDelays = allocateHopDelays(
     requestedDurationMs,
     plannedSwaps,
-    waitOptions
+    waitOptions,
+    flowRng
   );
   const actualWaitTotal = perHopDelays.reduce((acc, value) => acc + value, 0);
 
   console.log(
     paint(`\n== Prewritten flow: ${flow.label} (${flow.key}) ==`, "label")
   );
+  const swapRangeLabel = `${rangeMinBase}-${rangeMaxBase}`;
+  const coverageLabel = runtimeProfile?.label
+    || (runtimeProfile?.targetDurationMs
+      ? `≈${formatDurationMs(runtimeProfile.targetDurationMs)}`
+      : flow.defaultDurationMs
+        ? `≈${formatDurationMs(flow.defaultDurationMs)}`
+        : null);
+  const cycleSummaryParts = [];
+  if (fullCycles > 0) {
+    cycleSummaryParts.push(`${fullCycles} full`);
+  }
+  if (partialCycleHops > 0) {
+    cycleSummaryParts.push(`1 partial (${partialCycleHops} hop${partialCycleHops === 1 ? "" : "s"})`);
+  }
+  if (cycleSummaryParts.length === 0) {
+    cycleSummaryParts.push("0 cycle");
+  }
+  const cycleSummary = cycleSummaryParts.join(" + ");
+
+  const extraStopovers = Math.max(0, swapExecutionCount - executedSwapTarget);
+  const executionLabel =
+    extraStopovers > 0
+      ? `${swapExecutionCount} hop(s) (includes ${extraStopovers} terminal hop${extraStopovers === 1 ? "" : "s"})`
+      : `${swapExecutionCount} hop(s)`;
+
   console.log(
     paint(
-      `Swap target sampled at ${sampledTarget} hop(s); executing ${plannedSwaps} hop(s) across ${cycles} cycle(s).`,
+      `Swap target sampled at ${sampledTarget} hop(s) (min ${minimumSwapCount}, range ${swapRangeLabel}); executing ${executionLabel} across ${cycleSummary}.`,
       "muted"
     )
   );
+  if (coverageLabel) {
+    console.log(
+      paint(`Coverage goal: ${coverageLabel}.`, "muted")
+    );
+  }
   if (flow.description) {
     console.log(paint(flow.description, "muted"));
   }
@@ -7737,7 +8323,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
   for (let index = 0; index < schedule.length; index += 1) {
     const step = schedule[index];
-    const normalizedAmount = normalizeFlowAmount(step.amount);
+    const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
     let resolvedStep;
@@ -7802,7 +8388,12 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   return {
     key: flow.key,
     plannedSwaps,
-    cycles,
+    cycles: executedCycles,
+    swapExecutionCount,
+    sampledSwapTarget: sampledTarget,
+    desiredSwapTarget,
+    executedSwapTarget,
+    partialCycleHops,
     waitTotalMs: actualWaitTotal,
     targetWaitTotalMs: requestedDurationMs,
     finalMint: currentMint,
@@ -8625,6 +9216,22 @@ function extractUltraSignature(response) {
 }
 
 // Legacy Lite API helpers --------------------------------------------------
+async function fetchWithTimeout(resource, options = {}, { timeoutMs = JUP_HTTP_TIMEOUT_MS, timeoutMessage } = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  if (typeof timeoutId.unref === "function") timeoutId.unref();
+  try {
+    return await fetch(resource, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(timeoutMessage || `Request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 async function fetchLegacyQuote(inputMint, outputMint, amountLamports, userPubkey, slippageBps = SLIPPAGE_BPS) {
   const params = new URLSearchParams({
     inputMint,
@@ -8638,7 +9245,9 @@ async function fetchLegacyQuote(inputMint, outputMint, amountLamports, userPubke
 
   let res;
   try {
-    res = await fetch(`${JUPITER_SWAP_QUOTE_URL}?${params.toString()}`);
+    res = await fetchWithTimeout(`${JUPITER_SWAP_QUOTE_URL}?${params.toString()}`, {}, {
+      timeoutMessage: `Quote request timed out after ${JUP_HTTP_TIMEOUT_MS}ms`,
+    });
   } catch (err) {
     throw new Error(`Quote request failed to reach Jupiter: ${err.message}`);
   }
@@ -8675,11 +9284,15 @@ async function fetchLegacySwap(quoteResponse, userPublicKey, wrapAndUnwrapSol) {
 
   let res;
   try {
-    res = await fetch(JUPITER_SWAP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    res = await fetchWithTimeout(
+      JUPITER_SWAP_URL,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      { timeoutMessage: `Swap request timed out after ${JUP_HTTP_TIMEOUT_MS}ms` }
+    );
   } catch (err) {
     throw new Error(`Swap request failed to reach Jupiter: ${err.message}`);
   }
