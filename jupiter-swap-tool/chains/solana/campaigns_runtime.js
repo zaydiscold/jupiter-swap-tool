@@ -14,6 +14,8 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const RANDOM_PLACEHOLDER = "RANDOM";
+const RANDOM_HOPS_KIND = "random-hop-rotation";
 const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
@@ -277,6 +279,12 @@ export function buildTimedPlanForWallet({
         sourceBalance: { kind: "sol" },
       }));
     }
+  } else if (kind === RANDOM_HOPS_KIND) {
+    if (!Array.isArray(poolMints) || poolMints.length === 0) {
+      logicalSteps = [];
+    } else {
+      logicalSteps = planRandomPlaceholderSteps(safeTarget);
+    }
   } else if (kind === "icarus" || kind === "zenith" || kind === "aurora") {
     const pairs = Math.max(1, Math.ceil(safeTarget / 2));
     const steps = [];
@@ -331,6 +339,11 @@ export function buildTimedPlanForWallet({
   let pathIdx = 0;
   let currentFromMint = WSOL_MINT;
   const schedule = [];
+
+  const placeholderState = {
+    currentMint: WSOL_MINT,
+    lastRandomMint: null,
+  };
 
   for (let idx = 0; idx < safeTarget; idx += 1) {
     const template = basePath[pathIdx % basePath.length];

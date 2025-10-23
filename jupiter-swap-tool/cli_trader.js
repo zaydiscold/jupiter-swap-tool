@@ -5212,6 +5212,7 @@ function filterWalletsByBatch(wallets, batchRaw) {
 async function handleCampaignCommand(rawArgs) {
   const { options, rest } = parseCliOptions(rawArgs);
   const [campaignKeyRaw, durationKeyRaw] = rest;
+  const RANDOM_PLACEHOLDER = "RANDOM";
   if (!campaignKeyRaw || !durationKeyRaw) {
     throw new Error(
       "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
@@ -5381,6 +5382,40 @@ async function handleCampaignCommand(rawArgs) {
     const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
     const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
     swapCounts.push({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps });
+  }
+
+  if (dryRun) {
+    console.log(paint("Dry-run hop preview (per wallet):", "info"));
+    for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+      const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+      let previewLastMint = SOL_MINT;
+      const hops = [];
+      for (const step of schedule) {
+        if (step.kind !== "swapHop") continue;
+        const logical = step.logicalStep || {};
+        let fromMint = logical.inMint ?? previewLastMint ?? SOL_MINT;
+        if (fromMint === RANDOM_PLACEHOLDER) {
+          fromMint = previewLastMint ?? SOL_MINT;
+        }
+        let toMint = logical.outMint ?? SOL_MINT;
+        if (toMint === RANDOM_PLACEHOLDER) {
+          toMint = previewLastMint ?? SOL_MINT;
+        }
+        hops.push(`${symbolForMint(fromMint)}→${symbolForMint(toMint)}`);
+        previewLastMint = toMint || SOL_MINT;
+      }
+      const MAX_PREVIEW_HOPS = 40;
+      let preview;
+      if (hops.length === 0) {
+        preview = "(no swaps scheduled)";
+      } else if (hops.length > MAX_PREVIEW_HOPS) {
+        const visible = hops.slice(0, MAX_PREVIEW_HOPS).join(" | ");
+        preview = `${visible} | ... (+${hops.length - MAX_PREVIEW_HOPS} more)`;
+      } else {
+        preview = hops.join(" | ");
+      }
+      console.log(paint(`  ${label}: ${preview}`, "muted"));
+    }
   }
 
   console.log(
