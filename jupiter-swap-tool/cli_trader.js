@@ -44,9 +44,7 @@ import {
   convertDbpsToHourlyRate,
   KNOWN_CUSTODIES,
   getPerpsProgram,
-  getPerpsProgramId,
 } from "./perps.js";
-import { getPerpsProgramId } from "./perps/client.js";
 import {
   instantiateCampaignForWallets,
   executeTimedPlansAcrossWallets,
@@ -198,6 +196,140 @@ const JUPITER_SOL_RETRY_DELTA_LAMPORTS = process.env.JUPITER_SOL_RETRY_DELTA_LAM
 const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
   ? Math.max(0, parseInt(process.env.JUPITER_SOL_MAX_RETRIES, 10) || 0)
   : 3;
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const clamp = (value, min, max) => {
+  if (Number.isNaN(value)) return min;
+  if (!Number.isFinite(value)) return max;
+  if (value < min) return min;
+  if (value > max) return max;
+  return value;
+};
+const minutesToMs = (minutes) => {
+  const numeric = Number(minutes);
+  if (!Number.isFinite(numeric)) return 0;
+  return Math.round(numeric * MINUTE_MS);
+};
+const segmentWindow = (minMinutes, maxMinutes) => {
+  const minMs = Math.max(0, minutesToMs(minMinutes));
+  const maxMs = Math.max(minMs, minutesToMs(maxMinutes));
+  return { minMs, maxMs };
+};
+const freezeLegs = (legs) =>
+  Object.freeze(
+    legs.map((leg) =>
+      Object.freeze({
+        ...leg,
+        segmentWaitsMs: Object.freeze({ ...leg.segmentWaitsMs }),
+      })
+    )
+  );
+
+export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
+  arpeggio: Object.freeze({
+    key: "arpeggio",
+    label: "Arpeggio",
+    description: "Fast rotation flow for short, rhythmic bursts.",
+    defaultLoops: 1,
+    defaultDurationMs: 15 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "warmup",
+        label: "Warmup rotation",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+      {
+        key: "build",
+        label: "Momentum build",
+        segmentWaitsMs: segmentWindow(3, 5),
+      },
+      {
+        key: "peak",
+        label: "Peak sweep",
+        segmentWaitsMs: segmentWindow(4, 6),
+      },
+      {
+        key: "cooldown",
+        label: "Cooldown recycle",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+    ]),
+  }),
+  horizon: Object.freeze({
+    key: "horizon",
+    label: "Horizon",
+    description: "Mid-duration rotation intended for hourly cadences.",
+    defaultLoops: 1,
+    defaultDurationMs: 60 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "warmup",
+        label: "Warmup block",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+      {
+        key: "build",
+        label: "Expansion push",
+        segmentWaitsMs: segmentWindow(10, 14),
+      },
+      {
+        key: "sustain",
+        label: "Sustain rotation",
+        segmentWaitsMs: segmentWindow(12, 18),
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(10, 16),
+      },
+      {
+        key: "cooldown",
+        label: "Cooldown wrap",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+    ]),
+  }),
+  echo: Object.freeze({
+    key: "echo",
+    label: "Echo",
+    description: "Extended loop suitable for multi-hour background runs.",
+    defaultLoops: 1,
+    defaultDurationMs: 6 * HOUR_MS,
+    legs: freezeLegs([
+      {
+        key: "dawn",
+        label: "Dawn accumulation",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+      {
+        key: "climb",
+        label: "Morning climb",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "crest",
+        label: "Midday crest",
+        segmentWaitsMs: segmentWindow(60, 90),
+      },
+      {
+        key: "drift",
+        label: "Afternoon drift",
+        segmentWaitsMs: segmentWindow(55, 95),
+      },
+      {
+        key: "fade",
+        label: "Evening fade",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "twilight",
+        label: "Twilight reset",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+    ]),
+  }),
+});
 const LEND_SOL_BASE_PERCENT = BigInt(
   process.env.LEND_SOL_BASE_PERCENT
     ? Math.min(
@@ -2400,7 +2532,43 @@ function formatEarnPositionSnippet(entry) {
   return symbolStr;
 }
 
+async function resolveTokenProgramForMint(connection, mintPubkey) {
+  if (!connection) {
+    throw new Error("resolveTokenProgramForMint requires a connection");
+  }
+  if (!mintPubkey) {
+    throw new Error("resolveTokenProgramForMint requires a mint public key");
+  }
+  const info = await connection.getAccountInfo(mintPubkey);
+  if (!info) {
+    throw new Error(`Mint account ${mintPubkey.toBase58()} not found`);
+  }
+  if (info.owner?.equals?.(TOKEN_PROGRAM_ID)) {
+    return TOKEN_PROGRAM_ID;
+  }
+  if (info.owner?.equals?.(TOKEN_2022_PROGRAM_ID)) {
+    return TOKEN_2022_PROGRAM_ID;
+  }
+  throw new Error(
+    `Unsupported mint owner ${info.owner?.toBase58?.() || "unknown"} for ${mintPubkey.toBase58()}`
+  );
+}
+
 async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options = {}) {
+  if (!connection) throw new Error("ensureAtaForMint requires a connection");
+  if (!wallet?.kp?.publicKey) throw new Error("ensureAtaForMint requires a wallet with a keypair");
+  const programId = tokenProgram || (await resolveTokenProgramForMint(connection, mintPubkey));
+  const ata = await getAssociatedTokenAddress(
+    mintPubkey,
+    wallet.kp.publicKey,
+    false,
+    programId,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
+  const existing = await connection.getAccountInfo(ata);
+  if (existing) {
+    return false;
+  }
   return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
 }
 
@@ -4038,6 +4206,291 @@ function printStartupBanner() {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const pickFirstDefined = (...values) => {
+  for (const value of values) {
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+  return undefined;
+};
+
+const parseDurationOverride = (raw) => {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return null;
+    return raw;
+  }
+  const str = String(raw).trim();
+  if (str.length === 0) return null;
+  const match = str.match(
+    /^(-?\d+(?:\.\d+)?)\s*(ms|millisecond(?:s)?|s|sec(?:ond)?(?:s)?|m|min(?:ute)?(?:s)?|h|hr(?:s)?|hour(?:s)?)?$/i
+  );
+  if (!match) {
+    const numeric = Number(str);
+    if (!Number.isFinite(numeric)) return null;
+    return numeric;
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value)) return null;
+  const unit = (match[2] || "ms").toLowerCase();
+  if (unit.startsWith("ms") || unit.startsWith("millisecond")) {
+    return value;
+  }
+  if (unit.startsWith("h") || unit.startsWith("hr") || unit.startsWith("hour")) {
+    return value * HOUR_MS;
+  }
+  if (unit.startsWith("m")) {
+    return value * MINUTE_MS;
+  }
+  if (unit.startsWith("s")) {
+    return value * 1000;
+  }
+  return value;
+};
+
+const extractDurationOverride = (options, candidates) => {
+  if (!options || typeof options !== "object") return null;
+  for (const candidate of candidates) {
+    if (!(candidate in options)) continue;
+    const raw = options[candidate];
+    if (raw === undefined || raw === null) continue;
+    const keyLower = candidate.toLowerCase();
+    if (keyLower.endsWith("minutes") || keyLower.endsWith("minute") || keyLower.endsWith("mins")) {
+      const numeric = Number(raw);
+      if (Number.isFinite(numeric)) {
+        return numeric * MINUTE_MS;
+      }
+    }
+    const parsed = parseDurationOverride(raw);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+  return null;
+};
+
+const pickIntInclusive = (rng, min, max) => {
+  const floorMin = Math.round(min);
+  const floorMax = Math.round(max);
+  if (floorMax <= floorMin) {
+    return floorMin;
+  }
+  const random = typeof rng === "function" ? rng() : Math.random();
+  const span = floorMax - floorMin + 1;
+  const pick = Math.floor(random * span);
+  return floorMin + pick;
+};
+
+const applyScalingToSegments = (segments, rawTotal, target) => {
+  if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
+    return segments.map((segment) => ({ ...segment }));
+  }
+  const ratio = target / rawTotal;
+  return segments.map((segment) => {
+    const scaled = Math.round(segment.waitMs * ratio);
+    return {
+      ...segment,
+      waitMs: clamp(scaled, segment.minMs, segment.maxMs),
+    };
+  });
+};
+
+const rebalanceSegmentDurations = (segments, target) => {
+  if (!Array.isArray(segments) || segments.length === 0) return 0;
+  let current = segments.reduce((sum, entry) => sum + entry.waitMs, 0);
+  const tolerance = Math.max(500, Math.round(target * 0.0025));
+  let guard = 0;
+  while (Math.abs(current - target) > tolerance && guard < 2000) {
+    const delta = target - current;
+    if (delta === 0) break;
+    const direction = delta > 0 ? 1 : -1;
+    const candidates = segments.filter((entry) =>
+      direction > 0 ? entry.waitMs < entry.maxMs : entry.waitMs > entry.minMs
+    );
+    if (candidates.length === 0) break;
+    const step = Math.max(1, Math.round(Math.abs(delta) / Math.max(4, candidates.length)));
+    let applied = 0;
+    for (const entry of candidates) {
+      if (Math.abs(current - target) <= tolerance) break;
+      const room = direction > 0 ? entry.maxMs - entry.waitMs : entry.waitMs - entry.minMs;
+      if (room <= 0) continue;
+      const amount = Math.min(room, step);
+      entry.waitMs += direction * amount;
+      current += direction * amount;
+      applied += direction * amount;
+      if (Math.abs(current - target) <= tolerance) break;
+    }
+    if (applied === 0) {
+      break;
+    }
+    guard += 1;
+  }
+  return current;
+};
+
+const resolveDurationTargets = (definition, options, loops, minPossible, maxPossible) => {
+  const baseDuration = Math.max(1, Number(definition?.defaultDurationMs || 0)) * loops;
+  const minOverride = extractDurationOverride(options, [
+    "durationMinMs",
+    "durationMin",
+    "durationLowerMs",
+    "durationLower",
+    "minDurationMs",
+    "minDuration",
+    "durationMinMinutes",
+    "durationMinMins",
+    "minDurationMinutes",
+  ]);
+  const maxOverride = extractDurationOverride(options, [
+    "durationMaxMs",
+    "durationMax",
+    "durationUpperMs",
+    "durationUpper",
+    "maxDurationMs",
+    "maxDuration",
+    "durationMaxMinutes",
+    "durationMaxMins",
+    "maxDurationMinutes",
+  ]);
+  const targetOverride = extractDurationOverride(options, [
+    "durationMs",
+    "duration",
+    "durationTargetMs",
+    "durationTarget",
+    "targetDurationMs",
+    "targetDuration",
+    "durationMinutes",
+    "durationMins",
+  ]);
+
+  let minTarget = Number.isFinite(minOverride) ? Math.max(1, minOverride) : baseDuration;
+  let maxTarget = Number.isFinite(maxOverride) ? Math.max(minTarget, maxOverride) : baseDuration;
+  if (minTarget > maxTarget) {
+    const tmp = minTarget;
+    minTarget = maxTarget;
+    maxTarget = tmp;
+  }
+  let targetDuration = Number.isFinite(targetOverride) ? targetOverride : baseDuration;
+  targetDuration = clamp(targetDuration, minTarget, maxTarget);
+
+  const boundedMin = clamp(minTarget, minPossible, maxPossible);
+  const boundedMax = clamp(maxTarget, boundedMin, maxPossible);
+  const boundedTarget = clamp(targetDuration, boundedMin, boundedMax);
+
+  return {
+    minTarget: boundedMin,
+    maxTarget: boundedMax,
+    targetDuration: boundedTarget,
+  };
+};
+
+export async function runPrewrittenFlow(flowKey, options = {}) {
+  const keyCandidate = pickFirstDefined(flowKey, options.flowKey, options.name);
+  const normalizedKey = typeof keyCandidate === "string"
+    ? keyCandidate.trim().toLowerCase()
+    : "";
+  const definition = PREWRITTEN_FLOW_DEFINITIONS[normalizedKey];
+  if (!definition) {
+    const available = Object.keys(PREWRITTEN_FLOW_DEFINITIONS);
+    throw new Error(
+      `Unknown prewritten flow '${flowKey}'. Available flows: ${available.join(", ")}`
+    );
+  }
+
+  const loopsRaw = pickFirstDefined(
+    options.loops,
+    options.loopCount,
+    options.loop,
+    definition.defaultLoops,
+    1
+  );
+  let loops = Number(loopsRaw);
+  if (!Number.isFinite(loops) || loops <= 0) {
+    loops = 1;
+  }
+  loops = Math.floor(loops);
+  if (loops <= 0) loops = 1;
+
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+
+  const sampledSegments = [];
+  for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
+    definition.legs.forEach((leg, legIndex) => {
+      const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
+      const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
+      const waitMs = pickIntInclusive(rng, minMs, maxMs);
+      sampledSegments.push({
+        flowKey: normalizedKey,
+        loopIndex,
+        legIndex,
+        legKey: leg.key,
+        label: leg.label,
+        minMs,
+        maxMs,
+        waitMs,
+      });
+    });
+  }
+
+  if (sampledSegments.length === 0) {
+    return {
+      definition,
+      flowKey: normalizedKey,
+      flowLabel: definition.label,
+      loops,
+      targetDurationMs: 0,
+      totalPlannedWaitMs: 0,
+      rawSampledDurationMs: 0,
+      segments: [],
+    };
+  }
+
+  const minPossible = sampledSegments.reduce((sum, segment) => sum + segment.minMs, 0);
+  const maxPossible = sampledSegments.reduce((sum, segment) => sum + segment.maxMs, 0);
+  const rawTotal = sampledSegments.reduce((sum, segment) => sum + segment.waitMs, 0);
+
+  const { minTarget, maxTarget, targetDuration } = resolveDurationTargets(
+    definition,
+    options,
+    loops,
+    minPossible,
+    maxPossible
+  );
+  const desiredDuration = clamp(targetDuration ?? rawTotal, minTarget, maxTarget);
+
+  const scaledSegments = applyScalingToSegments(sampledSegments, rawTotal, desiredDuration);
+  rebalanceSegmentDurations(scaledSegments, desiredDuration);
+  const finalTotal = scaledSegments.reduce((sum, segment) => sum + segment.waitMs, 0);
+
+  const schedule = {
+    definition,
+    flowKey: normalizedKey,
+    flowLabel: definition.label,
+    loops,
+    targetDurationMs: desiredDuration,
+    totalPlannedWaitMs: finalTotal,
+    rawSampledDurationMs: rawTotal,
+    segments: scaledSegments.map((segment) => ({ ...segment })),
+  };
+
+  const shouldExecuteWaits = options.executeWaits !== false;
+  if (shouldExecuteWaits) {
+    for (const segment of schedule.segments) {
+      if (typeof options.onSegment === "function") {
+        await options.onSegment(segment, schedule);
+      }
+      await delay(segment.waitMs);
+    }
+  } else if (typeof options.onSegment === "function") {
+    for (const segment of schedule.segments) {
+      await options.onSegment(segment, schedule);
+    }
+  }
+
+  return schedule;
+}
+
 function passiveSleep() {
   if (PASSIVE_STEP_DELAY_MS <= 0 && PASSIVE_STEP_JITTER_MS <= 0) {
     return Promise.resolve();
@@ -4270,6 +4723,9 @@ function ensureCampaignHooksRegistered() {
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },
+    getSplBalanceLamports: async (pubkeyBase58, mint) => {
+      return campaignGetSplBalanceLamports(pubkeyBase58, mint);
+    },
   });
   campaignHooksRegistered = true;
 }
@@ -4421,8 +4877,8 @@ async function campaignFindLargestHolding(pubkeyBase58) {
   }
 }
 
-async function campaignGetSplLamports(pubkeyBase58, mint) {
-  if (!mint || SOL_LIKE_MINTS.has(mint)) {
+async function campaignGetSplBalanceLamports(pubkeyBase58, mint) {
+  if (!mint) {
     return 0n;
   }
   const entry = getCampaignWallet(pubkeyBase58);
@@ -4433,7 +4889,8 @@ async function campaignGetSplLamports(pubkeyBase58, mint) {
     let total = 0n;
     for (const { account } of parsed) {
       const info = account?.data?.parsed?.info;
-      if (!info || info.mint !== mint) continue;
+      if (!info) continue;
+      if (info.mint !== mint) continue;
       const rawAmount = info.tokenAmount?.amount ?? "0";
       try {
         total += BigInt(rawAmount);
@@ -5829,6 +6286,436 @@ async function runBuckshot() {
       "muted"
     )
   );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Prewritten flows                                                           */
+/* -------------------------------------------------------------------------- */
+
+const PREWRITTEN_FLOW_DEFINITIONS = new Map([
+  [
+    "arpeggio",
+    {
+      key: "arpeggio",
+      label: "Arpeggio",
+      description:
+        "Loops SOL through USDC, POPCAT, and PUMP with SOL consolidation between legs.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: null,
+          description: "Seed USDC runway from SOL holdings",
+        },
+        {
+          fromMint: DEFAULT_USDC_MINT,
+          toMint: POPCAT_MINT,
+          amount: "random",
+          description: "Take a randomized POPCAT entry from USDC",
+        },
+        {
+          fromMint: POPCAT_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Flatten POPCAT exposure back to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: PUMP_MINT,
+          amount: "random",
+          description: "Rotate part of SOL into PUMP",
+        },
+        {
+          fromMint: PUMP_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest PUMP back to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: null,
+          description: "Rebuild USDC buffer before the next cycle",
+        },
+      ],
+      swapCountRange: { min: 10, max: 100 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 45_000, max: 120_000 },
+      defaultDurationMs: 45 * 60 * 1000,
+    },
+  ],
+]);
+
+function normalizePrewrittenFlowKey(key) {
+  if (typeof key !== "string") return key;
+  return key.trim().toLowerCase();
+}
+
+function sampleIntegerInRange(minValue, maxValue) {
+  const min = Math.max(0, Math.floor(minValue));
+  const max = Math.max(min, Math.floor(maxValue));
+  if (max === min) return min;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function formatDurationMs(totalMs) {
+  if (!Number.isFinite(totalMs) || totalMs <= 0) return "0s";
+  const totalSeconds = Math.round(totalMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0 || hours > 0) parts.push(`${minutes}m`);
+  parts.push(`${seconds}s`);
+  return parts.join(" ");
+}
+
+function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
+  const count = Math.max(0, hopCount | 0);
+  const delays = new Array(count).fill(0);
+  if (count === 0) return delays;
+
+  const total = Math.max(0, Math.floor(Number(totalDurationMs) || 0));
+  if (total === 0) return delays;
+
+  const rawMin = options.min ?? 0;
+  const rawMax = options.max ?? null;
+  const minMs = Math.max(0, Math.floor(Number(rawMin) || 0));
+  const maxMs =
+    rawMax === null || rawMax === undefined
+      ? null
+      : Math.max(minMs, Math.floor(Number(rawMax) || 0));
+
+  const weights = Array.from({ length: count }, () => Math.random() + 0.01);
+  const weightTotal = weights.reduce((acc, value) => acc + value, 0);
+  let allocated = 0;
+  for (let i = 0; i < count; i += 1) {
+    const share = Math.floor((weights[i] / weightTotal) * total);
+    delays[i] = share;
+    allocated += share;
+  }
+
+  let remainder = total - allocated;
+  let cursor = 0;
+  while (remainder > 0) {
+    delays[cursor % count] += 1;
+    remainder -= 1;
+    cursor += 1;
+  }
+
+  if (minMs > 0) {
+    let deficit = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (delays[i] < minMs) {
+        deficit += minMs - delays[i];
+        delays[i] = minMs;
+      }
+    }
+    if (deficit > 0) {
+      for (let i = 0; i < count && deficit > 0; i += 1) {
+        const available = Math.max(0, delays[i] - minMs);
+        if (available <= 0) continue;
+        const deduction = Math.min(available, deficit);
+        delays[i] -= deduction;
+        deficit -= deduction;
+      }
+    }
+  }
+
+  if (maxMs !== null) {
+    let overflow = 0;
+    for (let i = 0; i < count; i += 1) {
+      if (delays[i] > maxMs) {
+        overflow += delays[i] - maxMs;
+        delays[i] = maxMs;
+      }
+    }
+    if (overflow > 0) {
+      for (let i = 0; i < count && overflow > 0; i += 1) {
+        const headroom = maxMs - delays[i];
+        if (headroom <= 0) continue;
+        const addition = Math.min(headroom, overflow);
+        delays[i] += addition;
+        overflow -= addition;
+      }
+    }
+  }
+
+  const targetTotal = total;
+  let difference = targetTotal - delays.reduce((acc, value) => acc + value, 0);
+  let iteration = 0;
+  const maxIterations = count * 20;
+  const minBound = minMs > 0 ? minMs : 0;
+  const maxBound = maxMs ?? Number.MAX_SAFE_INTEGER;
+  while (difference !== 0 && iteration < maxIterations) {
+    const index = iteration % count;
+    if (difference > 0) {
+      if (delays[index] < maxBound) {
+        delays[index] += 1;
+        difference -= 1;
+      }
+    } else if (difference < 0) {
+      if (delays[index] > minBound) {
+        delays[index] -= 1;
+        difference += 1;
+      }
+    }
+    iteration += 1;
+  }
+
+  if (difference !== 0 && count > 0) {
+    const idx = count - 1;
+    const adjusted = Math.max(
+      minBound,
+      Math.min(maxBound, delays[idx] + difference)
+    );
+    difference -= adjusted - delays[idx];
+    delays[idx] = adjusted;
+  }
+
+  return delays;
+}
+
+function cloneFlowAmount(amount) {
+  if (amount && typeof amount === "object") {
+    return { ...amount };
+  }
+  return amount;
+}
+
+function normalizeFlowAmount(amount) {
+  const source = cloneFlowAmount(amount);
+  if (source === null || source === undefined) return null;
+  if (typeof source === "string") {
+    const trimmed = source.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof source === "number") {
+    if (!Number.isFinite(source)) return null;
+    return source.toString();
+  }
+  if (typeof source === "object") {
+    const mode = typeof source.mode === "string" ? source.mode.toLowerCase() : null;
+    if (mode === "all" || mode === "random") return mode;
+    if (mode === "explicit" && source.value !== undefined && source.value !== null) {
+      return source.value.toString();
+    }
+    if (mode === "range") {
+      const min = Number(source.min ?? 0);
+      const max = Number(source.max ?? min);
+      if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+      const lower = Math.min(min, max);
+      const upper = Math.max(min, max);
+      const sampled = lower + Math.random() * (upper - lower);
+      return sampled.toString();
+    }
+    if (source.value !== undefined && source.value !== null) {
+      return source.value.toString();
+    }
+  }
+  return null;
+}
+
+function describeFlowAmount(normalizedAmount) {
+  if (normalizedAmount === null) return "(session default amount)";
+  const lowered = normalizedAmount.toLowerCase();
+  if (lowered === "all") return "(all holdings)";
+  if (lowered === "random") return "(randomized amount)";
+  return `(amount ${normalizedAmount})`;
+}
+
+async function runPrewrittenFlow(flowKey, options = {}) {
+  const normalizedKey = normalizePrewrittenFlowKey(flowKey);
+  const flow =
+    PREWRITTEN_FLOW_DEFINITIONS.get(normalizedKey) ||
+    PREWRITTEN_FLOW_DEFINITIONS.get(flowKey);
+  if (!flow) {
+    throw new Error(`Unknown prewritten flow: ${flowKey}`);
+  }
+
+  let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
+    ? options.wallets
+    : listWallets();
+  if (walletList.length === 0) {
+    console.log(paint("No wallets found for prewritten flow", "muted"));
+    return {
+      key: flow.key,
+      plannedSwaps: 0,
+      cycles: 0,
+      waitTotalMs: 0,
+      targetWaitTotalMs: 0,
+      finalMint: flow.startMint || SOL_MINT,
+    };
+  }
+
+  const cycleTemplate = Array.isArray(flow.cycleTemplate) ? flow.cycleTemplate : [];
+  if (cycleTemplate.length === 0) {
+    throw new Error(`Prewritten flow ${flow.label} has no cycle template defined`);
+  }
+
+  const swapRange = flow.swapCountRange || {};
+  const cycleLength = cycleTemplate.length;
+  const rangeMin = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
+  const rangeMax = Math.max(rangeMin, Math.floor(swapRange.max ?? rangeMin));
+  const overrideTarget = options.swapTarget ?? options.swapCount ?? null;
+  let sampledTarget;
+  if (overrideTarget !== null && overrideTarget !== undefined) {
+    sampledTarget = Math.max(rangeMin, Math.floor(Number(overrideTarget) || rangeMin));
+  } else {
+    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax);
+  }
+
+  const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
+  const minimumSwapCount = Math.max(
+    cycleLength,
+    minimumCycles * cycleLength,
+    flow.minimumSwapCount ? Math.floor(flow.minimumSwapCount) : cycleLength
+  );
+  const effectiveSwapTarget = Math.max(sampledTarget, minimumSwapCount);
+  let cycles = Math.ceil(effectiveSwapTarget / cycleLength);
+  if (cycles < minimumCycles) cycles = minimumCycles;
+
+  const schedule = [];
+  let currentMint = options.startMint || flow.startMint || SOL_MINT;
+  for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
+    for (const step of cycleTemplate) {
+      const fromMint = step.fromMint || currentMint;
+      const toMint = step.toMint;
+      if (!toMint) {
+        throw new Error(`Flow ${flow.label} step is missing a toMint value`);
+      }
+      const amount = cloneFlowAmount(step.amount);
+      const entry = {
+        ...step,
+        fromMint,
+        toMint,
+        amount,
+      };
+      schedule.push(entry);
+      currentMint = toMint;
+    }
+  }
+
+  if (flow.requireTerminalSolHop && currentMint !== SOL_MINT) {
+    schedule.push({
+      fromMint: currentMint,
+      toMint: SOL_MINT,
+      amount: "all",
+      description: "Return to SOL to finish the session",
+      autoAppended: true,
+    });
+    currentMint = SOL_MINT;
+  }
+
+  const plannedSwaps = schedule.length;
+  const requestedDurationMsRaw =
+    options.totalDurationMs ??
+    options.durationMs ??
+    flow.defaultDurationMs ??
+    0;
+  const requestedDurationMs = Math.max(
+    0,
+    Math.floor(Number(requestedDurationMsRaw) || 0)
+  );
+
+  const waitOptions = {
+    min: options.waitBounds?.min ?? flow.waitBoundsMs?.min ?? 0,
+    max: options.waitBounds?.max ?? flow.waitBoundsMs?.max ?? null,
+  };
+  const perHopDelays = allocateHopDelays(
+    requestedDurationMs,
+    plannedSwaps,
+    waitOptions
+  );
+  const actualWaitTotal = perHopDelays.reduce((acc, value) => acc + value, 0);
+
+  console.log(
+    paint(`\n== Prewritten flow: ${flow.label} (${flow.key}) ==`, "label")
+  );
+  console.log(
+    paint(
+      `Swap target sampled at ${sampledTarget} hop(s); executing ${plannedSwaps} hop(s) across ${cycles} cycle(s).`,
+      "muted"
+    )
+  );
+  if (flow.description) {
+    console.log(paint(flow.description, "muted"));
+  }
+
+  if (requestedDurationMs > 0) {
+    const waitLabel =
+      actualWaitTotal === requestedDurationMs
+        ? formatDurationMs(actualWaitTotal)
+        : `${formatDurationMs(actualWaitTotal)} (target ${formatDurationMs(requestedDurationMs)})`;
+    console.log(paint(`Planned wait budget: ${waitLabel}.`, "muted"));
+  }
+
+  const walletNames = walletList.map((wallet) => wallet.name).join(", ");
+  if (walletNames) {
+    console.log(paint(`Wallet scope: ${walletNames}.`, "muted"));
+  }
+
+  for (let index = 0; index < schedule.length; index += 1) {
+    const step = schedule[index];
+    const normalizedAmount = normalizeFlowAmount(step.amount);
+    const amountLabel = describeFlowAmount(normalizedAmount);
+    const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
+    const descriptionParts = [
+      hopLabel,
+      `${describeMintLabel(step.fromMint)} → ${describeMintLabel(step.toMint)}`,
+      amountLabel,
+    ];
+    if (step.description) descriptionParts.push(`— ${step.description}`);
+    console.log(paint(descriptionParts.join(" "), "info"));
+
+    try {
+      await doSwapAcross(step.fromMint, step.toMint, normalizedAmount, {
+        wallets: walletList,
+        quietSkips: true,
+        suppressMetadata: true,
+        walletDelayMs:
+          step.walletDelayMs ??
+          flow.walletDelayMs ??
+          options.walletDelayMs ??
+          DELAY_BETWEEN_CALLS_MS,
+      });
+      currentMint = step.toMint;
+    } catch (err) {
+      console.error(
+        paint(`  Flow hop failed: ${err?.message || err}`, "error")
+      );
+    }
+
+    const waitMs = perHopDelays[index] ?? 0;
+    if (waitMs > 0) {
+      console.log(
+        paint(
+          `  waiting ${formatDurationMs(waitMs)} before next hop`,
+          "muted"
+        )
+      );
+      await delay(waitMs);
+    }
+  }
+
+  console.log(
+    paint(
+      `Prewritten flow ${flow.label} complete: ${plannedSwaps} hop(s) executed.`,
+      "success"
+    )
+  );
+
+  return {
+    key: flow.key,
+    plannedSwaps,
+    cycles,
+    waitTotalMs: actualWaitTotal,
+    targetWaitTotalMs: requestedDurationMs,
+    finalMint: currentMint,
+  };
 }
 
 async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
@@ -10684,4 +11571,6 @@ export {
   ensureAtaForMint,
   ensureWrappedSolBalance,
   resolveTokenProgramForMint,
+  runPrewrittenFlow,
+  PREWRITTEN_FLOW_DEFINITIONS,
 };
