@@ -46,7 +46,6 @@ import {
   getPerpsProgram,
   getPerpsProgramId,
 } from "./perps.js";
-import { getPerpsProgramId } from "./perps/client.js";
 import {
   instantiateCampaignForWallets,
   executeTimedPlansAcrossWallets,
@@ -2400,8 +2399,30 @@ function formatEarnPositionSnippet(entry) {
   return symbolStr;
 }
 
+async function resolveTokenProgramForMint(connection, mintPubkey) {
+  const info = await connection.getAccountInfo(mintPubkey);
+  if (!info) {
+    throw new Error(`Mint ${mintPubkey.toBase58()} not found when resolving token program`);
+  }
+  if (info.owner?.equals?.(TOKEN_PROGRAM_ID)) {
+    return TOKEN_PROGRAM_ID;
+  }
+  if (info.owner?.equals?.(TOKEN_2022_PROGRAM_ID)) {
+    return TOKEN_2022_PROGRAM_ID;
+  }
+  throw new Error(
+    `Mint ${mintPubkey.toBase58()} is owned by ${info.owner?.toBase58?.() || String(
+      info.owner
+    )}, which is not a supported token program`
+  );
+}
+
 async function ensureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options = {}) {
-  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, tokenProgram, options);
+  let resolvedProgram = tokenProgram;
+  if (!resolvedProgram) {
+    resolvedProgram = await resolveTokenProgramForMint(connection, mintPubkey);
+  }
+  return sharedEnsureAtaForMint(connection, wallet, mintPubkey, resolvedProgram, options);
 }
 
 async function ensureAtasForTransaction({ connection, wallet, txBase64, label }) {
