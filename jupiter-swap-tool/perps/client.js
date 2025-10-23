@@ -82,89 +82,37 @@ function readIdl() {
 function resolveWallet(options, fallbackWallet) {
   const providedWallet = options?.wallet;
   if (providedWallet) {
-    const normalizedPublicKey = coercePublicKey(
-      providedWallet.publicKey ?? providedWallet
-    );
-    const hasSignerCapabilities =
-      typeof providedWallet.signTransaction === "function" ||
-      typeof providedWallet.signAllTransactions === "function";
-
-    if (hasSignerCapabilities) {
-      if (providedWallet.publicKey instanceof PublicKey && providedWallet.publicKey === normalizedPublicKey) {
-        return providedWallet;
-      }
-
+    if (providedWallet.publicKey instanceof PublicKey) {
+      return providedWallet;
+    }
+    if (providedWallet.publicKey) {
+      const coercedPublicKey = coercePublicKey(providedWallet.publicKey);
       try {
-        providedWallet.publicKey = normalizedPublicKey;
+        providedWallet.publicKey = coercedPublicKey;
         return providedWallet;
       } catch (err) {
-        /* ignore mutations on frozen wallet objects */
+        return new ReadOnlyWallet(coercedPublicKey);
       }
-
-      const normalizedWallet = new Proxy(providedWallet, {
-        get(target, prop, receiver) {
-          if (prop === "publicKey") {
-            try {
-              const raw = Reflect.get(target, prop, target);
-              return coercePublicKey(raw ?? target);
-            } catch (err) {
-              return normalizedPublicKey;
-            }
-          }
-          const value = Reflect.get(target, prop, target);
-          if (typeof value === "function") {
-            return value.bind(target);
-          }
-          return value;
-        },
-        set(target, prop, value, receiver) {
-          if (prop === "publicKey") {
-            try {
-              return Reflect.set(target, prop, value, target);
-            } catch (err) {
-              return false;
-            }
-          }
-          return Reflect.set(target, prop, value, target);
-        },
-        ownKeys(target) {
-          const keys = Reflect.ownKeys(target);
-          if (!keys.includes("publicKey")) {
-            keys.push("publicKey");
-          }
-          return keys;
-        },
-        getOwnPropertyDescriptor(target, prop) {
-          if (prop === "publicKey") {
-            return {
-              configurable: true,
-              enumerable: true,
-              get() {
-                try {
-                  const raw = Reflect.get(target, prop, target);
-                  return coercePublicKey(raw ?? target);
-                } catch (err) {
-                  return normalizedPublicKey;
-                }
-              },
-              set(value) {
-                try {
-                  Reflect.set(target, prop, value, target);
-                } catch (err) {
-                  /* ignore setter failures */
-                }
-              },
-            };
-          }
-          return Object.getOwnPropertyDescriptor(target, prop);
-        },
-      });
-      return normalizedWallet;
     }
 
     return new ReadOnlyWallet(normalizedPublicKey);
   }
-  if (fallbackWallet) return fallbackWallet;
+  if (fallbackWallet) {
+    if (fallbackWallet.publicKey && !(fallbackWallet.publicKey instanceof PublicKey)) {
+      const coercedPublicKey = coercePublicKey(fallbackWallet.publicKey);
+      try {
+        fallbackWallet.publicKey = coercedPublicKey;
+        return fallbackWallet;
+      } catch (err) {
+        const clone = Object.create(Object.getPrototypeOf(fallbackWallet) || Object.prototype);
+        return Object.assign(clone, fallbackWallet, { publicKey: coercedPublicKey });
+      }
+    }
+    if (typeof fallbackWallet === "string" || isBytesLike(fallbackWallet)) {
+      return new ReadOnlyWallet(fallbackWallet);
+    }
+    return fallbackWallet;
+  }
   if (options?.publicKey) {
     return new ReadOnlyWallet(options.publicKey);
   }

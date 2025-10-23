@@ -13,6 +13,8 @@ import {
 } from "@solana/spl-token";
 import { createHash } from "crypto";
 import { createRequire } from "module";
+import { getPerpsProgramId as resolvePerpsProgramId } from "./perps/client.js";
+export { getPerpsProgramId } from "./perps/client.js";
 
 const require = createRequire(import.meta.url);
 const PERPS_IDL = require("./perps_idl.json");
@@ -113,10 +115,6 @@ const ACCOUNTS_IDL = {
 };
 const ACCOUNTS_CODER = new BorshAccountsCoder(ACCOUNTS_IDL);
 
-export const JUPITER_PERPETUALS_PROGRAM_ID = new PublicKey(
-  "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
-);
-
 export const JUPITER_PERPETUALS_EVENT_AUTHORITY = new PublicKey(
   "37hJBDnntwqhGbK7L6M1bLyvccj4u55CCUiLPdYkiqBN"
 );
@@ -180,18 +178,23 @@ class ReadonlyWallet {
 
 const programCache = new Map();
 
-function getProgramCacheKey(connection) {
+function getProgramCacheKey(connection, programId) {
   const endpoint =
     connection?.__rpcEndpoint || connection?._rpcEndpoint || "unknown";
   const commitment = connection?.commitment || connection?._commitment || "";
-  return `${endpoint}::${commitment}`;
+  const programIdString =
+    typeof programId?.toBase58 === "function"
+      ? programId.toBase58()
+      : String(programId || "");
+  return `${endpoint}::${commitment}::${programIdString}`;
 }
 
 export function getPerpsProgram(connection) {
   if (!connection) {
     throw new Error("connection is required to load the perps program");
   }
-  const cacheKey = getProgramCacheKey(connection);
+  const programId = resolvePerpsProgramId();
+  const cacheKey = getProgramCacheKey(connection, programId);
   if (programCache.has(cacheKey)) {
     return programCache.get(cacheKey);
   }
@@ -205,19 +208,16 @@ export function getPerpsProgram(connection) {
         connection.commitment || connection._commitment || "confirmed",
     }
   );
-  const program = new Program(
-    programIdl,
-    JUPITER_PERPETUALS_PROGRAM_ID,
-    provider
-  );
+  const program = new Program(programIdl, programId, provider);
   programCache.set(cacheKey, program);
   return program;
 }
 
 export function derivePerpetualsPda() {
+  const programId = resolvePerpsProgramId();
   const [pubkey, bump] = PublicKey.findProgramAddressSync(
     [Buffer.from("perpetuals")],
-    JUPITER_PERPETUALS_PROGRAM_ID
+    programId
   );
   return { pubkey, bump };
 }
@@ -239,6 +239,7 @@ export function derivePositionPda({
       : Array.isArray(side)
       ? side
       : [1];
+  const programId = resolvePerpsProgramId();
   const [pubkey, bump] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("position"),
@@ -248,7 +249,7 @@ export function derivePositionPda({
       collateralCustody.toBuffer(),
       Uint8Array.from(sideBytes),
     ],
-    JUPITER_PERPETUALS_PROGRAM_ID
+    programId
   );
   return { pubkey, bump };
 }
@@ -269,6 +270,7 @@ export function derivePositionRequestPda({ position, counter, change }) {
     counterBn = new BN(Math.floor(Math.random() * 1_000_000_000));
   }
   const changeByte = change === "decrease" ? [2] : [1];
+  const programId = resolvePerpsProgramId();
   const [pubkey, bump] = PublicKey.findProgramAddressSync(
     [
       Buffer.from("position_request"),
@@ -276,7 +278,7 @@ export function derivePositionRequestPda({ position, counter, change }) {
       counterBn.toArrayLike(Buffer, "le", 8),
       Buffer.from(changeByte),
     ],
-    JUPITER_PERPETUALS_PROGRAM_ID
+    programId
   );
   return { pubkey, bump, counter: counterBn };
 }
@@ -339,6 +341,7 @@ export async function buildIncreaseRequestInstruction({
   referral = null,
 }) {
   const program = getPerpsProgram(connection);
+  const programId = program.programId;
   const custodyPk = new PublicKey(custody);
   const collateralPk = new PublicKey(collateralCustody);
   const inputMintPk = new PublicKey(inputMint);
@@ -388,6 +391,8 @@ export async function buildIncreaseRequestInstruction({
       collateralCustody: collateralPk,
       inputMint: inputMintPk,
       referral,
+      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      program: programId,
     })
     .instruction();
   return {
@@ -415,6 +420,7 @@ export async function buildDecreaseRequestInstruction({
   referral = null,
 }) {
   const program = getPerpsProgram(connection);
+  const programId = program.programId;
   const ownerPk = new PublicKey(owner);
   const positionPk = new PublicKey(position);
   const positionAccount = await program.account.position.fetch(positionPk);
@@ -461,6 +467,8 @@ export async function buildDecreaseRequestInstruction({
       collateralCustody: positionAccount.collateralCustody,
       desiredMint: desiredMintPk,
       referral,
+      eventAuthority: JUPITER_PERPETUALS_EVENT_AUTHORITY,
+      program: programId,
     })
     .instruction();
   return {
@@ -529,6 +537,7 @@ export async function fetchCustodyAccounts(connection, custodyPubkeys) {
 }
 
 export async function fetchPositionsForOwners(connection, ownerPubkeys) {
+  const programId = resolvePerpsProgramId();
   const results = [];
   for (const owner of ownerPubkeys) {
     const ownerPk = new PublicKey(owner);
@@ -540,10 +549,9 @@ export async function fetchPositionsForOwners(connection, ownerPubkeys) {
         },
       },
     ];
-    const rawAccounts = await connection.getProgramAccounts(
-      JUPITER_PERPETUALS_PROGRAM_ID,
-      { filters: memcmpFilters }
-    );
+    const rawAccounts = await connection.getProgramAccounts(programId, {
+      filters: memcmpFilters,
+    });
     const decoded = rawAccounts.map((entry) => ({
       publicKey: entry.pubkey,
       account: ACCOUNTS_CODER.decode("position", entry.account.data),
