@@ -24,6 +24,7 @@ const WALLET_MIN_REST_LAMPORTS = SOL_TO_LAMPORTS(WALLET_MIN_REST_SOL);
 const ATA_RENT_EST_LAMPORTS = SOL_TO_LAMPORTS(ATA_RENT_EST_SOL);
 const FEE_LAMPORTS = SOL_TO_LAMPORTS(0.00001);
 const JUP_BUFFER_LAMPORTS = SOL_TO_LAMPORTS(0.0005);
+const BASIS_POINTS = 10_000n;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -105,6 +106,17 @@ function estimateStepCostLamports(step) {
   return total;
 }
 
+const scatterBudgetStateByWallet = new Map();
+
+function computeSpendableLamports(balanceLamports) {
+  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+  return balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+}
+
+function resetScatterState(pubkeyBase58) {
+  scatterBudgetStateByWallet.delete(pubkeyBase58);
+}
+
 export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   const balanceLamports =
     typeof solBalanceLamports === "bigint"
@@ -178,15 +190,64 @@ export function buildTimedPlanForWallet({
       requiresAta: entry?.mint !== WSOL_MINT,
     }));
   } else if (kind === "scatter-then-converge") {
-    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
+    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8) || 3));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
-    if (picks.length === 0) {
+    if (picks.length < 3) {
       logicalSteps = [];
     } else {
-      logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
-        outMint: picks[idx % picks.length].mint,
-        requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
-      }));
+      const scatterTotalFraction = 0.7 + rng() * 0.1;
+      const scatterTotalBasisPoints = Math.max(
+        100,
+        Math.min(9000, Math.round(scatterTotalFraction * 10_000))
+      );
+      const weights = picks.map(() => 0.35 + rng());
+      const weightSum = weights.reduce((acc, value) => acc + value, 0);
+      let allocatedBasisPoints = 0;
+      const scatterPhaseId = Math.floor(rng() * 1_000_000);
+      const scatterSteps = picks.map((entry, index) => {
+        let fractionBasisPoints;
+        if (index === picks.length - 1) {
+          fractionBasisPoints = scatterTotalBasisPoints - allocatedBasisPoints;
+        } else {
+          const rawShare = (weights[index] / weightSum) * scatterTotalBasisPoints;
+          const minimumRemaining = picks.length - index - 1;
+          fractionBasisPoints = Math.max(
+            1,
+            Math.floor(rawShare - 0.0000001)
+          );
+          if (scatterTotalBasisPoints - (allocatedBasisPoints + fractionBasisPoints) < minimumRemaining) {
+            fractionBasisPoints = Math.max(
+              1,
+              scatterTotalBasisPoints - allocatedBasisPoints - minimumRemaining
+            );
+          }
+        }
+        allocatedBasisPoints += fractionBasisPoints;
+        return {
+          phase: "scatter",
+          phaseId: scatterPhaseId,
+          fromMint: WSOL_MINT,
+          toMint: entry.mint,
+          fractionBasisPoints,
+          phaseTotalBasisPoints: scatterTotalBasisPoints,
+          requiresAta: entry.mint !== WSOL_MINT,
+          isScatterTerminal: index === picks.length - 1,
+        };
+      });
+
+      const convergenceMint = picks[Math.floor(rng() * picks.length)]?.mint || picks[0].mint;
+      const convergeSteps = picks
+        .filter((entry) => entry.mint !== convergenceMint)
+        .map((entry, index) => ({
+          phase: "converge",
+          fromMint: entry.mint,
+          toMint: convergenceMint,
+          fractionBasisPoints: 10_000,
+          requiresAta: convergenceMint !== WSOL_MINT,
+          convergeIndex: index,
+        }));
+
+      logicalSteps = [...scatterSteps, ...convergeSteps];
     }
   } else {
     logicalSteps = Array.from({ length: safeTarget }, () => ({
@@ -199,14 +260,15 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
 
-  const baseInterval = Math.max(10_000, Math.floor(durationMs / safeTarget));
+  const totalSteps = logicalSteps.length;
+  const baseInterval = Math.max(10_000, Math.floor(durationMs / totalSteps));
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
   const schedule = [];
 
-  for (let idx = 0; idx < safeTarget; idx += 1) {
-    const logical = logicalSteps[idx % logicalSteps.length];
+  for (let idx = 0; idx < totalSteps; idx += 1) {
+    const logical = logicalSteps[idx];
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
@@ -328,19 +390,129 @@ let HOOKS = {
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
+  findSplHoldingByMint: null,
 };
 
 export function registerHooks(nextHooks) {
   HOOKS = { ...HOOKS, ...nextHooks };
 }
 
-export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
+async function executeScatterStep(pubkeyBase58, logicalStep, rng) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
   const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
-  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-  const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+  let spendable = computeSpendableLamports(balanceLamports);
+  if (spendable <= 0n) {
+    throw new Error("insufficient spendable SOL");
+  }
+  const phaseId = logicalStep?.phaseId ?? null;
+  const existing = scatterBudgetStateByWallet.get(pubkeyBase58);
+  let state = existing;
+  if (!state || state.phaseId !== phaseId) {
+    state = {
+      phaseId,
+      initialBudget: spendable,
+      totalBasisPoints: BigInt(logicalStep?.phaseTotalBasisPoints ?? 0),
+      targetBudget: 0n,
+      spent: 0n,
+    };
+    const totalBasisPoints = state.totalBasisPoints > 0n ? state.totalBasisPoints : 0n;
+    if (totalBasisPoints > 0n) {
+      state.targetBudget = (state.initialBudget * totalBasisPoints) / BASIS_POINTS;
+    } else {
+      state.targetBudget = state.initialBudget;
+    }
+    scatterBudgetStateByWallet.set(pubkeyBase58, state);
+  }
+
+  const fractionBasisPoints = BigInt(logicalStep?.fractionBasisPoints ?? 0);
+  let desired = 0n;
+  if (fractionBasisPoints > 0n) {
+    desired = (state.initialBudget * fractionBasisPoints) / BASIS_POINTS;
+  }
+  const remainingBudget =
+    state.targetBudget > state.spent ? state.targetBudget - state.spent : 0n;
+  if (logicalStep?.isScatterTerminal && remainingBudget > 0n) {
+    desired = remainingBudget;
+  } else if (remainingBudget > 0n && desired > remainingBudget) {
+    desired = remainingBudget;
+  }
+  if (desired <= 0n) {
+    desired = pickPortionLamports(rng, spendable);
+  }
+
+  let maxSpendNow = spendable;
+  if (logicalStep?.requiresAta) {
+    if (maxSpendNow <= ATA_RENT_EST_LAMPORTS) {
+      throw new Error("insufficient SOL to cover ATA rent");
+    }
+    maxSpendNow -= ATA_RENT_EST_LAMPORTS;
+  }
+  if (maxSpendNow <= 0n) {
+    throw new Error("insufficient spendable SOL");
+  }
+  if (desired > maxSpendNow) {
+    desired = maxSpendNow;
+  }
+  if (desired <= 0n) {
+    throw new Error("amount below dust floor");
+  }
+
+  state.spent += desired;
+  if (logicalStep?.isScatterTerminal) {
+    resetScatterState(pubkeyBase58);
+  }
+
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, logicalStep.fromMint, logicalStep.toMint, desired);
+}
+
+async function executeConvergeStep(pubkeyBase58, logicalStep) {
+  if (!HOOKS.findSplHoldingByMint || !HOOKS.splToLamports || !HOOKS.jupiterLiteSwap) {
+    return null;
+  }
+  if (!logicalStep?.fromMint || logicalStep.fromMint === logicalStep.toMint) {
+    return null;
+  }
+  const holding = await HOOKS.findSplHoldingByMint(pubkeyBase58, logicalStep.fromMint);
+  if (!holding || !holding.uiAmount) {
+    return null;
+  }
+  const baseLamportsRaw = await HOOKS.splToLamports(
+    pubkeyBase58,
+    logicalStep.fromMint,
+    holding.uiAmount
+  );
+  let lamportsIn = BigInt(baseLamportsRaw ?? 0);
+  if (lamportsIn <= 0n) {
+    return null;
+  }
+  const fractionBasisPoints = BigInt(logicalStep?.fractionBasisPoints ?? Number(BASIS_POINTS));
+  if (fractionBasisPoints > 0n && fractionBasisPoints < BASIS_POINTS) {
+    lamportsIn = (lamportsIn * fractionBasisPoints) / BASIS_POINTS;
+  }
+  if (lamportsIn <= 0n) {
+    return null;
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, logicalStep.fromMint, logicalStep.toMint, lamportsIn);
+}
+
+export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
+  if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
+    throw new Error("campaign hooks not registered");
+  }
+  if (!logicalStep) {
+    throw new Error("missing logical step");
+  }
+  if (logicalStep.phase === "scatter") {
+    return executeScatterStep(pubkeyBase58, logicalStep, rng);
+  }
+  if (logicalStep.phase === "converge") {
+    return executeConvergeStep(pubkeyBase58, logicalStep);
+  }
+
+  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+  const spendable = computeSpendableLamports(balanceLamports);
   if (spendable <= 0n) {
     throw new Error("insufficient spendable SOL");
   }
