@@ -4120,6 +4120,45 @@ const SOL_LIKE_MINTS = new Set([
   "11111111111111111111111111111111",
 ]);
 
+function pickRandomCatalogMint(options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const exclude = new Set();
+  if (options.exclude instanceof Set) {
+    for (const mint of options.exclude) {
+      if (!mint) continue;
+      exclude.add(normaliseSolMint(mint));
+    }
+  } else if (Array.isArray(options.exclude)) {
+    for (const mint of options.exclude) {
+      if (!mint) continue;
+      exclude.add(normaliseSolMint(mint));
+    }
+  } else if (typeof options.exclude === "string") {
+    exclude.add(normaliseSolMint(options.exclude));
+  }
+
+  const candidates = TOKEN_CATALOG.filter((entry) => {
+    if (!entry || !entry.mint) return false;
+    const normalizedMint = normaliseSolMint(entry.mint);
+    if (SOL_LIKE_MINTS.has(normalizedMint)) return false;
+    return !exclude.has(normalizedMint);
+  });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const index = randomIntInclusive(0, candidates.length - 1, rng);
+  const chosen = candidates[index] || null;
+  if (chosen && options.exclude instanceof Set) {
+    const normalized = normaliseSolMint(chosen.mint);
+    if (!SOL_LIKE_MINTS.has(normalized)) {
+      options.exclude.add(normalized);
+    }
+  }
+  return chosen ? normaliseSolMint(chosen.mint) : null;
+}
+
 const KNOWN_MINTS = new Map(
   TOKEN_CATALOG.map((entry) => {
     let programId = null;
@@ -4206,6 +4245,46 @@ function printStartupBanner() {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const SESSION_RNG_NAMESPACE =
+  process.env.JUPITER_SWAP_TOOL_SESSION_SEED ||
+  process.env.JUPITER_SWAP_TOOL_RANDOM_SEED ||
+  "jupiter-swap-tool-session";
+
+function hashStringToUint32(input) {
+  const str =
+    typeof input === "string"
+      ? input
+      : JSON.stringify(input, (_, value) =>
+          typeof value === "bigint" ? value.toString() : value
+        );
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function createDeterministicRng(seedInput) {
+  let state = hashStringToUint32(seedInput) || 0x811c9dc5;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function deriveWalletSessionRng(wallet, scope = "default") {
+  const components = [
+    SESSION_RNG_NAMESPACE,
+    scope,
+    wallet?.name || "",
+    wallet?.kp?.publicKey ? wallet.kp.publicKey.toBase58() : "",
+  ];
+  return createDeterministicRng(components.join("|"));
+}
+
 const pickFirstDefined = (...values) => {
   for (const value of values) {
     if (value !== undefined && value !== null) {
@@ -4281,6 +4360,10 @@ const pickIntInclusive = (rng, min, max) => {
   const pick = Math.floor(random * span);
   return floorMin + pick;
 };
+
+function randomIntInclusive(min, max, rng = Math.random) {
+  return pickIntInclusive(typeof rng === "function" ? rng : Math.random, min, max);
+}
 
 const applyScalingToSegments = (segments, rawTotal, target) => {
   if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
@@ -4512,10 +4595,11 @@ function balanceRpcDelay() {
   return delay(BALANCE_RPC_DELAY_MS);
 }
 
-function shuffleArray(array) {
+function shuffleArray(array, rng = Math.random) {
   const result = [...array];
+  const randomFn = typeof rng === "function" ? rng : Math.random;
   for (let i = result.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(randomFn() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -5676,9 +5760,45 @@ const BUCKSHOT_TOKEN_MINTS = Array.from(
 function stepsFromMints(mints, options = {}) {
   const steps = [];
   if (!Array.isArray(mints) || mints.length < 2) return steps;
-  for (let i = 0; i < mints.length - 1; i += 1) {
-    const from = normaliseSolMint(mints[i]);
-    const to = normaliseSolMint(mints[i + 1]);
+
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const excludeSet =
+    options.exclude instanceof Set
+      ? options.exclude
+      : new Set(
+          Array.isArray(options.exclude)
+            ? options.exclude
+            : options.exclude
+            ? [options.exclude]
+            : []
+        );
+
+  const resolved = [];
+  for (const rawMint of mints) {
+    let resolvedMint = rawMint;
+    if (
+      typeof rawMint === "string" &&
+      rawMint.trim().length > 0 &&
+      rawMint.trim().toLowerCase() === "random"
+    ) {
+      const picked = pickRandomCatalogMint({ rng, exclude: excludeSet });
+      if (!picked) {
+        throw new Error(
+          "Unable to resolve RANDOM mint placeholder: token catalog has no eligible entries."
+        );
+      }
+      resolvedMint = picked;
+    }
+    const normalized = normaliseSolMint(resolvedMint);
+    resolved.push(normalized);
+    if (!SOL_LIKE_MINTS.has(normalized)) {
+      excludeSet.add(normalized);
+    }
+  }
+
+  for (let i = 0; i < resolved.length - 1; i += 1) {
+    const from = resolved[i];
+    const to = resolved[i + 1];
     if (from === to) continue;
     steps.push({
       from,
@@ -5690,11 +5810,27 @@ function stepsFromMints(mints, options = {}) {
   return steps;
 }
 
-function flattenSegmentsToSteps(segments) {
+function flattenSegmentsToSteps(segments, options = {}) {
   const steps = [];
+  if (!Array.isArray(segments) || segments.length === 0) return steps;
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const excludeSet =
+    options.exclude instanceof Set
+      ? options.exclude
+      : new Set(
+          Array.isArray(options.exclude)
+            ? options.exclude
+            : options.exclude
+            ? [options.exclude]
+            : []
+        );
   for (const segment of segments) {
     steps.push(
-      ...stepsFromMints(segment.mints, { forceAll: segment.forceAll })
+      ...stepsFromMints(segment.mints, {
+        forceAll: segment.forceAll,
+        rng,
+        exclude: excludeSet,
+      })
     );
   }
   return steps;
@@ -5714,15 +5850,16 @@ function determineAutomationAmountArg(forceAll = false) {
 // Choose which swap segments a wallet should execute. Random mode ensures
 // every wallet performs a meaningful number of swaps by expanding the subset
 // when the dice roll comes back too small.
-function selectSegmentsForWallet(randomMode) {
+function selectSegmentsForWallet(randomMode, options = {}) {
   if (!randomMode) return LONG_CHAIN_SEGMENTS_BASE;
-  const shuffled = shuffleArray(LONG_CHAIN_SEGMENTS_BASE);
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const shuffled = shuffleArray(LONG_CHAIN_SEGMENTS_BASE, rng);
   const maxSegments = LONG_CHAIN_SEGMENTS_BASE.length;
   const minSegments = Math.min(2, maxSegments);
   for (let attempt = 0; attempt < maxSegments; attempt += 1) {
-    const chosenCount = randomIntInclusive(minSegments, maxSegments);
+    const chosenCount = randomIntInclusive(minSegments, maxSegments, rng);
     const candidate = shuffled.slice(0, chosenCount);
-    if (flattenSegmentsToSteps(candidate).length >= 3) {
+    if (flattenSegmentsToSteps(candidate, { rng, exclude: new Set() }).length >= 3) {
       return candidate;
     }
   }
@@ -5732,17 +5869,38 @@ function selectSegmentsForWallet(randomMode) {
 // Generates the optional post-chain random sweep path. Ensures at least
 // three hops so the run is meaningful, falling back to the full token list
 // if random selection still ends up too short.
-function buildSecondaryPathMints(randomMode) {
+function buildSecondaryPathMints(randomMode, options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const excludeSet =
+    options.exclude instanceof Set
+      ? options.exclude
+      : new Set(
+          Array.isArray(options.exclude)
+            ? options.exclude
+            : options.exclude
+            ? [options.exclude]
+            : []
+        );
+
   if (!randomMode) {
-    return [SOL_MINT, DEFAULT_USDC_MINT];
+    const path = [SOL_MINT, DEFAULT_USDC_MINT];
+    for (const mint of path) {
+      if (!SOL_LIKE_MINTS.has(mint)) excludeSet.add(mint);
+    }
+    return path;
   }
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const terminal = SECONDARY_TERMINALS[randomIntInclusive(0, SECONDARY_TERMINALS.length - 1)];
+    const terminal =
+      SECONDARY_TERMINALS[
+        randomIntInclusive(0, SECONDARY_TERMINALS.length - 1, rng)
+      ];
     const pool = shuffleArray(
-      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal)
+      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal),
+      rng
     );
     const maxIntermediates = Math.min(SECONDARY_RANDOM_POOL.length, pool.length);
-    let intermediateCount = randomIntInclusive(1, Math.max(1, maxIntermediates));
+    const upperBound = Math.max(1, maxIntermediates);
+    let intermediateCount = randomIntInclusive(1, upperBound, rng);
     const intermediates = pool.slice(0, intermediateCount);
     const path = [SOL_MINT, ...intermediates, terminal];
     const deduped = [];
@@ -5752,6 +5910,9 @@ function buildSecondaryPathMints(randomMode) {
       }
     }
     if (deduped.length - 1 >= 3) {
+      for (const mint of deduped) {
+        if (!SOL_LIKE_MINTS.has(mint)) excludeSet.add(mint);
+      }
       return deduped;
     }
   }
@@ -5762,6 +5923,9 @@ function buildSecondaryPathMints(randomMode) {
     if (seen.has(mint)) continue;
     seen.add(mint);
     uniqueFallback.push(mint);
+  }
+  for (const mint of uniqueFallback) {
+    if (!SOL_LIKE_MINTS.has(mint)) excludeSet.add(mint);
   }
   return uniqueFallback;
 }
@@ -5955,18 +6119,25 @@ async function runLongCircle(options = {}) {
 
   const plans = await measureAsync("long-circle:plan-wallets", async () => {
     const built = wallets.map((wallet) => {
-      let segments = selectSegmentsForWallet(randomMode);
-      let steps = flattenSegmentsToSteps(segments);
+      const rng = deriveWalletSessionRng(wallet, "long-circle");
+      let segments = selectSegmentsForWallet(randomMode, { rng });
+      let usedMints = new Set();
+      let steps = flattenSegmentsToSteps(segments, { rng, exclude: usedMints });
       if (randomMode && steps.length < 3) {
         const extended = new Set(segments);
         for (const segment of LONG_CHAIN_SEGMENTS_BASE) {
           if (extended.has(segment)) continue;
           extended.add(segment);
           const candidateSegments = Array.from(extended);
-          const candidateSteps = flattenSegmentsToSteps(candidateSegments);
+          const candidateUsedMints = new Set();
+          const candidateSteps = flattenSegmentsToSteps(candidateSegments, {
+            rng,
+            exclude: candidateUsedMints,
+          });
           if (candidateSteps.length >= 3) {
             segments = candidateSegments;
             steps = candidateSteps;
+            usedMints = candidateUsedMints;
             break;
           }
         }
@@ -5976,6 +6147,8 @@ async function runLongCircle(options = {}) {
         steps,
         summary: describeStepSequence(steps),
         skipRegistry: new Set(),
+        rng,
+        usedMints,
       };
     });
     return built;
@@ -5996,8 +6169,14 @@ async function runLongCircle(options = {}) {
     if (enableSecondary) {
       console.log(paint('\n-- secondary random order sweep --', 'label'));
       for (const plan of plans) {
-        const secondaryPath = buildSecondaryPathMints(randomMode);
-        const secondarySteps = stepsFromMints(secondaryPath);
+        const secondaryPath = buildSecondaryPathMints(randomMode, {
+          rng: plan.rng,
+          exclude: plan.usedMints,
+        });
+        const secondarySteps = stepsFromMints(secondaryPath, {
+          rng: plan.rng,
+          exclude: plan.usedMints,
+        });
         if (secondarySteps.length === 0) continue;
         const summary = describeStepSequence(secondarySteps);
         console.log(
