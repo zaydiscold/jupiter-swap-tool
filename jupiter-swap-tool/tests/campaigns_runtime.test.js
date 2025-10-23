@@ -29,6 +29,10 @@ test("long-chain campaigns fall back to alternating WSOL swaps when pool is spar
   assert.ok(plan, "plan should exist for wallet");
   const swapSteps = plan.schedule.filter((entry) => entry.kind === "swapHop");
   assert.ok(swapSteps.length > 0, "fallback should yield at least one swap hop");
+  const selfSwap = swapSteps.find(
+    (step) => step.logicalStep.inMint === step.logicalStep.outMint
+  );
+  assert.ok(!selfSwap, "fallback sequence should not include WSOL self-swaps");
   const firstSwap = swapSteps[0];
   assert.equal(firstSwap.logicalStep.inMint, WSOL_MINT);
   assert.equal(firstSwap.logicalStep.outMint, FALLBACK_MINT);

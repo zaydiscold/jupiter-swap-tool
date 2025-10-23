@@ -335,11 +335,24 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
       inMint: currentMint,
       outMint: nextMint,
       requiresAta: nextMint !== WSOL_MINT,
-      sourceBalance: currentMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: currentMint },
-    };
-    steps.push(step);
+      sourceBalance:
+        currentMint === WSOL_MINT
+          ? { kind: "sol" }
+          : { kind: "spl", mint: currentMint },
+    });
+
     currentMint = nextMint;
   }
+
+  if (steps.length < safeHopCount && currentMint !== WSOL_MINT) {
+    steps.push({
+      inMint: currentMint,
+      outMint: WSOL_MINT,
+      requiresAta: false,
+      sourceBalance: { kind: "spl", mint: currentMint },
+    });
+  }
+
   return steps;
 }
 
