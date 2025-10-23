@@ -84,6 +84,7 @@ const toComparablePath = (rawPath) => {
 };
 
 const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const SCRIPT_COMPARABLE_PATH =
   toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
 
@@ -99,7 +100,6 @@ const IS_MAIN_EXECUTION = (() => {
 
 const KEYPAIR_DIR = "./keypairs";
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
-const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const DEFAULT_PERPS_PROGRAM_ID = "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu";
 const JUPITER_PERPS_PROGRAM_ID =
   process.env.JUPITER_PERPS_PROGRAM_ID || DEFAULT_PERPS_PROGRAM_ID;
