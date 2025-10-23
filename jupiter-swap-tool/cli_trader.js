@@ -448,6 +448,44 @@ const freezeLegs = (legs) =>
     )
   );
 
+const freezeRuntimeProfile = (profile) => {
+  if (!profile || typeof profile !== "object") {
+    return Object.freeze({
+      swapCountRange: Object.freeze({ min: 0, max: 0 }),
+    });
+  }
+  const swapRange = Object.freeze({
+    min: Math.max(0, Math.floor(profile.swapCountRange?.min ?? 0)),
+    max: Math.max(
+      Math.max(0, Math.floor(profile.swapCountRange?.min ?? 0)),
+      Math.floor(profile.swapCountRange?.max ?? profile.swapCountRange?.min ?? 0)
+    ),
+  });
+  const targetDurationMs = (() => {
+    if (Number.isFinite(profile.targetDurationMs)) {
+      return Math.max(0, Math.floor(profile.targetDurationMs));
+    }
+    if (Number.isFinite(profile.targetMinutes)) {
+      return Math.max(0, Math.floor(minutesToMs(profile.targetMinutes)));
+    }
+    return undefined;
+  })();
+  const minimumSwapCount = Math.max(
+    0,
+    Math.floor(
+      profile.minimumSwapCount ??
+        profile.swapCountRange?.min ??
+        0
+    )
+  );
+  return Object.freeze({
+    ...profile,
+    targetDurationMs,
+    swapCountRange: swapRange,
+    minimumSwapCount,
+  });
+};
+
 export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
   arpeggio: Object.freeze({
     key: "arpeggio",
@@ -455,6 +493,12 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Fast rotation flow for short, rhythmic bursts.",
     defaultLoops: 1,
     defaultDurationMs: 15 * MINUTE_MS,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈15 minute coverage",
+      targetMinutes: 15,
+      swapCountRange: { min: 10, max: 100 },
+      minimumSwapCount: 10,
+    }),
     legs: freezeLegs([
       {
         key: "warmup",
@@ -484,6 +528,12 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Mid-duration rotation intended for hourly cadences.",
     defaultLoops: 1,
     defaultDurationMs: 60 * MINUTE_MS,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈60 minute coverage",
+      targetMinutes: 60,
+      swapCountRange: { min: 50, max: 300 },
+      minimumSwapCount: 50,
+    }),
     legs: freezeLegs([
       {
         key: "warmup",
@@ -518,6 +568,12 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
     description: "Extended loop suitable for multi-hour background runs.",
     defaultLoops: 1,
     defaultDurationMs: 6 * HOUR_MS,
+    runtimeProfile: freezeRuntimeProfile({
+      label: "≈6 hour coverage",
+      targetMinutes: 6 * 60,
+      swapCountRange: { min: 250, max: 750 },
+      minimumSwapCount: 250,
+    }),
     legs: freezeLegs([
       {
         key: "dawn",
@@ -7836,6 +7892,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
   const flowRandomSessions = new Map();
   const flowRng = typeof options.rng === "function" ? options.rng : Math.random;
+  const runtimeProfile = PREWRITTEN_FLOW_DEFINITIONS?.[normalizedKey]?.runtimeProfile;
   const selectMintForFlow = (randomMeta = {}) => {
     let pool = TOKEN_CATALOG.filter((entry) => entry && entry.mint);
     if (Array.isArray(randomMeta.poolTags) && randomMeta.poolTags.length > 0) {
@@ -7904,10 +7961,15 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     );
   }
 
-  const swapRange = flow.swapCountRange || {};
+  const swapRange = flow.swapCountRange || runtimeProfile?.swapCountRange || {};
   const cycleLength = cycleTemplate.length;
-  const rangeMin = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
-  const rangeMax = Math.max(rangeMin, Math.floor(swapRange.max ?? rangeMin));
+  const rangeMinBase = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
+  const rangeMaxBase = Math.max(rangeMinBase, Math.floor(swapRange.max ?? rangeMinBase));
+  const clampSwapTarget = (value) => {
+    const numeric = Math.floor(Number(value) || 0);
+    if (!Number.isFinite(numeric)) return rangeMinBase;
+    return Math.max(rangeMinBase, Math.min(rangeMaxBase, numeric));
+  };
   const overrideTarget = options.swapTarget ?? options.swapCount ?? null;
 
   const seedSource =
@@ -7928,14 +7990,24 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   }
 
   const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
-  const minimumSwapCount = Math.max(
-    cycleLength,
-    minimumCycles * cycleLength,
-    flow.minimumSwapCount ? Math.floor(flow.minimumSwapCount) : cycleLength
+  const perFlowMinimumSwaps = Math.max(
+    0,
+    Math.floor(
+      flow.minimumSwapCount ?? runtimeProfile?.minimumSwapCount ?? rangeMinBase
+    )
   );
-  const effectiveSwapTarget = Math.max(sampledTarget, minimumSwapCount);
-  let cycles = Math.ceil(effectiveSwapTarget / cycleLength);
-  if (cycles < minimumCycles) cycles = minimumCycles;
+  const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
+  const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
+
+  let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
+  let partialCycleHops = desiredSwapTarget % cycleLength;
+  let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
+  if (executedCycles < minimumCycles) {
+    fullCycles = minimumCycles;
+    partialCycleHops = 0;
+    executedCycles = minimumCycles;
+  }
+  const executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
 
   const combinedRandomOptions = combineRandomMintOptions(
     flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
@@ -7972,7 +8044,8 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const schedule = [];
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     const sessionGroups = new Map();
-    for (let stepIndex = 0; stepIndex < cycleTemplate.length; stepIndex += 1) {
+    const limit = Math.min(stepLimit, cycleTemplate.length);
+    for (let stepIndex = 0; stepIndex < limit; stepIndex += 1) {
       const step = cycleTemplate[stepIndex];
       const fromMint = step.fromMint || currentMint;
       const toMint = step.toMint;
@@ -8049,6 +8122,13 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       schedule.push(entry);
       currentMint = resolvedToMint;
     }
+  };
+
+  for (let cycleIndex = 0; cycleIndex < fullCycles; cycleIndex += 1) {
+    appendCycleSteps(cycleIndex, cycleTemplate.length);
+  }
+  if (partialCycleHops > 0) {
+    appendCycleSteps(fullCycles, partialCycleHops);
   }
 
   if (flow.requireTerminalSolHop && currentMint !== SOL_MINT) {
@@ -8062,6 +8142,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     currentMint = SOL_MINT;
   }
 
+  const swapExecutionCount = schedule.length;
   const plannedSwaps = schedule.length;
   const requestedDurationMsRaw =
     options.totalDurationMs ??
@@ -8088,12 +8169,42 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   console.log(
     paint(`\n== Prewritten flow: ${flow.label} (${flow.key}) ==`, "label")
   );
+  const swapRangeLabel = `${rangeMinBase}-${rangeMaxBase}`;
+  const coverageLabel = runtimeProfile?.label
+    || (runtimeProfile?.targetDurationMs
+      ? `≈${formatDurationMs(runtimeProfile.targetDurationMs)}`
+      : flow.defaultDurationMs
+        ? `≈${formatDurationMs(flow.defaultDurationMs)}`
+        : null);
+  const cycleSummaryParts = [];
+  if (fullCycles > 0) {
+    cycleSummaryParts.push(`${fullCycles} full`);
+  }
+  if (partialCycleHops > 0) {
+    cycleSummaryParts.push(`1 partial (${partialCycleHops} hop${partialCycleHops === 1 ? "" : "s"})`);
+  }
+  if (cycleSummaryParts.length === 0) {
+    cycleSummaryParts.push("0 cycle");
+  }
+  const cycleSummary = cycleSummaryParts.join(" + ");
+
+  const extraStopovers = Math.max(0, swapExecutionCount - executedSwapTarget);
+  const executionLabel =
+    extraStopovers > 0
+      ? `${swapExecutionCount} hop(s) (includes ${extraStopovers} terminal hop${extraStopovers === 1 ? "" : "s"})`
+      : `${swapExecutionCount} hop(s)`;
+
   console.log(
     paint(
-      `Swap target sampled at ${sampledTarget} hop(s); executing ${plannedSwaps} hop(s) across ${cycles} cycle(s).`,
+      `Swap target sampled at ${sampledTarget} hop(s) (min ${minimumSwapCount}, range ${swapRangeLabel}); executing ${executionLabel} across ${cycleSummary}.`,
       "muted"
     )
   );
+  if (coverageLabel) {
+    console.log(
+      paint(`Coverage goal: ${coverageLabel}.`, "muted")
+    );
+  }
   if (flow.description) {
     console.log(paint(flow.description, "muted"));
   }
@@ -8178,7 +8289,12 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   return {
     key: flow.key,
     plannedSwaps,
-    cycles,
+    cycles: executedCycles,
+    swapExecutionCount,
+    sampledSwapTarget: sampledTarget,
+    desiredSwapTarget,
+    executedSwapTarget,
+    partialCycleHops,
     waitTotalMs: actualWaitTotal,
     targetWaitTotalMs: requestedDurationMs,
     finalMint: currentMint,
