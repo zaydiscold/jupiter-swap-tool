@@ -5019,6 +5019,9 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   const rng = typeof options.rng === "function"
     ? options.rng
     : createDeterministicRng(`${normalizedKey}:scheduler`);
+  const targetSampleRng = typeof options.swapTargetRng === "function"
+    ? options.swapTargetRng
+    : createDeterministicRng(`${normalizedKey}:swap-target`);
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
@@ -5032,6 +5035,21 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
       )
     )
   );
+  const baseCycleLegs = Array.isArray(definition.legs)
+    ? definition.legs.map((leg, legIndex) => ({ legIndex, leg }))
+    : [];
+  const cycleLegSequence =
+    swapsPerCycle > 0 && baseCycleLegs.length > 0
+      ? Array.from({ length: swapsPerCycle }, (_, cycleIndex) => {
+          const source = baseCycleLegs[cycleIndex % baseCycleLegs.length];
+          return {
+            legIndex: source.legIndex,
+            leg: source.leg,
+            cycleHopIndex: cycleIndex,
+            legRepetition: Math.floor(cycleIndex / baseCycleLegs.length),
+          };
+        })
+      : [];
   const swapRangeMin = Math.max(
     swapsPerCycle,
     Math.floor(swapRange.min ?? swapsPerCycle)
@@ -5099,14 +5117,25 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     loops = minimumCycles;
   }
 
+  const requiredLoops = Math.max(
+    loops,
+    Math.ceil(minimumSwapCount / swapsPerCycle),
+    Math.ceil(effectiveSwapTarget / swapsPerCycle)
+  );
+  loops = Number.isFinite(requiredLoops) && requiredLoops > 0 ? requiredLoops : minimumCycles;
+
+  const plannedSwapTarget = loops * swapsPerCycle;
+  effectiveSwapTarget = Math.max(effectiveSwapTarget, plannedSwapTarget);
+
   const sampledSegments = [];
-  if (cycleLegSequence.length > 0) {
+  if (cycleLegSequence.length > 0 && plannedSwapTarget > 0) {
     const cycleLength = cycleLegSequence.length;
-    const totalSegments = loops * cycleLength;
+    const totalSegments = plannedSwapTarget;
     for (let segmentIndex = 0; segmentIndex < totalSegments; segmentIndex += 1) {
       const loopIndex = Math.floor(segmentIndex / cycleLength);
       const cycleIndex = segmentIndex % cycleLength;
-      const { legIndex, leg } = cycleLegSequence[cycleIndex] || {};
+      const { legIndex, leg, cycleHopIndex, legRepetition } =
+        cycleLegSequence[cycleIndex] || {};
       const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
       const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
       const waitMs = pickIntInclusive(rng, minMs, maxMs);
@@ -5114,7 +5143,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
         flowKey: normalizedKey,
         loopIndex,
         cycleIndex,
+        swapIndex: segmentIndex,
         legIndex,
+        cycleHopIndex,
+        legRepetition,
         legKey: leg?.key,
         label: leg?.label,
         minMs,
