@@ -4267,6 +4267,9 @@ function ensureCampaignHooksRegistered() {
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },
+    listSweepableHoldings: async (pubkeyBase58) => {
+      return campaignListSweepableHoldings(pubkeyBase58);
+    },
   });
   campaignHooksRegistered = true;
 }
@@ -4418,6 +4421,41 @@ async function campaignFindLargestHolding(pubkeyBase58) {
   }
 }
 
+async function campaignListSweepableHoldings(pubkeyBase58) {
+  const entry = getCampaignWallet(pubkeyBase58);
+  const owner = entry.wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  try {
+    const parsed = await getAllParsedTokenAccounts(connection, owner);
+    const holdings = [];
+    for (const { account } of parsed) {
+      const info = account?.data?.parsed?.info;
+      if (!info) continue;
+      const mint = info.mint;
+      if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+      const state = info.state;
+      const locked = state && state !== "initialized";
+      if (locked) continue;
+      const rawAmount = info.tokenAmount?.amount ?? "0";
+      let amount = 0n;
+      try {
+        amount = BigInt(rawAmount);
+      } catch (_) {
+        amount = 0n;
+      }
+      if (amount <= 0n) continue;
+      const decimals = info.tokenAmount?.decimals ?? 0;
+      const isFrozen = state === "frozen" || info.isFrozen === true;
+      holdings.push({ mint, amountLamports: amount, decimals, locked, isFrozen });
+    }
+    return holdings;
+  } finally {
+    try {
+      connection?.destroy?.();
+    } catch (_) {}
+  }
+}
+
 async function campaignSplToLamports(pubkeyBase58, mint, uiAmount) {
   if (typeof uiAmount === "bigint") {
     return uiAmount;
@@ -4522,22 +4560,90 @@ async function handleCampaignCommand(rawArgs) {
   }
   ensureCampaignHooksRegistered();
 
+  const walletHoldingsMap = new Map();
+  const walletSolBalanceMap = new Map();
+  if (campaignKey === "btc-eth-circuit") {
+    const sweepConnection = createRpcConnection("confirmed");
+    for (const wallet of wallets) {
+      const pubkey = wallet.kp.publicKey.toBase58();
+      try {
+        await balanceRpcDelay();
+        const lamports = await sweepConnection.getBalance(wallet.kp.publicKey);
+        walletSolBalanceMap.set(pubkey, BigInt(lamports));
+      } catch (err) {
+        console.warn(
+          paint(
+            `  Warning: failed to fetch SOL balance for ${wallet.name}: ${err?.message || err}`,
+            "warn"
+          )
+        );
+      }
+      try {
+        await balanceRpcDelay();
+        const parsedAccounts = await getAllParsedTokenAccounts(sweepConnection, wallet.kp.publicKey);
+        const holdings = [];
+        for (const { account } of parsedAccounts) {
+          const info = account?.data?.parsed?.info;
+          if (!info) continue;
+          const mint = info.mint;
+          if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+          const state = info.state;
+          const locked = state && state !== "initialized";
+          if (locked) continue;
+          const rawAmount = info.tokenAmount?.amount ?? "0";
+          let amount = 0n;
+          try {
+            amount = BigInt(rawAmount);
+          } catch (_) {
+            amount = 0n;
+          }
+          if (amount <= 0n) continue;
+          const decimals = info.tokenAmount?.decimals ?? 0;
+          const isFrozen = state === "frozen" || info.isFrozen === true;
+          holdings.push({ mint, amountLamports: amount, decimals, locked, isFrozen });
+        }
+        walletHoldingsMap.set(pubkey, holdings);
+      } catch (err) {
+        console.warn(
+          paint(
+            `  Warning: failed to fetch token holdings for ${wallet.name}: ${err?.message || err}`,
+            "warn"
+          )
+        );
+        walletHoldingsMap.set(pubkey, []);
+      }
+    }
+    try {
+      sweepConnection?.destroy?.();
+    } catch (_) {}
+  }
+
   const pubkeys = wallets.map((wallet) => wallet.kp.publicKey.toBase58());
   const { plansByWallet } = instantiateCampaignForWallets({
     campaignKey,
     durationKey,
     walletPubkeys: pubkeys,
+    walletHoldings: walletHoldingsMap,
+    walletSolBalances: walletSolBalanceMap,
   });
 
-  const connection = createRpcConnection("confirmed");
   const preparedPlans = new Map();
+  let balanceConnection = null;
   for (const wallet of wallets) {
     const pubkey = wallet.kp.publicKey.toBase58();
     const plan = plansByWallet.get(pubkey);
     if (!plan) continue;
     let balance = 0n;
     try {
-      balance = BigInt(await connection.getBalance(wallet.kp.publicKey));
+      if (walletSolBalanceMap.has(pubkey)) {
+        balance = walletSolBalanceMap.get(pubkey);
+      } else {
+        if (!balanceConnection) {
+          balanceConnection = createRpcConnection("confirmed");
+        }
+        await balanceRpcDelay();
+        balance = BigInt(await balanceConnection.getBalance(wallet.kp.publicKey));
+      }
     } catch (err) {
       console.warn(
         paint(
@@ -4559,6 +4665,9 @@ async function handleCampaignCommand(rawArgs) {
     }
     preparedPlans.set(pubkey, { schedule: truncated, rng: plan.rng });
   }
+  try {
+    balanceConnection?.destroy?.();
+  } catch (_) {}
 
   if (preparedPlans.size === 0) {
     console.log(paint("No wallets have sufficient balance to participate.", "warn"));
@@ -4569,9 +4678,11 @@ async function handleCampaignCommand(rawArgs) {
   const swapCounts = [];
   for (const [pubkey, { schedule }] of preparedPlans.entries()) {
     const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
+    const fanOutSteps = schedule.filter((step) => step.kind === "fanOutSwap").length;
+    const sweepSteps = schedule.filter((step) => step.kind === "sweepToSOL").length;
     const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
     const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
-    swapCounts.push({ label, swapSteps, checkpointSteps });
+    swapCounts.push({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps });
   }
 
   console.log(
@@ -4580,10 +4691,16 @@ async function handleCampaignCommand(rawArgs) {
       "info"
     )
   );
-  swapCounts.forEach(({ label, swapSteps, checkpointSteps }) => {
+  swapCounts.forEach(({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps }) => {
+    const parts = [];
+    if (sweepSteps > 0) parts.push(`${sweepSteps} sweep${sweepSteps === 1 ? "" : "s"}`);
+    if (fanOutSteps > 0) parts.push(`${fanOutSteps} fan-out swap${fanOutSteps === 1 ? "" : "s"}`);
+    if (swapSteps > 0) parts.push(`${swapSteps} swap${swapSteps === 1 ? "" : "s"}`);
+    if (checkpointSteps > 0) parts.push(`${checkpointSteps} checkpoint${checkpointSteps === 1 ? "" : "s"}`);
+    const summary = parts.length > 0 ? parts.join(" + ") : "no scheduled steps";
     console.log(
       paint(
-        `  ${label}: ${swapSteps} swap(s) + ${checkpointSteps} checkpoint(s) scheduled.`,
+        `  ${label}: ${summary}.`,
         "muted"
       )
     );
