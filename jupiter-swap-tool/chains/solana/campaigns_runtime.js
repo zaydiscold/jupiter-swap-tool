@@ -130,11 +130,77 @@ export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   return accepted;
 }
 
-function planLongChainSteps(rng, poolMints) {
-  if (!Array.isArray(poolMints) || poolMints.length === 0) {
-    return [];
+function buildFallbackLongChainSteps(rng, hopCount, poolMints = []) {
+  const normalizedPool = Array.isArray(poolMints)
+    ? poolMints.filter((entry) => entry?.mint)
+    : [];
+  const nonWsol = normalizedPool.filter((entry) => entry.mint !== WSOL_MINT);
+  const candidates = nonWsol.length > 0 ? nonWsol : normalizedPool;
+  let fallbackMint = WSOL_MINT;
+  if (candidates.length > 0) {
+    const shuffled = shuffle(rng, candidates);
+    fallbackMint = shuffled[0]?.mint ?? WSOL_MINT;
   }
+  const cycleSet = new Set([WSOL_MINT]);
+  if (fallbackMint) {
+    cycleSet.add(fallbackMint);
+  }
+  for (const entry of normalizedPool) {
+    if (cycleSet.size >= 2) {
+      break;
+    }
+    if (entry?.mint) {
+      cycleSet.add(entry.mint);
+    }
+  }
+  const cycle = Array.from(cycleSet);
+  if (cycle.length === 1) {
+    cycle.push(WSOL_MINT);
+  }
+  let currentMint = WSOL_MINT;
+  let cycleIdx = cycle.indexOf(currentMint);
+  if (cycleIdx < 0) {
+    cycleIdx = 0;
+  }
+  const steps = [];
+  for (let hop = 0; hop < hopCount; hop += 1) {
+    const isFinalHop = hop === hopCount - 1;
+    let nextMint;
+    if (isFinalHop) {
+      nextMint = WSOL_MINT;
+    } else {
+      cycleIdx = (cycleIdx + 1) % cycle.length;
+      nextMint = cycle[cycleIdx];
+      if (nextMint === currentMint && cycle.length > 1) {
+        const alt = cycle.find((mint) => mint !== currentMint);
+        if (alt) {
+          nextMint = alt;
+        }
+      }
+    }
+    if (!nextMint) {
+      nextMint = WSOL_MINT;
+    }
+    const step = {
+      inMint: currentMint,
+      outMint: nextMint,
+      requiresAta: nextMint !== WSOL_MINT,
+      sourceBalance: currentMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: currentMint },
+    };
+    steps.push(step);
+    currentMint = nextMint;
+  }
+  return steps;
+}
+
+function planLongChainSteps(rng, poolMints) {
   const hopCount = pickInt(rng, 10, 25);
+  const normalizedPool = Array.isArray(poolMints)
+    ? poolMints.filter((entry) => entry?.mint)
+    : [];
+  if (normalizedPool.length === 0) {
+    return buildFallbackLongChainSteps(rng, hopCount, poolMints);
+  }
   const steps = [];
   let currentMint = WSOL_MINT;
   for (let hop = 0; hop < hopCount; hop += 1) {
@@ -143,12 +209,12 @@ function planLongChainSteps(rng, poolMints) {
     if (isFinalHop) {
       nextMint = WSOL_MINT;
     } else {
-      const shuffled = shuffle(rng, poolMints);
+      const shuffled = shuffle(rng, normalizedPool);
       const pick = shuffled.find((entry) => entry?.mint && entry.mint !== currentMint);
       nextMint = pick?.mint;
     }
-    if (!nextMint) {
-      return [];
+    if (!nextMint || (!isFinalHop && nextMint === currentMint)) {
+      return buildFallbackLongChainSteps(rng, hopCount, poolMints);
     }
     const step = {
       inMint: currentMint,
@@ -185,6 +251,10 @@ export function buildTimedPlanForWallet({
   let logicalSteps = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
+    if (!logicalSteps.length) {
+      const fallbackHopCount = pickInt(rng, 10, 25);
+      logicalSteps = buildFallbackLongChainSteps(rng, fallbackHopCount, poolMints);
+    }
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);

@@ -6289,7 +6289,7 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
-const PREWRITTEN_FLOW_DEFINITIONS = new Map([
+const PREWRITTEN_FLOW_DEFINITION_MAP = new Map([
   [
     "arpeggio",
     {
@@ -6524,11 +6524,11 @@ function describeFlowAmount(normalizedAmount) {
   return `(amount ${normalizedAmount})`;
 }
 
-async function runPrewrittenFlow(flowKey, options = {}) {
+async function runPrewrittenFlowCli(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
-    PREWRITTEN_FLOW_DEFINITIONS.get(normalizedKey) ||
-    PREWRITTEN_FLOW_DEFINITIONS.get(flowKey);
+    PREWRITTEN_FLOW_DEFINITION_MAP.get(normalizedKey) ||
+    PREWRITTEN_FLOW_DEFINITION_MAP.get(flowKey);
   if (!flow) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
@@ -11568,6 +11568,4 @@ export {
   ensureAtaForMint,
   ensureWrappedSolBalance,
   resolveTokenProgramForMint,
-  runPrewrittenFlow,
-  PREWRITTEN_FLOW_DEFINITIONS,
 };
