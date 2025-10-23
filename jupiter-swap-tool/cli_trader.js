@@ -201,6 +201,222 @@ const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+
+const DEFAULT_RNG = Math.random;
+
+function normaliseRng(rng) {
+  return typeof rng === "function" ? rng : DEFAULT_RNG;
+}
+
+function randomFloat(rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
+  let value = generator();
+  if (!Number.isFinite(value)) value = 0;
+  if (value >= 1 || value <= -1) {
+    value = value % 1;
+  }
+  if (value < 0) value += 1;
+  if (value >= 1) value = 0;
+  return value;
+}
+
+function randomIntInclusive(minValue, maxValue, rng = DEFAULT_RNG) {
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    return 0;
+  }
+  const lower = Math.ceil(Math.min(minValue, maxValue));
+  const upper = Math.floor(Math.max(minValue, maxValue));
+  if (upper <= lower) return lower;
+  const span = upper - lower + 1;
+  const pick = Math.floor(randomFloat(rng) * span);
+  return lower + Math.min(span - 1, pick);
+}
+
+function createDeterministicRng(seedInput) {
+  const seedString =
+    typeof seedInput === "string"
+      ? seedInput
+      : JSON.stringify(seedInput ?? "");
+  let h = 1779033703 ^ seedString.length;
+  for (let i = 0; i < seedString.length; i += 1) {
+    h = Math.imul(h ^ seedString.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return function deterministicRng() {
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    const result = (h ^= h >>> 16) >>> 0;
+    return result / 4294967296;
+  };
+}
+
+const EMPTY_RANDOM_MINT_OPTIONS = Object.freeze({
+  includeTags: [],
+  excludeTags: [],
+  excludeMints: [],
+  excludeSymbols: [],
+  allowSol: false,
+  matchAnyTags: false,
+});
+
+function normaliseTagList(tags) {
+  if (!tags) return [];
+  const list = Array.isArray(tags) ? tags : [tags];
+  return list
+    .map((tag) =>
+      typeof tag === "string" ? tag.trim().toLowerCase() : ""
+    )
+    .filter((tag) => tag.length > 0);
+}
+
+function normaliseSymbolList(symbols) {
+  if (!symbols) return [];
+  const list = Array.isArray(symbols) ? symbols : [symbols];
+  return list
+    .map((symbol) =>
+      typeof symbol === "string" ? symbol.trim().toUpperCase() : ""
+    )
+    .filter((symbol) => symbol.length > 0);
+}
+
+function normaliseMintValue(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  try {
+    return new PublicKey(trimmed).toBase58();
+  } catch (_) {
+    return trimmed;
+  }
+}
+
+function normaliseMintList(values) {
+  if (!values) return [];
+  const list = Array.isArray(values) ? values : [values];
+  const result = [];
+  for (const value of list) {
+    const normalised = normaliseMintValue(
+      typeof value === "string" ? value : String(value ?? "")
+    );
+    if (normalised) result.push(normalised);
+  }
+  return result;
+}
+
+function normaliseRandomMintOptions(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...EMPTY_RANDOM_MINT_OPTIONS };
+  }
+  const includeTags = normaliseTagList(
+    raw.includeTags ?? raw.tags ?? raw.withTags
+  );
+  const excludeTags = normaliseTagList(raw.excludeTags ?? raw.withoutTags);
+  const excludeMints = normaliseMintList(raw.excludeMints ?? raw.exclude);
+  const excludeSymbols = normaliseSymbolList(raw.excludeSymbols);
+  const allowSol = raw.allowSol === true;
+  const matchAnyTags =
+    raw.matchAnyTags === true ||
+    raw.matchAny === true ||
+    raw.anyTag === true;
+  return {
+    includeTags,
+    excludeTags,
+    excludeMints,
+    excludeSymbols,
+    allowSol,
+    matchAnyTags,
+  };
+}
+
+function combineRandomMintOptions(...sources) {
+  const combined = {
+    includeTags: new Set(),
+    excludeTags: new Set(),
+    excludeMints: new Set(),
+    excludeSymbols: new Set(),
+    allowSol: false,
+    matchAnyTags: false,
+  };
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const normalised = normaliseRandomMintOptions(source);
+    for (const tag of normalised.includeTags) combined.includeTags.add(tag);
+    for (const tag of normalised.excludeTags) combined.excludeTags.add(tag);
+    for (const mint of normalised.excludeMints)
+      combined.excludeMints.add(mint);
+    for (const symbol of normalised.excludeSymbols)
+      combined.excludeSymbols.add(symbol);
+    if (normalised.allowSol) combined.allowSol = true;
+    if (normalised.matchAnyTags) combined.matchAnyTags = true;
+  }
+  return {
+    includeTags: Array.from(combined.includeTags),
+    excludeTags: Array.from(combined.excludeTags),
+    excludeMints: Array.from(combined.excludeMints),
+    excludeSymbols: Array.from(combined.excludeSymbols),
+    allowSol: combined.allowSol,
+    matchAnyTags: combined.matchAnyTags,
+  };
+}
+
+function parseRandomMintRequest(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return null;
+    if (trimmed.toLowerCase() !== "random") return null;
+    return {
+      placeholder: raw,
+      ...EMPTY_RANDOM_MINT_OPTIONS,
+    };
+  }
+  if (typeof raw === "object") {
+    const mode =
+      typeof raw.mode === "string" ? raw.mode.trim().toLowerCase() : null;
+    const mintField =
+      typeof raw.mint === "string" ? raw.mint.trim().toLowerCase() : null;
+    const randomFlag =
+      raw.random === true ||
+      mode === "random" ||
+      mintField === "random";
+    if (!randomFlag) return null;
+    const options = normaliseRandomMintOptions(raw);
+    return {
+      placeholder: raw,
+      ...options,
+    };
+  }
+  return null;
+}
+
+function resolveRandomMintRequest(request, context = {}) {
+  const baseOptions = combineRandomMintOptions(
+    EMPTY_RANDOM_MINT_OPTIONS,
+    context.baseOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    request || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const additionalExclusions = normaliseMintList(
+    context.additionalExclusions || []
+  );
+  const excludeMints = new Set([
+    ...baseOptions.excludeMints,
+    ...additionalExclusions,
+  ]);
+  const entry = pickRandomCatalogMint({
+    includeTags: baseOptions.includeTags,
+    matchAnyTags: baseOptions.matchAnyTags,
+    excludeTags: baseOptions.excludeTags,
+    excludeMints: Array.from(excludeMints),
+    excludeSymbols: baseOptions.excludeSymbols,
+    allowSol: baseOptions.allowSol,
+    rng: context.rng,
+  });
+  return {
+    entry,
+    options: baseOptions,
+  };
+}
+
 const clamp = (value, min, max) => {
   if (Number.isNaN(value)) return min;
   if (!Number.isFinite(value)) return max;
@@ -866,6 +1082,51 @@ function mintBySymbol(symbol, fallbackMint) {
   if (token && token.mint) return token.mint;
   if (fallbackMint) return fallbackMint;
   throw new Error(`Token catalog is missing symbol ${symbol}`);
+}
+
+function pickRandomCatalogMint(options = {}) {
+  const normalized = normaliseRandomMintOptions(options);
+  const allowSol = options.allowSol === true || normalized.allowSol === true;
+  const matchAnyTags =
+    options.matchAnyTags === true || normalized.matchAnyTags === true;
+  const includeTags = normalized.includeTags;
+  const excludeTags = normalized.excludeTags;
+  const excludeSymbols = new Set(normalized.excludeSymbols);
+  const excludeMints = new Set(normalized.excludeMints);
+  const rng = options.rng;
+
+  const candidates = TOKEN_CATALOG.filter((entry) => {
+    if (!entry || typeof entry.mint !== "string") return false;
+    if (!allowSol && SOL_LIKE_MINTS.has(entry.mint)) return false;
+    if (excludeMints.has(entry.mint)) return false;
+    if (entry.symbol && excludeSymbols.has(entry.symbol)) return false;
+    const tags = Array.isArray(entry.tags) ? entry.tags : [];
+    if (includeTags.length > 0) {
+      if (matchAnyTags) {
+        if (!includeTags.some((tag) => tags.includes(tag))) return false;
+      } else {
+        for (const tag of includeTags) {
+          if (!tags.includes(tag)) return false;
+        }
+      }
+    }
+    if (excludeTags.length > 0) {
+      for (const tag of excludeTags) {
+        if (tags.includes(tag)) return false;
+      }
+    }
+    return true;
+  });
+
+  if (candidates.length === 0) {
+    throw new Error("No matching tokens found in catalog for random selection");
+  }
+
+  const index = Math.min(
+    candidates.length - 1,
+    Math.floor(randomFloat(rng) * candidates.length)
+  );
+  return candidates[index];
 }
 
 async function loadJupiterTokenMap() {
@@ -3960,6 +4221,18 @@ function listTokenCatalog(options = {}) {
   }
 }
 
+function logRandomMintResolution(resolution) {
+  if (!resolution || !resolution.entry) return;
+  const descriptor = resolution.entry.symbol
+    ? `${resolution.entry.symbol} (${resolution.entry.mint})`
+    : resolution.entry.mint;
+  const label =
+    typeof resolution.label === "string" && resolution.label.length > 0
+      ? ` (${resolution.label})`
+      : "";
+  console.log(paint(`  Random mint resolved${label}: ${descriptor}`, "muted"));
+}
+
 function logDetailedError(prefix, err) {
   const baseMsg = err?.message || String(err);
   const key = `${prefix}::${baseMsg}`;
@@ -4507,17 +4780,8 @@ const extractDurationOverride = (options, candidates) => {
   return null;
 };
 
-const pickIntInclusive = (rng, min, max) => {
-  const floorMin = Math.round(min);
-  const floorMax = Math.round(max);
-  if (floorMax <= floorMin) {
-    return floorMin;
-  }
-  const random = typeof rng === "function" ? rng() : Math.random();
-  const span = floorMax - floorMin + 1;
-  const pick = Math.floor(random * span);
-  return floorMin + pick;
-};
+const pickIntInclusive = (rng, min, max) =>
+  randomIntInclusive(min, max, rng);
 
 const randomIntInclusive = (min, max) => pickIntInclusive(Math.random, min, max);
 
@@ -4651,7 +4915,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   loops = Math.floor(loops);
   if (loops <= 0) loops = 1;
 
-  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const rng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const sampledSegments = [];
   for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
@@ -4751,10 +5018,14 @@ function balanceRpcDelay() {
   return delay(BALANCE_RPC_DELAY_MS);
 }
 
+function shuffleArray(array, rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
 function shuffleArray(array, rng = Math.random) {
   const result = [...array];
   const randomFn = typeof rng === "function" ? rng : Math.random;
   for (let i = result.length - 1; i > 0; i -= 1) {
+    const randomValue = randomFloat(generator);
+    const j = Math.floor(randomValue * (i + 1));
     const j = Math.floor(randomFn() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
@@ -6677,8 +6948,12 @@ async function runLongCircle(options = {}) {
       let steps = flattenSegmentsToSteps(segments, { rng, exclude: usedMints });
       if (randomMode && steps.length < 3) {
         const extended = new Set(segments);
+        let attempt = 0;
         for (const segment of LONG_CHAIN_SEGMENTS_BASE) {
-          if (extended.has(segment)) continue;
+          if (extended.has(segment)) {
+            attempt += 1;
+            continue;
+          }
           extended.add(segment);
           const candidateSegments = Array.from(extended);
           const candidateUsedMints = new Set();
@@ -6694,10 +6969,14 @@ async function runLongCircle(options = {}) {
           }
         }
       }
+
+      const finalSteps = flattenSegmentsToSteps(segments, {
+        rng: createDeterministicRng(`${walletSeed}:long-circle:steps-final`),
+      });
       return {
         wallet,
-        steps,
-        summary: describeStepSequence(steps),
+        steps: finalSteps,
+        summary: describeStepSequence(finalSteps),
         skipRegistry: new Set(),
         rng,
         usedMints,
@@ -7070,6 +7349,7 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
+const PREWRITTEN_FLOW_DEFINITIONS_MAP = new Map([
 const PREWRITTEN_FLOW_PLAN_MAP = new Map([
   [
     "arpeggio",
@@ -7260,11 +7540,11 @@ function normalizePrewrittenFlowKey(key) {
   return key.trim().toLowerCase();
 }
 
-function sampleIntegerInRange(minValue, maxValue) {
+function sampleIntegerInRange(minValue, maxValue, rng = DEFAULT_RNG) {
   const min = Math.max(0, Math.floor(minValue));
   const max = Math.max(min, Math.floor(maxValue));
   if (max === min) return min;
-  return min + Math.floor(Math.random() * (max - min + 1));
+  return randomIntInclusive(min, max, rng);
 }
 
 function formatDurationMs(totalMs) {
@@ -7280,7 +7560,7 @@ function formatDurationMs(totalMs) {
   return parts.join(" ");
 }
 
-function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
+function allocateHopDelays(totalDurationMs, hopCount, options = {}, rng = DEFAULT_RNG) {
   const count = Math.max(0, hopCount | 0);
   const delays = new Array(count).fill(0);
   if (count === 0) return delays;
@@ -7296,7 +7576,7 @@ function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
       ? null
       : Math.max(minMs, Math.floor(Number(rawMax) || 0));
 
-  const weights = Array.from({ length: count }, () => Math.random() + 0.01);
+  const weights = Array.from({ length: count }, () => randomFloat(rng) + 0.01);
   const weightTotal = weights.reduce((acc, value) => acc + value, 0);
   let allocated = 0;
   for (let i = 0; i < count; i += 1) {
@@ -7393,7 +7673,8 @@ function cloneFlowAmount(amount) {
   return amount;
 }
 
-function normalizeFlowAmount(amount) {
+function normalizeFlowAmount(amount, options = {}) {
+  const rng = options.rng;
   const source = cloneFlowAmount(amount);
   if (source === null || source === undefined) return null;
   if (typeof source === "string") {
@@ -7416,7 +7697,7 @@ function normalizeFlowAmount(amount) {
       if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
       const lower = Math.min(min, max);
       const upper = Math.max(min, max);
-      const sampled = lower + Math.random() * (upper - lower);
+      const sampled = lower + randomFloat(rng) * (upper - lower);
       return sampled.toString();
     }
     if (source.value !== undefined && source.value !== null) {
@@ -7504,9 +7785,13 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     };
   }
 
-  const cycleTemplate = Array.isArray(flow.cycleTemplate) ? flow.cycleTemplate : [];
+  const cycleTemplate = Array.isArray(flow.cycleTemplate)
+    ? flow.cycleTemplate
+    : [];
   if (cycleTemplate.length === 0) {
-    throw new Error(`Prewritten flow ${flow.label} has no cycle template defined`);
+    throw new Error(
+      `Prewritten flow ${flow.label} has no cycle template defined`
+    );
   }
 
   const swapRange = flow.swapCountRange || {};
@@ -7514,11 +7799,22 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const rangeMin = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
   const rangeMax = Math.max(rangeMin, Math.floor(swapRange.max ?? rangeMin));
   const overrideTarget = options.swapTarget ?? options.swapCount ?? null;
+
+  const seedSource =
+    walletList[0]?.kp?.publicKey?.toBase58?.() ?? flow.key ?? "prewritten";
+  const flowRng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${flow.key}:${seedSource}:flow`);
+
   let sampledTarget;
   if (overrideTarget !== null && overrideTarget !== undefined) {
-    sampledTarget = Math.max(rangeMin, Math.floor(Number(overrideTarget) || rangeMin));
+    sampledTarget = Math.max(
+      rangeMin,
+      Math.floor(Number(overrideTarget) || rangeMin)
+    );
   } else {
-    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax);
+    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax, flowRng);
   }
 
   const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
@@ -7531,8 +7827,39 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   let cycles = Math.ceil(effectiveSwapTarget / cycleLength);
   if (cycles < minimumCycles) cycles = minimumCycles;
 
+  const combinedRandomOptions = combineRandomMintOptions(
+    flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const logRandomResolutions = options.logRandomResolutions !== false;
+  const resolutionHandler =
+    typeof options.onRandomMintResolved === "function"
+      ? options.onRandomMintResolved
+      : logRandomResolutions
+      ? logRandomMintResolution
+      : null;
+
+  const startCandidate = pickFirstDefined(
+    options.startMint,
+    flow.startMint,
+    SOL_MINT
+  );
+  const startResult = resolveMintCandidate(startCandidate, {
+    fallbackMint: SOL_MINT,
+    rng: flowRng,
+    baseRandomOptions: combinedRandomOptions,
+    label: `${flow.label} start`,
+  });
+  let currentMint = startResult.mint;
+  if (startResult.resolution && resolutionHandler) {
+    resolutionHandler({
+      ...startResult.resolution,
+      role: "start",
+      stepIndex: -1,
+    });
+  }
+
   const schedule = [];
-  let currentMint = options.startMint || flow.startMint || SOL_MINT;
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     const sessionGroups = new Map();
     for (let stepIndex = 0; stepIndex < cycleTemplate.length; stepIndex += 1) {
@@ -7542,6 +7869,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       if (!toMint) {
         throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
+
       const amount = cloneFlowAmount(step.amount);
       let randomization = null;
       if (step.randomization) {
@@ -7593,13 +7921,16 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       }
       const entry = {
         ...step,
-        fromMint,
-        toMint,
+        fromMint: resolvedFromMint,
+        toMint: resolvedToMint,
         amount,
         randomization,
       };
+      if (randomResolutions.length > 0) {
+        entry.randomResolutions = randomResolutions;
+      }
       schedule.push(entry);
-      currentMint = toMint;
+      currentMint = resolvedToMint;
     }
   }
 
@@ -7632,7 +7963,8 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const perHopDelays = allocateHopDelays(
     requestedDurationMs,
     plannedSwaps,
-    waitOptions
+    waitOptions,
+    flowRng
   );
   const actualWaitTotal = perHopDelays.reduce((acc, value) => acc + value, 0);
 
@@ -7664,7 +7996,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
   for (let index = 0; index < schedule.length; index += 1) {
     const step = schedule[index];
-    const normalizedAmount = normalizeFlowAmount(step.amount);
+    const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
     let resolvedStep;
