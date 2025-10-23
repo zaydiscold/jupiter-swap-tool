@@ -4974,7 +4974,16 @@ const resolveDurationTargets = (definition, options, loops, minPossible, maxPoss
   ]);
 
   let minTarget = Number.isFinite(minOverride) ? Math.max(1, minOverride) : baseDuration;
-  let maxTarget = Number.isFinite(maxOverride) ? Math.max(minTarget, maxOverride) : baseDuration;
+  let maxTarget = Number.isFinite(maxOverride) ? Math.max(1, maxOverride) : baseDuration;
+
+  if (!Number.isFinite(minOverride) && Number.isFinite(maxOverride)) {
+    minTarget = Math.min(baseDuration, maxTarget);
+  }
+
+  if (!Number.isFinite(maxOverride) && Number.isFinite(minOverride)) {
+    maxTarget = Math.max(baseDuration, minTarget);
+  }
+
   if (minTarget > maxTarget) {
     const tmp = minTarget;
     minTarget = maxTarget;
