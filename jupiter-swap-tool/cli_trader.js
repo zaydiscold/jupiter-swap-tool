@@ -5053,7 +5053,7 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
   let sampledSwapTarget = hasOverride
     ? Math.max(swapRangeMin, Math.floor(normalizedOverride))
-    : pickIntInclusive(rng, swapRangeMin, swapRangeMax);
+    : pickIntInclusive(targetSampleRng, swapRangeMin, swapRangeMax);
 
   const minimumCycles = Math.max(
     1,
@@ -5100,22 +5100,28 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   }
 
   const sampledSegments = [];
-  for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
-    definition.legs.forEach((leg, legIndex) => {
+  if (cycleLegSequence.length > 0) {
+    const cycleLength = cycleLegSequence.length;
+    const totalSegments = loops * cycleLength;
+    for (let segmentIndex = 0; segmentIndex < totalSegments; segmentIndex += 1) {
+      const loopIndex = Math.floor(segmentIndex / cycleLength);
+      const cycleIndex = segmentIndex % cycleLength;
+      const { legIndex, leg } = cycleLegSequence[cycleIndex] || {};
       const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
       const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
       const waitMs = pickIntInclusive(rng, minMs, maxMs);
       sampledSegments.push({
         flowKey: normalizedKey,
         loopIndex,
+        cycleIndex,
         legIndex,
-        legKey: leg.key,
-        label: leg.label,
+        legKey: leg?.key,
+        label: leg?.label,
         minMs,
         maxMs,
         waitMs,
       });
-    });
+    }
   }
 
   if (sampledSegments.length === 0) {
