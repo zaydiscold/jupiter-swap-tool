@@ -67,7 +67,7 @@ import {
 
 const TOOL_VERSION = "1.1.2";
 const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
@@ -4966,9 +4966,10 @@ function filterWalletsByBatch(wallets, batchRaw) {
 async function handleCampaignCommand(rawArgs) {
   const { options, rest } = parseCliOptions(rawArgs);
   const [campaignKeyRaw, durationKeyRaw] = rest;
+  const RANDOM_PLACEHOLDER = "RANDOM";
   if (!campaignKeyRaw || !durationKeyRaw) {
     throw new Error(
-      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
+      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
     );
   }
   const campaignKey = campaignKeyRaw.toLowerCase();
@@ -5057,6 +5058,40 @@ async function handleCampaignCommand(rawArgs) {
     const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
     const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
     swapCounts.push({ label, swapSteps, checkpointSteps });
+  }
+
+  if (dryRun) {
+    console.log(paint("Dry-run hop preview (per wallet):", "info"));
+    for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+      const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+      let previewLastMint = SOL_MINT;
+      const hops = [];
+      for (const step of schedule) {
+        if (step.kind !== "swapHop") continue;
+        const logical = step.logicalStep || {};
+        let fromMint = logical.inMint ?? previewLastMint ?? SOL_MINT;
+        if (fromMint === RANDOM_PLACEHOLDER) {
+          fromMint = previewLastMint ?? SOL_MINT;
+        }
+        let toMint = logical.outMint ?? SOL_MINT;
+        if (toMint === RANDOM_PLACEHOLDER) {
+          toMint = previewLastMint ?? SOL_MINT;
+        }
+        hops.push(`${symbolForMint(fromMint)}→${symbolForMint(toMint)}`);
+        previewLastMint = toMint || SOL_MINT;
+      }
+      const MAX_PREVIEW_HOPS = 40;
+      let preview;
+      if (hops.length === 0) {
+        preview = "(no swaps scheduled)";
+      } else if (hops.length > MAX_PREVIEW_HOPS) {
+        const visible = hops.slice(0, MAX_PREVIEW_HOPS).join(" | ");
+        preview = `${visible} | ... (+${hops.length - MAX_PREVIEW_HOPS} more)`;
+      } else {
+        preview = hops.join(" | ");
+      }
+      console.log(paint(`  ${label}: ${preview}`, "muted"));
+    }
   }
 
   console.log(

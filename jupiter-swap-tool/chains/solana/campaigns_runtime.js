@@ -13,6 +13,8 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const RANDOM_PLACEHOLDER = "RANDOM";
+const RANDOM_HOPS_KIND = "random-hop-rotation";
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
   const scaled = Math.ceil(numeric * 1_000_000_000);
@@ -170,6 +172,115 @@ function planBuckshotScatterTargets(rng, poolMints, count) {
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
+function planRandomPlaceholderSteps(count) {
+  const hopCount = Math.max(1, Number.isFinite(count) ? Math.floor(count) : 0);
+  if (hopCount <= 0) {
+    return [];
+  }
+  if (hopCount === 1) {
+    return [
+      {
+        inMint: WSOL_MINT,
+        outMint: RANDOM_PLACEHOLDER,
+        requiresAta: true,
+        sourceBalance: { kind: "sol" },
+      },
+    ];
+  }
+  const steps = [];
+  for (let idx = 0; idx < hopCount; idx += 1) {
+    const isFirst = idx === 0;
+    const isLast = idx === hopCount - 1;
+    steps.push({
+      inMint: isFirst ? WSOL_MINT : RANDOM_PLACEHOLDER,
+      outMint: isLast ? WSOL_MINT : RANDOM_PLACEHOLDER,
+      requiresAta: !isLast,
+      sourceBalance: isFirst ? { kind: "sol" } : { kind: "spl", mint: RANDOM_PLACEHOLDER },
+    });
+  }
+  return steps;
+}
+
+function stepHasRandomPlaceholder(step) {
+  if (!step || typeof step !== "object") {
+    return false;
+  }
+  if (step.inMint === RANDOM_PLACEHOLDER || step.outMint === RANDOM_PLACEHOLDER) {
+    return true;
+  }
+  if (step?.sourceBalance?.mint === RANDOM_PLACEHOLDER) {
+    return true;
+  }
+  return false;
+}
+
+function pickRandomPlaceholderMint(rng, poolMints, excludeMints = []) {
+  if (!Array.isArray(poolMints) || poolMints.length === 0) {
+    return null;
+  }
+  const excludes = new Set((excludeMints || []).filter(Boolean));
+  const shuffled = shuffle(rng, poolMints);
+  for (const entry of shuffled) {
+    if (!entry || !entry.mint) {
+      continue;
+    }
+    if (excludes.has(entry.mint)) {
+      continue;
+    }
+    return entry;
+  }
+  return poolMints.find((entry) => entry && entry.mint) || null;
+}
+
+function resolveRandomPlaceholderStep(baseStep, context) {
+  if (!baseStep) {
+    return { resolved: null, nextMint: context?.currentMint ?? WSOL_MINT, lastRandomMint: context?.lastRandomMint ?? null };
+  }
+  const resolved = {
+    ...baseStep,
+    sourceBalance: baseStep.sourceBalance ? { ...baseStep.sourceBalance } : undefined,
+  };
+  const currentMint = context?.currentMint ?? WSOL_MINT;
+  let lastRandomMint = context?.lastRandomMint ?? null;
+
+  if (resolved.inMint === RANDOM_PLACEHOLDER) {
+    resolved.inMint = currentMint;
+  }
+
+  if (resolved.outMint === RANDOM_PLACEHOLDER) {
+    const pick = pickRandomPlaceholderMint(context?.rng, context?.poolMints, [resolved.inMint, lastRandomMint]);
+    if (!pick?.mint) {
+      return { resolved: null, nextMint: currentMint, lastRandomMint };
+    }
+    resolved.outMint = pick.mint;
+    lastRandomMint = resolved.outMint;
+  }
+
+  if (resolved.sourceBalance?.kind === "spl") {
+    const mint = resolved.sourceBalance.mint;
+    resolved.sourceBalance = {
+      ...resolved.sourceBalance,
+      mint:
+        mint && mint !== RANDOM_PLACEHOLDER
+          ? mint
+          : resolved.inMint,
+    };
+  } else if (resolved.sourceBalance?.kind === "sol") {
+    resolved.sourceBalance = { ...resolved.sourceBalance, kind: "sol" };
+  } else if (!resolved.sourceBalance) {
+    resolved.sourceBalance =
+      resolved.inMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: resolved.inMint };
+  }
+
+  resolved.requiresAta = resolved.outMint !== WSOL_MINT;
+  const nextMint = resolved.outMint ?? currentMint;
+  if (resolved.outMint === WSOL_MINT) {
+    lastRandomMint = null;
+  }
+
+  return { resolved, nextMint, lastRandomMint };
+}
+
 export function buildTimedPlanForWallet({
   pubkey,
   rng,
@@ -198,6 +309,12 @@ export function buildTimedPlanForWallet({
         sourceBalance: { kind: "sol" },
       }));
     }
+  } else if (kind === RANDOM_HOPS_KIND) {
+    if (!Array.isArray(poolMints) || poolMints.length === 0) {
+      logicalSteps = [];
+    } else {
+      logicalSteps = planRandomPlaceholderSteps(safeTarget);
+    }
   } else {
     logicalSteps = Array.from({ length: safeTarget }, () => {
       const choice = poolMints[Math.floor(rng() * poolMints.length)]?.mint;
@@ -220,8 +337,35 @@ export function buildTimedPlanForWallet({
   let sinceCheckpoint = 0;
   const schedule = [];
 
+  const placeholderState = {
+    currentMint: WSOL_MINT,
+    lastRandomMint: null,
+  };
+
   for (let idx = 0; idx < safeTarget; idx += 1) {
-    const logical = logicalSteps[idx % logicalSteps.length];
+    const template = logicalSteps[idx % logicalSteps.length];
+    if (!template) {
+      continue;
+    }
+    if (stepHasRandomPlaceholder(template) && idx % logicalSteps.length === 0) {
+      placeholderState.currentMint = WSOL_MINT;
+      placeholderState.lastRandomMint = null;
+    }
+    let logical = template;
+    if (stepHasRandomPlaceholder(template)) {
+      const { resolved, nextMint, lastRandomMint } = resolveRandomPlaceholderStep(template, {
+        rng,
+        poolMints,
+        currentMint: placeholderState.currentMint,
+        lastRandomMint: placeholderState.lastRandomMint,
+      });
+      if (!resolved || !resolved.outMint) {
+        return { schedule: [] };
+      }
+      logical = resolved;
+      placeholderState.currentMint = nextMint ?? placeholderState.currentMint;
+      placeholderState.lastRandomMint = lastRandomMint ?? null;
+    }
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
@@ -277,6 +421,36 @@ export const CAMPAIGNS = {
       "1h": [40, 100],
       "2h": [120, 220],
       "6h": [260, 520],
+    },
+  },
+  icarus: {
+    kind: RANDOM_HOPS_KIND,
+    tokenTags: ["icarus"],
+    durations: {
+      "30m": [20, 60],
+      "1h": [60, 120],
+      "2h": [140, 260],
+      "6h": [300, 600],
+    },
+  },
+  zenith: {
+    kind: RANDOM_HOPS_KIND,
+    tokenTags: ["zenith"],
+    durations: {
+      "30m": [20, 60],
+      "1h": [60, 120],
+      "2h": [140, 260],
+      "6h": [300, 600],
+    },
+  },
+  aurora: {
+    kind: RANDOM_HOPS_KIND,
+    tokenTags: ["aurora"],
+    durations: {
+      "30m": [20, 60],
+      "1h": [60, 120],
+      "2h": [140, 260],
+      "6h": [300, 600],
     },
   },
 };
@@ -357,6 +531,12 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   const outMint = logicalStep?.outMint;
   const inMint = logicalStep?.inMint ?? WSOL_MINT;
   const sourceMeta = logicalStep?.sourceBalance;
+  if (outMint === RANDOM_PLACEHOLDER || inMint === RANDOM_PLACEHOLDER) {
+    throw new Error("logical step placeholders must be resolved before execution");
+  }
+  if (sourceMeta?.mint === RANDOM_PLACEHOLDER) {
+    throw new Error("logical step source mint placeholder unresolved");
+  }
   const usesSol = sourceMeta?.kind === "sol" || inMint === WSOL_MINT;
   if (!outMint) {
     throw new Error("missing out mint");
