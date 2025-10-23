@@ -51,6 +51,8 @@ import {
   registerHooks as registerCampaignHooks,
   truncatePlanToBudget,
   CAMPAIGNS,
+  RANDOM_MINT_PLACEHOLDER,
+  resolveRandomizedStep,
 } from "./chains/solana/campaigns_runtime.js";
 import {
   listWallets as sharedListWallets,
@@ -67,7 +69,7 @@ import {
 
 const TOOL_VERSION = "1.1.2";
 const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
@@ -941,6 +943,10 @@ let TOKEN_CATALOG_BY_MINT = new Map(
   TOKEN_CATALOG.map((entry) => [entry.mint, entry])
 );
 
+function snapshotTokenCatalog() {
+  return TOKEN_CATALOG.map((entry) => ({ ...entry }));
+}
+
 function rebuildTokenCatalog(primaryTokens, sourceLabel) {
   TOKEN_CATALOG = mergeTokenSources(primaryTokens, FILE_TOKEN_CATALOG, NORMALISED_FALLBACK_TOKENS);
   TOKEN_CATALOG_BY_SYMBOL = new Map(
@@ -950,6 +956,43 @@ function rebuildTokenCatalog(primaryTokens, sourceLabel) {
     TOKEN_CATALOG.map((entry) => [entry.mint, entry])
   );
   tokenCatalogSourceLabel = sourceLabel;
+}
+
+function resolveRandomCatalogMint(options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const candidates = TOKEN_CATALOG.filter(
+    (entry) => entry?.mint && entry.mint !== SOL_MINT
+  );
+  if (candidates.length === 0) {
+    throw new Error("Token catalog does not contain any non-SOL mints");
+  }
+  const excludeSet = (() => {
+    const raw = options.exclude;
+    const set = new Set();
+    if (!raw) return set;
+    const values = raw instanceof Set ? Array.from(raw) : Array.isArray(raw) ? raw : [raw];
+    for (const value of values) {
+      if (typeof value !== "string") continue;
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      set.add(trimmed === SOL_MINT ? SOL_MINT : trimmed);
+    }
+    return set;
+  })();
+  let pool = candidates.filter((entry) => !excludeSet.has(entry.mint));
+  if (pool.length === 0) {
+    pool = candidates;
+  }
+  let randomValue = typeof rng === "function" ? rng() : Math.random();
+  if (!Number.isFinite(randomValue)) {
+    randomValue = Math.random();
+  }
+  if (randomValue < 0) randomValue = 0;
+  if (randomValue >= 1) randomValue = 1 - Number.EPSILON;
+  const span = pool.length;
+  const pick = Math.floor(randomValue * span);
+  const index = Math.min(span - 1, Math.max(0, pick));
+  return pool[index].mint;
 }
 
 let jupiterTokenMapPromise = null;
@@ -4393,6 +4436,45 @@ const SOL_LIKE_MINTS = new Set([
   "11111111111111111111111111111111",
 ]);
 
+function pickRandomCatalogMint(options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const exclude = new Set();
+  if (options.exclude instanceof Set) {
+    for (const mint of options.exclude) {
+      if (!mint) continue;
+      exclude.add(normaliseSolMint(mint));
+    }
+  } else if (Array.isArray(options.exclude)) {
+    for (const mint of options.exclude) {
+      if (!mint) continue;
+      exclude.add(normaliseSolMint(mint));
+    }
+  } else if (typeof options.exclude === "string") {
+    exclude.add(normaliseSolMint(options.exclude));
+  }
+
+  const candidates = TOKEN_CATALOG.filter((entry) => {
+    if (!entry || !entry.mint) return false;
+    const normalizedMint = normaliseSolMint(entry.mint);
+    if (SOL_LIKE_MINTS.has(normalizedMint)) return false;
+    return !exclude.has(normalizedMint);
+  });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const index = randomIntInclusive(0, candidates.length - 1, rng);
+  const chosen = candidates[index] || null;
+  if (chosen && options.exclude instanceof Set) {
+    const normalized = normaliseSolMint(chosen.mint);
+    if (!SOL_LIKE_MINTS.has(normalized)) {
+      options.exclude.add(normalized);
+    }
+  }
+  return chosen ? normaliseSolMint(chosen.mint) : null;
+}
+
 const KNOWN_MINTS = new Map(
   TOKEN_CATALOG.map((entry) => {
     let programId = null;
@@ -4425,6 +4507,121 @@ const DEFAULT_SWEEP_MINTS = Array.from(
     }).filter((mint) => mint && !SOL_LIKE_MINTS.has(mint))
   )
 );
+
+const RECENT_RANDOM_CATALOG_LIMIT = 24;
+const recentCatalogMintHistory = [];
+
+function rememberRecentCatalogMint(mint, limit = RECENT_RANDOM_CATALOG_LIMIT) {
+  if (!mint) return;
+  const normalized = typeof mint === "string" ? mint : String(mint ?? "");
+  const existingIndex = recentCatalogMintHistory.indexOf(normalized);
+  if (existingIndex !== -1) {
+    recentCatalogMintHistory.splice(existingIndex, 1);
+  }
+  const effectiveLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : RECENT_RANDOM_CATALOG_LIMIT);
+  recentCatalogMintHistory.push(normalized);
+  while (recentCatalogMintHistory.length > effectiveLimit) {
+    recentCatalogMintHistory.shift();
+  }
+}
+
+function normaliseTagList(value) {
+  if (!value) return [];
+  const list = Array.isArray(value) ? value : [value];
+  return list
+    .map((entry) => (typeof entry === "string" ? entry.trim().toLowerCase() : null))
+    .filter((entry) => entry && entry.length > 0);
+}
+
+function combineTagLists(...lists) {
+  const combined = new Set();
+  for (const list of lists) {
+    for (const tag of normaliseTagList(list)) {
+      combined.add(tag);
+    }
+  }
+  return [...combined];
+}
+
+function combineMintExclusions(...lists) {
+  const result = new Set();
+  const addMint = (mint) => {
+    if (typeof mint === "string" && mint.length > 0) {
+      result.add(mint);
+    }
+  };
+  for (const list of lists) {
+    if (!list) continue;
+    if (list instanceof Set) {
+      for (const mint of list) addMint(mint);
+      continue;
+    }
+    if (Array.isArray(list)) {
+      for (const mint of list) addMint(mint);
+      continue;
+    }
+    if (typeof list === "string") {
+      addMint(list);
+    }
+  }
+  return result;
+}
+
+function sampleMintFromCatalog(options = {}) {
+  const skipSolLike = options.skipSolLike !== false;
+  const avoidRecent = options.avoidRecent !== false;
+  const remember = options.remember !== false;
+  const rememberLimit = Number.isFinite(options.rememberLimit)
+    ? Math.max(1, Math.floor(options.rememberLimit))
+    : RECENT_RANDOM_CATALOG_LIMIT;
+  const requireTags = combineTagLists(options.requireTags, options.tags);
+  const anyTags = combineTagLists(options.anyTags);
+  const exclude = combineMintExclusions(options.exclude);
+  const preferFile = options.preferFile !== false;
+  const filterFn = typeof options.filter === "function" ? options.filter : null;
+
+  const sources = [];
+  if (FILE_TOKEN_CATALOG.length > 0 && preferFile) {
+    sources.push(FILE_TOKEN_CATALOG);
+  }
+  sources.push(TOKEN_CATALOG);
+
+  const seen = new Set();
+  const pool = [];
+  for (const source of sources) {
+    for (const entry of source) {
+      if (!entry || typeof entry.mint !== "string") continue;
+      const mint = entry.mint;
+      if (seen.has(mint)) continue;
+      seen.add(mint);
+      if (skipSolLike && SOL_LIKE_MINTS.has(mint)) continue;
+      if (exclude.has(mint)) continue;
+      if (requireTags.length > 0 && !requireTags.every((tag) => tokenHasTag(entry, tag))) continue;
+      if (anyTags.length > 0 && !anyTags.some((tag) => tokenHasTag(entry, tag))) continue;
+      if (filterFn && !filterFn(entry)) continue;
+      pool.push(entry);
+    }
+  }
+
+  if (pool.length === 0) return null;
+
+  let candidates = pool;
+  if (avoidRecent && recentCatalogMintHistory.length > 0) {
+    const recentSet = new Set(recentCatalogMintHistory);
+    const filtered = pool.filter((entry) => !recentSet.has(entry.mint));
+    if (filtered.length > 0) {
+      candidates = filtered;
+    }
+  }
+
+  const pickIndex = Math.floor(Math.random() * candidates.length);
+  const chosen = candidates[pickIndex];
+  if (!chosen) return null;
+  if (remember) {
+    rememberRecentCatalogMint(chosen.mint, rememberLimit);
+  }
+  return chosen;
+}
 
 
 const mintMetadataCache = new Map();
@@ -4478,6 +4675,46 @@ function printStartupBanner() {
 
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const SESSION_RNG_NAMESPACE =
+  process.env.JUPITER_SWAP_TOOL_SESSION_SEED ||
+  process.env.JUPITER_SWAP_TOOL_RANDOM_SEED ||
+  "jupiter-swap-tool-session";
+
+function hashStringToUint32(input) {
+  const str =
+    typeof input === "string"
+      ? input
+      : JSON.stringify(input, (_, value) =>
+          typeof value === "bigint" ? value.toString() : value
+        );
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i += 1) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+}
+
+function createDeterministicRng(seedInput) {
+  let state = hashStringToUint32(seedInput) || 0x811c9dc5;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function deriveWalletSessionRng(wallet, scope = "default") {
+  const components = [
+    SESSION_RNG_NAMESPACE,
+    scope,
+    wallet?.name || "",
+    wallet?.kp?.publicKey ? wallet.kp.publicKey.toBase58() : "",
+  ];
+  return createDeterministicRng(components.join("|"));
+}
 
 const pickFirstDefined = (...values) => {
   for (const value of values) {
@@ -4545,6 +4782,8 @@ const extractDurationOverride = (options, candidates) => {
 
 const pickIntInclusive = (rng, min, max) =>
   randomIntInclusive(min, max, rng);
+
+const randomIntInclusive = (min, max) => pickIntInclusive(Math.random, min, max);
 
 const applyScalingToSegments = (segments, rawTotal, target) => {
   if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
@@ -4781,10 +5020,13 @@ function balanceRpcDelay() {
 
 function shuffleArray(array, rng = DEFAULT_RNG) {
   const generator = normaliseRng(rng);
+function shuffleArray(array, rng = Math.random) {
   const result = [...array];
+  const randomFn = typeof rng === "function" ? rng : Math.random;
   for (let i = result.length - 1; i > 0; i -= 1) {
     const randomValue = randomFloat(generator);
     const j = Math.floor(randomValue * (i + 1));
+    const j = Math.floor(randomFn() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -4975,6 +5217,9 @@ function ensureCampaignHooksRegistered() {
         } catch (_) {}
       }
     },
+    getSplLamports: async (pubkeyBase58, mint) => {
+      return campaignGetSplLamports(pubkeyBase58, mint);
+    },
     jupiterLiteSwap: async (pubkeyBase58, inMint, outMint, lamports) => {
       return performCampaignSwap({
         pubkeyBase58,
@@ -4985,6 +5230,9 @@ function ensureCampaignHooksRegistered() {
     },
     findLargestSplHolding: async (pubkeyBase58) => {
       return campaignFindLargestHolding(pubkeyBase58);
+    },
+    findSplHoldingByMint: async (pubkeyBase58, mint) => {
+      return campaignFindHolding(pubkeyBase58, mint);
     },
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
@@ -5235,9 +5483,10 @@ function filterWalletsByBatch(wallets, batchRaw) {
 async function handleCampaignCommand(rawArgs) {
   const { options, rest } = parseCliOptions(rawArgs);
   const [campaignKeyRaw, durationKeyRaw] = rest;
+  const RANDOM_PLACEHOLDER = "RANDOM";
   if (!campaignKeyRaw || !durationKeyRaw) {
     throw new Error(
-      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
+      "campaign usage: campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]"
     );
   }
   const campaignKey = campaignKeyRaw.toLowerCase();
@@ -5276,22 +5525,90 @@ async function handleCampaignCommand(rawArgs) {
   }
   ensureCampaignHooksRegistered();
 
+  const walletHoldingsMap = new Map();
+  const walletSolBalanceMap = new Map();
+  if (campaignKey === "btc-eth-circuit") {
+    const sweepConnection = createRpcConnection("confirmed");
+    for (const wallet of wallets) {
+      const pubkey = wallet.kp.publicKey.toBase58();
+      try {
+        await balanceRpcDelay();
+        const lamports = await sweepConnection.getBalance(wallet.kp.publicKey);
+        walletSolBalanceMap.set(pubkey, BigInt(lamports));
+      } catch (err) {
+        console.warn(
+          paint(
+            `  Warning: failed to fetch SOL balance for ${wallet.name}: ${err?.message || err}`,
+            "warn"
+          )
+        );
+      }
+      try {
+        await balanceRpcDelay();
+        const parsedAccounts = await getAllParsedTokenAccounts(sweepConnection, wallet.kp.publicKey);
+        const holdings = [];
+        for (const { account } of parsedAccounts) {
+          const info = account?.data?.parsed?.info;
+          if (!info) continue;
+          const mint = info.mint;
+          if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+          const state = info.state;
+          const locked = state && state !== "initialized";
+          if (locked) continue;
+          const rawAmount = info.tokenAmount?.amount ?? "0";
+          let amount = 0n;
+          try {
+            amount = BigInt(rawAmount);
+          } catch (_) {
+            amount = 0n;
+          }
+          if (amount <= 0n) continue;
+          const decimals = info.tokenAmount?.decimals ?? 0;
+          const isFrozen = state === "frozen" || info.isFrozen === true;
+          holdings.push({ mint, amountLamports: amount, decimals, locked, isFrozen });
+        }
+        walletHoldingsMap.set(pubkey, holdings);
+      } catch (err) {
+        console.warn(
+          paint(
+            `  Warning: failed to fetch token holdings for ${wallet.name}: ${err?.message || err}`,
+            "warn"
+          )
+        );
+        walletHoldingsMap.set(pubkey, []);
+      }
+    }
+    try {
+      sweepConnection?.destroy?.();
+    } catch (_) {}
+  }
+
   const pubkeys = wallets.map((wallet) => wallet.kp.publicKey.toBase58());
   const { plansByWallet } = instantiateCampaignForWallets({
     campaignKey,
     durationKey,
     walletPubkeys: pubkeys,
+    walletHoldings: walletHoldingsMap,
+    walletSolBalances: walletSolBalanceMap,
   });
 
-  const connection = createRpcConnection("confirmed");
   const preparedPlans = new Map();
+  let balanceConnection = null;
   for (const wallet of wallets) {
     const pubkey = wallet.kp.publicKey.toBase58();
     const plan = plansByWallet.get(pubkey);
     if (!plan) continue;
     let balance = 0n;
     try {
-      balance = BigInt(await connection.getBalance(wallet.kp.publicKey));
+      if (walletSolBalanceMap.has(pubkey)) {
+        balance = walletSolBalanceMap.get(pubkey);
+      } else {
+        if (!balanceConnection) {
+          balanceConnection = createRpcConnection("confirmed");
+        }
+        await balanceRpcDelay();
+        balance = BigInt(await balanceConnection.getBalance(wallet.kp.publicKey));
+      }
     } catch (err) {
       console.warn(
         paint(
@@ -5311,8 +5628,16 @@ async function handleCampaignCommand(rawArgs) {
       );
       continue;
     }
-    preparedPlans.set(pubkey, { schedule: truncated, rng: plan.rng });
+      preparedPlans.set(pubkey, {
+        schedule: truncated,
+        rng: plan.rng,
+        randomSessions: plan.randomSessions,
+        poolMints: plan.poolMints,
+      });
   }
+  try {
+    balanceConnection?.destroy?.();
+  } catch (_) {}
 
   if (preparedPlans.size === 0) {
     console.log(paint("No wallets have sufficient balance to participate.", "warn"));
@@ -5323,9 +5648,45 @@ async function handleCampaignCommand(rawArgs) {
   const swapCounts = [];
   for (const [pubkey, { schedule }] of preparedPlans.entries()) {
     const swapSteps = schedule.filter((step) => step.kind === "swapHop").length;
+    const fanOutSteps = schedule.filter((step) => step.kind === "fanOutSwap").length;
+    const sweepSteps = schedule.filter((step) => step.kind === "sweepToSOL").length;
     const checkpointSteps = schedule.filter((step) => step.kind === "checkpointToSOL").length;
     const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
-    swapCounts.push({ label, swapSteps, checkpointSteps });
+    swapCounts.push({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps });
+  }
+
+  if (dryRun) {
+    console.log(paint("Dry-run hop preview (per wallet):", "info"));
+    for (const [pubkey, { schedule }] of preparedPlans.entries()) {
+      const label = campaignWalletRegistry.get(pubkey)?.name || pubkey;
+      let previewLastMint = SOL_MINT;
+      const hops = [];
+      for (const step of schedule) {
+        if (step.kind !== "swapHop") continue;
+        const logical = step.logicalStep || {};
+        let fromMint = logical.inMint ?? previewLastMint ?? SOL_MINT;
+        if (fromMint === RANDOM_PLACEHOLDER) {
+          fromMint = previewLastMint ?? SOL_MINT;
+        }
+        let toMint = logical.outMint ?? SOL_MINT;
+        if (toMint === RANDOM_PLACEHOLDER) {
+          toMint = previewLastMint ?? SOL_MINT;
+        }
+        hops.push(`${symbolForMint(fromMint)}→${symbolForMint(toMint)}`);
+        previewLastMint = toMint || SOL_MINT;
+      }
+      const MAX_PREVIEW_HOPS = 40;
+      let preview;
+      if (hops.length === 0) {
+        preview = "(no swaps scheduled)";
+      } else if (hops.length > MAX_PREVIEW_HOPS) {
+        const visible = hops.slice(0, MAX_PREVIEW_HOPS).join(" | ");
+        preview = `${visible} | ... (+${hops.length - MAX_PREVIEW_HOPS} more)`;
+      } else {
+        preview = hops.join(" | ");
+      }
+      console.log(paint(`  ${label}: ${preview}`, "muted"));
+    }
   }
 
   console.log(
@@ -5334,10 +5695,16 @@ async function handleCampaignCommand(rawArgs) {
       "info"
     )
   );
-  swapCounts.forEach(({ label, swapSteps, checkpointSteps }) => {
+  swapCounts.forEach(({ label, swapSteps, fanOutSteps, sweepSteps, checkpointSteps }) => {
+    const parts = [];
+    if (sweepSteps > 0) parts.push(`${sweepSteps} sweep${sweepSteps === 1 ? "" : "s"}`);
+    if (fanOutSteps > 0) parts.push(`${fanOutSteps} fan-out swap${fanOutSteps === 1 ? "" : "s"}`);
+    if (swapSteps > 0) parts.push(`${swapSteps} swap${swapSteps === 1 ? "" : "s"}`);
+    if (checkpointSteps > 0) parts.push(`${checkpointSteps} checkpoint${checkpointSteps === 1 ? "" : "s"}`);
+    const summary = parts.length > 0 ? parts.join(" + ") : "no scheduled steps";
     console.log(
       paint(
-        `  ${label}: ${swapSteps} swap(s) + ${checkpointSteps} checkpoint(s) scheduled.`,
+        `  ${label}: ${summary}.`,
         "muted"
       )
     );
@@ -5865,11 +6232,43 @@ async function runSwapSequence(steps, label) {
     )
   );
   let index = 0;
+  const resolutionState = createMintResolutionState();
   for (const step of steps) {
     index += 1;
-    const fromSymbol = MINT_SYMBOL_OVERRIDES.get(step.from) || step.from.slice(0, 4);
-    const toSymbol = MINT_SYMBOL_OVERRIDES.get(step.to) || step.to.slice(0, 4);
-    const descriptor = step.description || `${fromSymbol} -> ${toSymbol}`;
+
+    const excludeForFrom = combineMintExclusions(resolutionState.used);
+    const resolvedFrom = resolveMintDescriptor(step.from, {
+      exclude: excludeForFrom,
+    });
+    const excludeForTo = combineMintExclusions(
+      resolutionState.used,
+      [resolvedFrom.mint]
+    );
+    const resolvedTo = resolveMintDescriptor(step.to, {
+      exclude: excludeForTo,
+    });
+
+    const fromMint = normaliseSolMint(resolvedFrom.mint);
+    const toMint = normaliseSolMint(resolvedTo.mint);
+    resolutionState.used.add(fromMint);
+    resolutionState.used.add(toMint);
+
+    const fromLabel =
+      resolvedFrom.description || resolvedFrom.symbol || symbolForMint(fromMint);
+    const toLabel =
+      resolvedTo.description || resolvedTo.symbol || symbolForMint(toMint);
+    const descriptorNeedsUpdate =
+      !step.description || resolvedFrom.random || resolvedTo.random;
+
+    step.from = fromMint;
+    step.to = toMint;
+    step.resolvedFrom = resolvedFrom;
+    step.resolvedTo = resolvedTo;
+    if (descriptorNeedsUpdate) {
+      step.description = `${fromLabel} -> ${toLabel}`;
+    }
+    const descriptor = step.description || `${fromLabel} -> ${toLabel}`;
+
     console.log(paint(`Step ${index}/${steps.length}: ${descriptor}`, "info"));
     if (step.noop) {
       console.log(paint("  (no on-chain action required)", "muted"));
@@ -5885,49 +6284,186 @@ function normaliseSolMint(mint) {
   return SOL_LIKE_MINTS.has(mint) ? SOL_MINT : mint;
 }
 
-function resolveMintCandidate(rawMint, context = {}) {
-  const {
-    fallbackMint = null,
-    rng = DEFAULT_RNG,
-    baseRandomOptions = EMPTY_RANDOM_MINT_OPTIONS,
-    disallowMints = [],
-    label = null,
-  } = context;
-
-  let candidate = rawMint;
-  if (
-    candidate === undefined ||
-    candidate === null ||
-    (typeof candidate === "string" && candidate.trim().length === 0)
-  ) {
-    candidate = fallbackMint;
+function createMintResolutionState(initial = []) {
+  const state = { used: new Set() };
+  if (Array.isArray(initial)) {
+    for (const mint of initial) {
+      if (typeof mint === "string" && mint.length > 0) {
+        state.used.add(normaliseSolMint(mint));
+      }
+    }
   }
+  return state;
+}
 
-  if (candidate === undefined || candidate === null) {
-    throw new Error("Mint candidate is undefined and no fallback provided");
+function resolveMintDescriptor(candidate, options = {}) {
+  const baseSampleOptions =
+    options.sampleOptions && typeof options.sampleOptions === "object"
+      ? { ...options.sampleOptions }
+      : {};
+  if (options.requireTags) {
+    baseSampleOptions.requireTags = combineTagLists(
+      baseSampleOptions.requireTags,
+      options.requireTags
+    );
   }
-
-  const request = parseRandomMintRequest(candidate);
-  if (!request) {
-    const resolved =
-      typeof candidate === "string" ? candidate : String(candidate);
-    return { mint: normaliseSolMint(resolved), resolution: null };
+  if (options.anyTags) {
+    baseSampleOptions.anyTags = combineTagLists(
+      baseSampleOptions.anyTags,
+      options.anyTags
+    );
   }
+  const combinedExclude = combineMintExclusions(
+    baseSampleOptions.exclude,
+    options.exclude
+  );
+  baseSampleOptions.exclude = combinedExclude;
 
-  const { entry } = resolveRandomMintRequest(request, {
-    baseOptions: baseRandomOptions,
-    additionalExclusions: disallowMints,
-    rng,
-  });
+  const skipSolDefault = pickFirstDefined(
+    baseSampleOptions.skipSolLike,
+    options.skipSolLike
+  );
+  const avoidRecentDefault = pickFirstDefined(
+    baseSampleOptions.avoidRecent,
+    options.avoidRecent
+  );
 
-  return {
-    mint: normaliseSolMint(entry.mint),
-    resolution: {
-      placeholder: request.placeholder,
-      entry,
-      label,
-    },
+  const coerceBoolean = (value, fallback) => {
+    if (value === true) return true;
+    if (value === false) return false;
+    return fallback;
   };
+
+  if (typeof candidate === "string") {
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) {
+      throw new Error("Empty mint descriptor encountered");
+    }
+
+    const randomMatch = trimmed.match(/^RANDOM(?::(.+))?$/i);
+    if (randomMatch) {
+      const directiveRaw = randomMatch[1] || "";
+      const segments = directiveRaw
+        .split(",")
+        .map((segment) => segment.trim())
+        .filter((segment) => segment.length > 0);
+
+      let skipSolLike = coerceBoolean(skipSolDefault, true);
+      let avoidRecent = coerceBoolean(avoidRecentDefault, true);
+      let requireTags = [];
+      let anyTags = [];
+
+      for (const segment of segments) {
+        const lower = segment.toLowerCase();
+        if (lower === "sol-ok" || lower === "allow-sol") {
+          skipSolLike = false;
+          continue;
+        }
+        if (lower === "allow-recent" || lower === "recent-ok") {
+          avoidRecent = false;
+          continue;
+        }
+        if (lower === "no-recent" || lower === "avoid-recent") {
+          avoidRecent = true;
+          continue;
+        }
+        const eqIndex = segment.indexOf("=");
+        if (eqIndex !== -1) {
+          const key = segment.slice(0, eqIndex).trim().toLowerCase();
+          const value = segment.slice(eqIndex + 1).trim();
+          if (!value) continue;
+          if (key === "tag" || key === "tags") {
+            requireTags = requireTags.concat(value.split("|"));
+            continue;
+          }
+          if (key === "any" || key === "anytag" || key === "anytags") {
+            anyTags = anyTags.concat(value.split("|"));
+            continue;
+          }
+          if (key === "exclude") {
+            for (const part of value.split("|")) {
+              const trimmedPart = part.trim();
+              if (trimmedPart) combinedExclude.add(trimmedPart);
+            }
+            continue;
+          }
+        }
+        requireTags.push(segment);
+      }
+
+      const descriptorLabel =
+        segments.length > 0 ? `RANDOM:${segments.join(",")}` : "RANDOM";
+
+      const entry = sampleMintFromCatalog({
+        ...baseSampleOptions,
+        skipSolLike,
+        avoidRecent,
+        requireTags: combineTagLists(
+          baseSampleOptions.requireTags,
+          requireTags
+        ),
+        anyTags: combineTagLists(baseSampleOptions.anyTags, anyTags),
+        exclude: combinedExclude,
+      });
+
+      if (!entry) {
+        throw new Error(
+          `Unable to resolve ${descriptorLabel}: no eligible catalog entries found`
+        );
+      }
+
+      const symbol = entry.symbol || symbolForMint(entry.mint);
+      return {
+        mint: entry.mint,
+        symbol,
+        description: `${descriptorLabel} (${symbol})`,
+        random: true,
+        catalogEntry: entry,
+        label: descriptorLabel,
+      };
+    }
+
+    const symbolEntry = tokenBySymbol(trimmed);
+    if (symbolEntry?.mint) {
+      const symbol = symbolEntry.symbol || symbolForMint(symbolEntry.mint);
+      return {
+        mint: symbolEntry.mint,
+        symbol,
+        description: symbol,
+        random: false,
+        catalogEntry: symbolEntry,
+        label: symbol,
+      };
+    }
+
+    const symbol = symbolForMint(trimmed);
+    return {
+      mint: trimmed,
+      symbol,
+      description: symbol,
+      random: false,
+      catalogEntry: TOKEN_CATALOG_BY_MINT.get(trimmed) || null,
+      label: symbol,
+    };
+  }
+
+  if (candidate && typeof candidate === "object") {
+    const objectMint =
+      typeof candidate.mint === "string" ? candidate.mint : null;
+    if (objectMint) {
+      const symbol = candidate.symbol || symbolForMint(objectMint);
+      return {
+        mint: objectMint,
+        symbol,
+        description: candidate.label || symbol,
+        random: false,
+        catalogEntry: TOKEN_CATALOG_BY_MINT.get(objectMint) || null,
+        label: candidate.label || symbol,
+      };
+    }
+  }
+
+  throw new Error(`Unsupported mint descriptor: ${String(candidate)}`);
 }
 
 const CREW1_CYCLE_TOKENS = [
@@ -5987,80 +6523,64 @@ const BUCKSHOT_TOKEN_MINTS = Array.from(
   )
 );
 
+function isRandomMintSentinel(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return trimmed.toLowerCase() === "random";
+}
+
+function toMintExclusionSet(raw) {
+  const set = new Set();
+  if (!raw) return set;
+  const values = raw instanceof Set ? Array.from(raw) : Array.isArray(raw) ? raw : [raw];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    set.add(trimmed === SOL_MINT ? SOL_MINT : trimmed);
+  }
+  return set;
+}
+
 function stepsFromMints(mints, options = {}) {
   const steps = [];
   if (!Array.isArray(mints) || mints.length < 2) return steps;
-
-  const rng = normaliseRng(options.rng);
-  const baseRandomOptions = normaliseRandomMintOptions(
-    options.randomMintOptions
-  );
-  const logRandomResolutions = options.logRandomResolutions !== false;
-  const onRandomMintResolved =
-    typeof options.onRandomMintResolved === "function"
-      ? options.onRandomMintResolved
-      : null;
-
-  const resolvedMints = [];
-  const randomResolutionByIndex = new Map();
-
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const globalExclude = toMintExclusionSet(options.exclude);
+  const resolved = [];
   for (let i = 0; i < mints.length; i += 1) {
-    const previousMint = resolvedMints[resolvedMints.length - 1] ?? null;
-    const nextRaw = i + 1 < mints.length ? mints[i + 1] : null;
-    const nextRequest = parseRandomMintRequest(nextRaw);
-    const nextFixed =
-      !nextRequest && typeof nextRaw === "string" && nextRaw.length > 0
-        ? normaliseSolMint(nextRaw)
-        : null;
-
-    const disallow = [];
-    if (previousMint) disallow.push(previousMint);
-    if (nextFixed) disallow.push(nextFixed);
-
-    const label = `path index ${i}`;
-    const { mint, resolution } = resolveMintCandidate(mints[i], {
-      fallbackMint: i > 0 ? previousMint : null,
-      rng,
-      baseRandomOptions,
-      disallowMints: disallow,
-      label,
-    });
-    resolvedMints.push(mint);
-
-    if (resolution) {
-      const record = { ...resolution, index: i, label };
-      randomResolutionByIndex.set(i, record);
-      if (onRandomMintResolved) {
-        onRandomMintResolved(record);
-      } else if (logRandomResolutions) {
-        logRandomMintResolution(record);
+    const rawMint = mints[i];
+    if (isRandomMintSentinel(rawMint)) {
+      const exclude = new Set(globalExclude);
+      if (resolved.length > 0) {
+        const previous = resolved[resolved.length - 1];
+        if (typeof previous === "string" && previous) {
+          exclude.add(previous === SOL_MINT ? SOL_MINT : previous);
+        }
       }
+      const resolvedMint = resolveRandomCatalogMint({ rng, exclude });
+      resolved.push(resolvedMint);
+    } else {
+      resolved.push(rawMint);
     }
   }
-
-  for (let i = 0; i < resolvedMints.length - 1; i += 1) {
-    const from = normaliseSolMint(resolvedMints[i]);
-    const to = normaliseSolMint(resolvedMints[i + 1]);
+  for (let i = 0; i < resolved.length - 1; i += 1) {
+    const from = normaliseSolMint(resolved[i]);
+    const to = normaliseSolMint(resolved[i + 1]);
     if (from === to) continue;
-    const step = {
+    const fromLabel =
+      resolved[i].description || resolved[i].symbol || symbolForMint(from);
+    const toLabel =
+      resolved[i + 1].description || resolved[i + 1].symbol || symbolForMint(to);
+    steps.push({
       from,
       to,
-      description: `${symbolForMint(from)} -> ${symbolForMint(to)}`,
+      description: `${fromLabel} -> ${toLabel}`,
       forceAll: options.forceAll === true,
-    };
-    const randomDetails = [];
-    const fromResolution = randomResolutionByIndex.get(i);
-    if (fromResolution) {
-      randomDetails.push({ ...fromResolution, role: "from" });
-    }
-    const toResolution = randomResolutionByIndex.get(i + 1);
-    if (toResolution) {
-      randomDetails.push({ ...toResolution, role: "to" });
-    }
-    if (randomDetails.length > 0) {
-      step.randomResolutions = randomDetails;
-    }
-    steps.push(step);
+      resolvedFrom: resolved[i],
+      resolvedTo: resolved[i + 1],
+    });
   }
 
   return steps;
@@ -6068,13 +6588,14 @@ function stepsFromMints(mints, options = {}) {
 
 function flattenSegmentsToSteps(segments, options = {}) {
   const steps = [];
+  const resolutionState = createMintResolutionState();
   for (const segment of segments) {
-    const stepOptions = {
-      ...options,
-      forceAll:
-        segment.forceAll === true || options.forceAll === true,
-    };
-    steps.push(...stepsFromMints(segment.mints, stepOptions));
+    steps.push(
+      ...stepsFromMints(segment.mints, {
+        ...options,
+        forceAll: segment.forceAll,
+      })
+    );
   }
   return steps;
 }
@@ -6095,14 +6616,14 @@ function determineAutomationAmountArg(forceAll = false) {
 // when the dice roll comes back too small.
 function selectSegmentsForWallet(randomMode, options = {}) {
   if (!randomMode) return LONG_CHAIN_SEGMENTS_BASE;
-  const rng = normaliseRng(options.rng);
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
   const shuffled = shuffleArray(LONG_CHAIN_SEGMENTS_BASE, rng);
   const maxSegments = LONG_CHAIN_SEGMENTS_BASE.length;
   const minSegments = Math.min(2, maxSegments);
   for (let attempt = 0; attempt < maxSegments; attempt += 1) {
     const chosenCount = randomIntInclusive(minSegments, maxSegments, rng);
     const candidate = shuffled.slice(0, chosenCount);
-    if (flattenSegmentsToSteps(candidate, { logRandomResolutions: false }).length >= 3) {
+    if (flattenSegmentsToSteps(candidate, { rng, exclude: new Set() }).length >= 3) {
       return candidate;
     }
   }
@@ -6113,47 +6634,125 @@ function selectSegmentsForWallet(randomMode, options = {}) {
 // three hops so the run is meaningful, falling back to the full token list
 // if random selection still ends up too short.
 function buildSecondaryPathMints(randomMode, options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const excludeSet =
+    options.exclude instanceof Set
+      ? options.exclude
+      : new Set(
+          Array.isArray(options.exclude)
+            ? options.exclude
+            : options.exclude
+            ? [options.exclude]
+            : []
+        );
+
   if (!randomMode) {
+    const path = [SOL_MINT, DEFAULT_USDC_MINT];
+    for (const mint of path) {
+      if (!SOL_LIKE_MINTS.has(mint)) excludeSet.add(mint);
+    }
+    return path;
+  }
+
+  const poolMints = Array.from(
+    new Set(
+      TOKEN_CATALOG.filter(
+        (entry) =>
+          entry &&
+          typeof entry.mint === "string" &&
+          tokenHasTag(entry, "secondary-pool") &&
+          !SOL_LIKE_MINTS.has(entry.mint)
+      ).map((entry) => entry.mint)
+    )
+  );
+
+  const availableIntermediates = poolMints.length;
+  if (availableIntermediates === 0) {
     return [SOL_MINT, DEFAULT_USDC_MINT];
   }
-  const rng = normaliseRng(options.rng);
+
+  const maxIntermediateCount = Math.max(1, Math.min(availableIntermediates, 4));
+
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const terminal = SECONDARY_TERMINALS[
-      randomIntInclusive(0, SECONDARY_TERMINALS.length - 1, rng)
-    ];
-    const pool = shuffleArray(
-      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal),
-      rng
-    );
-    const maxIntermediates = Math.min(SECONDARY_RANDOM_POOL.length, pool.length);
-    let intermediateCount = randomIntInclusive(
+    const resolutionState = createMintResolutionState([SOL_MINT]);
+    const path = [SOL_MINT];
+    const intermediateCount = pickIntInclusive(
+      Math.random,
       1,
-      Math.max(1, maxIntermediates),
-      rng
+      maxIntermediateCount
     );
-    const intermediates = pool.slice(0, intermediateCount);
-    const path = [SOL_MINT, ...intermediates, terminal];
+
+    for (let i = 0; i < intermediateCount; i += 1) {
+      const entry = sampleMintFromCatalog({
+        requireTags: ["secondary-pool"],
+        exclude: resolutionState.used,
+        skipSolLike: true,
+      });
+      if (!entry) break;
+      path.push(entry.mint);
+      resolutionState.used.add(entry.mint);
+    }
+
+    if (path.length <= 1) continue;
+
+    let terminalEntry = sampleMintFromCatalog({
+      requireTags: ["secondary-terminal"],
+      exclude: resolutionState.used,
+      skipSolLike: false,
+    });
+    let terminalMint = terminalEntry?.mint;
+    if (!terminalMint || resolutionState.used.has(terminalMint)) {
+      if (!resolutionState.used.has(DEFAULT_USDC_MINT)) {
+        terminalMint = DEFAULT_USDC_MINT;
+      } else if (!resolutionState.used.has(SOL_MINT)) {
+        terminalMint = SOL_MINT;
+      } else {
+        const fallbackTerminal = sampleMintFromCatalog({
+          requireTags: ["secondary-pool"],
+          exclude: resolutionState.used,
+          skipSolLike: true,
+          avoidRecent: false,
+        });
+        terminalMint = fallbackTerminal?.mint || DEFAULT_USDC_MINT;
+      }
+    }
+    path.push(terminalMint);
+
     const deduped = [];
     for (const mint of path) {
       if (deduped.length === 0 || deduped[deduped.length - 1] !== mint) {
         deduped.push(mint);
       }
     }
-    if (deduped.length - 1 >= 3) {
-      return deduped;
+
+    const unique = [];
+    const seen = new Set();
+    for (const mint of deduped) {
+      if (seen.has(mint)) continue;
+      seen.add(mint);
+      unique.push(mint);
+    }
+
+    if (unique.length - 1 >= 3) {
+      return unique;
     }
   }
-  const fallback = [SOL_MINT, ...SECONDARY_RANDOM_POOL, DEFAULT_USDC_MINT];
-  const uniqueFallback = [];
-  const seen = new Set();
-  for (const mint of fallback) {
-    if (seen.has(mint)) continue;
-    seen.add(mint);
-    uniqueFallback.push(mint);
-  }
-  return uniqueFallback;
-}
 
+  const fallback = [SOL_MINT];
+  const seenFallback = new Set([SOL_MINT]);
+  for (const entry of TOKEN_CATALOG) {
+    if (!entry || typeof entry.mint !== "string") continue;
+    if (!tokenHasTag(entry, "secondary-pool")) continue;
+    if (SOL_LIKE_MINTS.has(entry.mint)) continue;
+    if (seenFallback.has(entry.mint)) continue;
+    seenFallback.add(entry.mint);
+    fallback.push(entry.mint);
+  }
+  if (!seenFallback.has(DEFAULT_USDC_MINT)) {
+    fallback.push(DEFAULT_USDC_MINT);
+  }
+  return fallback;
+}
 async function executeSwapPlanForWallet(wallet, steps, label, options = {}) {
   if (!steps || steps.length === 0) return;
   if (isWalletDisabledByGuard(wallet.name)) {
@@ -6343,19 +6942,10 @@ async function runLongCircle(options = {}) {
 
   const plans = await measureAsync("long-circle:plan-wallets", async () => {
     const built = wallets.map((wallet) => {
-      const walletSeed = wallet.kp.publicKey.toBase58();
-      const segmentsSeed = `${walletSeed}:long-circle:segments`;
-      let segments = selectSegmentsForWallet(randomMode, {
-        rng: createDeterministicRng(segmentsSeed),
-      });
-
-      const evaluateSteps = (segmentList, label) =>
-        flattenSegmentsToSteps(segmentList, {
-          rng: createDeterministicRng(`${walletSeed}:long-circle:${label}`),
-          logRandomResolutions: false,
-        });
-
-      let steps = evaluateSteps(segments, "steps-eval");
+      const rng = deriveWalletSessionRng(wallet, "long-circle");
+      let segments = selectSegmentsForWallet(randomMode, { rng });
+      let usedMints = new Set();
+      let steps = flattenSegmentsToSteps(segments, { rng, exclude: usedMints });
       if (randomMode && steps.length < 3) {
         const extended = new Set(segments);
         let attempt = 0;
@@ -6366,14 +6956,15 @@ async function runLongCircle(options = {}) {
           }
           extended.add(segment);
           const candidateSegments = Array.from(extended);
-          const candidateSteps = evaluateSteps(
-            candidateSegments,
-            `candidate-${attempt}`
-          );
-          attempt += 1;
+          const candidateUsedMints = new Set();
+          const candidateSteps = flattenSegmentsToSteps(candidateSegments, {
+            rng,
+            exclude: candidateUsedMints,
+          });
           if (candidateSteps.length >= 3) {
             segments = candidateSegments;
             steps = candidateSteps;
+            usedMints = candidateUsedMints;
             break;
           }
         }
@@ -6387,6 +6978,8 @@ async function runLongCircle(options = {}) {
         steps: finalSteps,
         summary: describeStepSequence(finalSteps),
         skipRegistry: new Set(),
+        rng,
+        usedMints,
       };
     });
     return built;
@@ -6407,16 +7000,13 @@ async function runLongCircle(options = {}) {
     if (enableSecondary) {
       console.log(paint('\n-- secondary random order sweep --', 'label'));
       for (const plan of plans) {
-        const walletSeed = plan.wallet.kp.publicKey.toBase58();
         const secondaryPath = buildSecondaryPathMints(randomMode, {
-          rng: createDeterministicRng(
-            `${walletSeed}:long-circle:secondary-path`
-          ),
+          rng: plan.rng,
+          exclude: plan.usedMints,
         });
         const secondarySteps = stepsFromMints(secondaryPath, {
-          rng: createDeterministicRng(
-            `${walletSeed}:long-circle:secondary-steps`
-          ),
+          rng: plan.rng,
+          exclude: plan.usedMints,
         });
         if (secondarySteps.length === 0) continue;
         const summary = describeStepSequence(secondarySteps);
@@ -6449,26 +7039,76 @@ function computeBuckshotSpendable(solLamports, ataRent) {
   return solLamports - reserve;
 }
 
+function buildBuckshotTargets(maxTargets = 12) {
+  const eligibleEntries = TOKEN_CATALOG.filter(
+    (entry) =>
+      entry &&
+      typeof entry.mint === "string" &&
+      tokenHasTag(entry, "crew-cycle") &&
+      !SOL_LIKE_MINTS.has(entry.mint)
+  );
+  const uniqueMints = Array.from(new Set(eligibleEntries.map((entry) => entry.mint)));
+  if (uniqueMints.length === 0) return [];
+
+  const targetCount = Math.min(Math.max(1, maxTargets), uniqueMints.length);
+  const used = new Set();
+  const targets = [];
+  let attempts = 0;
+  const maxAttempts = targetCount * 6;
+
+  while (targets.length < targetCount && attempts < maxAttempts) {
+    attempts += 1;
+    const entry = sampleMintFromCatalog({
+      requireTags: ["crew-cycle"],
+      exclude: used,
+      skipSolLike: true,
+    });
+    if (!entry) break;
+    if (used.has(entry.mint)) continue;
+    used.add(entry.mint);
+    targets.push({
+      mint: entry.mint,
+      symbol: entry.symbol || symbolForMint(entry.mint),
+      name: entry.name || entry.symbol || symbolForMint(entry.mint),
+    });
+  }
+
+  if (targets.length === 0) {
+    return uniqueMints.slice(0, targetCount).map((mint) => ({
+      mint,
+      symbol: symbolForMint(mint),
+      name: symbolForMint(mint),
+    }));
+  }
+
+  return targets;
+}
+
 async function runBuckshot() {
   const wallets = listWallets();
   if (wallets.length === 0) {
     console.log(paint("No wallets found", "muted"));
     return;
   }
-  if (BUCKSHOT_TOKEN_MINTS.length === 0) {
+  const targets = buildBuckshotTargets();
+  if (targets.length === 0) {
     console.log(paint("Buckshot token list empty; nothing to do.", "muted"));
     return;
   }
 
   console.log(
     paint(
-      `Buckshot mode — targeting ${BUCKSHOT_TOKEN_MINTS.length} token${BUCKSHOT_TOKEN_MINTS.length === 1 ? '' : 's'} from round-robin set`,
+      `Buckshot mode — targeting ${targets.length} token${targets.length === 1 ? '' : 's'} from token catalog`,
       "label"
     )
   );
+  const targetSummary = targets.map((target) => target.symbol).join(', ');
+  if (targetSummary) {
+    console.log(paint(`  Tokens: ${targetSummary}`, 'muted'));
+  }
 
   const walletHoldings = new Map();
-  const tokenCount = BigInt(BUCKSHOT_TOKEN_MINTS.length);
+  const tokenCount = BigInt(targets.length);
 
   const planEntries = await measureAsync("buckshot:plan-wallets", async () => {
     const entries = [];
@@ -6501,7 +7141,7 @@ async function runBuckshot() {
       if (perToken <= 0n) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: spendable SOL too small to distribute across ${BUCKSHOT_TOKEN_MINTS.length} tokens.`,
+            `Skipping ${wallet.name}: spendable SOL too small to distribute across ${targets.length} tokens.`,
             "muted"
           )
         );
@@ -6550,15 +7190,15 @@ async function runBuckshot() {
 
       const holdingsSet = walletHoldings.get(wallet.name) || new Set();
 
-      for (const mint of BUCKSHOT_TOKEN_MINTS) {
-        const symbol = symbolForMint(mint);
+      for (const target of targets) {
+        const symbol = target.symbol || symbolForMint(target.mint);
         console.log(
           paint(
             `  ${symbol}: swapping ${perTokenDecimal} SOL -> ${symbol}`,
             "info"
           )
         );
-        await doSwapAcross(SOL_MINT, mint, perTokenDecimal, {
+        await doSwapAcross(SOL_MINT, target.mint, perTokenDecimal, {
           wallets: [wallet],
           quietSkips: true,
           suppressMetadata: true,
@@ -6567,7 +7207,7 @@ async function runBuckshot() {
           slippageBoostStrategy: "add",
           slippageBoostIncrementBps: 200,
         });
-        holdingsSet.add(mint);
+        holdingsSet.add(target.mint);
         await passiveSleep();
       }
 
@@ -6710,6 +7350,7 @@ async function runBuckshot() {
 /* -------------------------------------------------------------------------- */
 
 const PREWRITTEN_FLOW_DEFINITIONS_MAP = new Map([
+const PREWRITTEN_FLOW_PLAN_MAP = new Map([
   [
     "arpeggio",
     {
@@ -6761,6 +7402,135 @@ const PREWRITTEN_FLOW_DEFINITIONS_MAP = new Map([
       requireTerminalSolHop: true,
       waitBoundsMs: { min: 45_000, max: 120_000 },
       defaultDurationMs: 45 * 60 * 1000,
+    },
+  ],
+  [
+    "icarus",
+    {
+      key: "icarus",
+      label: "Icarus",
+      description:
+        "High-tempo random meme rotations that return to SOL between bursts.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.08, max: 0.22 },
+          description: "Deploy SOL into a random fanout token",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "icarus-core",
+            poolTags: ["fanout", "default-sweep", "long-circle"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest the random position back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "icarus-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 18, max: 120 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 35_000, max: 95_000 },
+      defaultDurationMs: 40 * 60 * 1000,
+    },
+  ],
+  [
+    "zenith",
+    {
+      key: "zenith",
+      label: "Zenith",
+      description:
+        "Mid-tempo rotations that pivot between random pools before settling in SOL.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.1, max: 0.28 },
+          description: "Seed a random long-circle token from SOL",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "zenith-core",
+            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: "random",
+          description: "Rotate into another random pool before returning",
+          randomization: {
+            mode: "session-to-random",
+            sessionGroup: "zenith-core",
+            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Realise the position back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "zenith-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 24, max: 150 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 45_000, max: 120_000 },
+      defaultDurationMs: 55 * 60 * 1000,
+    },
+  ],
+  [
+    "aurora",
+    {
+      key: "aurora",
+      label: "Aurora",
+      description:
+        "Slow and steady random accumulations cycling through secondary pools.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.05, max: 0.16 },
+          description: "Feather SOL into a random secondary token",
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "aurora-core",
+            poolTags: ["fanout", "secondary-pool"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Rebalance back to SOL",
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "aurora-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 12, max: 90 },
+      minimumCycles: 2,
+      requireTerminalSolHop: false,
+      waitBoundsMs: { min: 60_000, max: 150_000 },
+      defaultDurationMs: 70 * 60 * 1000,
     },
   ],
 ]);
@@ -6945,14 +7715,60 @@ function describeFlowAmount(normalizedAmount) {
   return `(amount ${normalizedAmount})`;
 }
 
-async function runPrewrittenFlowCli(flowKey, options = {}) {
+async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
-    PREWRITTEN_FLOW_DEFINITIONS_MAP.get(normalizedKey) ||
-    PREWRITTEN_FLOW_DEFINITIONS_MAP.get(flowKey);
+    PREWRITTEN_FLOW_PLAN_MAP.get(normalizedKey) ||
+    PREWRITTEN_FLOW_PLAN_MAP.get(flowKey);
   if (!flow) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
+
+  const flowRandomSessions = new Map();
+  const flowRng = typeof options.rng === "function" ? options.rng : Math.random;
+  const selectMintForFlow = (randomMeta = {}) => {
+    let pool = TOKEN_CATALOG.filter((entry) => entry && entry.mint);
+    if (Array.isArray(randomMeta.poolTags) && randomMeta.poolTags.length > 0) {
+      const tagSet = new Set(
+        randomMeta.poolTags
+          .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : ""))
+          .filter((tag) => tag.length > 0)
+      );
+      pool = pool.filter((entry) =>
+        Array.isArray(entry.tags) && entry.tags.some((tag) => tagSet.has(tag))
+      );
+    }
+    if (Array.isArray(randomMeta.poolMints) && randomMeta.poolMints.length > 0) {
+      const allowed = new Set(
+        randomMeta.poolMints
+          .map((mint) => (typeof mint === "string" ? mint : null))
+          .filter(Boolean)
+      );
+      pool = pool.filter((entry) => allowed.has(entry.mint));
+    }
+    const excludeSet = new Set(
+      (randomMeta.excludeMints || [])
+        .map((mint) => (typeof mint === "string" ? normaliseSolMint(mint) : null))
+        .filter(Boolean)
+    );
+    const candidates = pool.filter((entry) => {
+      if (!entry || !entry.mint) return false;
+      const normalized = normaliseSolMint(entry.mint);
+      if (excludeSet.has(normalized)) return false;
+      return !SOL_LIKE_MINTS.has(entry.mint);
+    });
+    if (candidates.length === 0) {
+      return null;
+    }
+    const pickIndex = Math.floor(flowRng() * candidates.length) % candidates.length;
+    const pick = candidates[pickIndex] || candidates[0];
+    if (!pick) return null;
+    return {
+      mint: pick.mint,
+      symbol: pick.symbol,
+      decimals: pick.decimals ?? 6,
+    };
+  };
 
   let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
     ? options.wallets
@@ -7045,53 +7861,70 @@ async function runPrewrittenFlowCli(flowKey, options = {}) {
 
   const schedule = [];
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
-    for (const step of cycleTemplate) {
-      const stepRandomOptions = combineRandomMintOptions(
-        combinedRandomOptions,
-        step.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
-      );
-      const stepIndex = schedule.length;
-      const fromResult = resolveMintCandidate(step.fromMint, {
-        fallbackMint: currentMint,
-        rng: flowRng,
-        baseRandomOptions: stepRandomOptions,
-        label: `${flow.label} step ${stepIndex + 1} from`,
-      });
-      const resolvedFromMint = fromResult.mint;
-      const randomResolutions = [];
-      if (fromResult.resolution) {
-        const record = {
-          ...fromResult.resolution,
-          role: "from",
-          stepIndex,
-        };
-        randomResolutions.push(record);
-        if (resolutionHandler) resolutionHandler(record);
-      }
-
-      const toResult = resolveMintCandidate(step.toMint, {
-        rng: flowRng,
-        baseRandomOptions: stepRandomOptions,
-        disallowMints: [resolvedFromMint],
-        label: `${flow.label} step ${stepIndex + 1} to`,
-      });
-      const resolvedToMint = toResult.mint;
-      if (toResult.resolution) {
-        const record = {
-          ...toResult.resolution,
-          role: "to",
-          stepIndex,
-        };
-        randomResolutions.push(record);
-        if (resolutionHandler) resolutionHandler(record);
+    const sessionGroups = new Map();
+    for (let stepIndex = 0; stepIndex < cycleTemplate.length; stepIndex += 1) {
+      const step = cycleTemplate[stepIndex];
+      const fromMint = step.fromMint || currentMint;
+      const toMint = step.toMint;
+      if (!toMint) {
+        throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
 
       const amount = cloneFlowAmount(step.amount);
+      let randomization = null;
+      if (step.randomization) {
+        randomization = { ...step.randomization };
+        if (Array.isArray(step.randomization.poolTags)) {
+          randomization.poolTags = step.randomization.poolTags
+            .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : ""))
+            .filter((tag, idx, arr) => tag.length > 0 && arr.indexOf(tag) === idx);
+        }
+        if (Array.isArray(step.randomization.poolMints)) {
+          const seen = new Set();
+          randomization.poolMints = step.randomization.poolMints
+            .map((mint) => (typeof mint === "string" ? mint : null))
+            .filter((mint) => {
+              if (!mint || seen.has(mint)) return false;
+              seen.add(mint);
+              return true;
+            });
+        }
+        if (Array.isArray(step.randomization.excludeMints)) {
+          const seen = new Set();
+          randomization.excludeMints = step.randomization.excludeMints
+            .map((mint) => (typeof mint === "string" ? normaliseSolMint(mint) : null))
+            .filter((mint) => {
+              if (!mint || seen.has(mint)) return false;
+              seen.add(mint);
+              return true;
+            });
+        }
+        const groupLabel =
+          typeof randomization.sessionGroup === "string"
+            ? randomization.sessionGroup.trim()
+            : "";
+        if (groupLabel.length > 0) {
+          let assigned = sessionGroups.get(groupLabel);
+          if (!assigned) {
+            assigned = `${flow.key}-${groupLabel}-${cycleIndex}`;
+            sessionGroups.set(groupLabel, assigned);
+          }
+          randomization.sessionKey = assigned;
+        } else if (
+          typeof randomization.sessionKey === "string" &&
+          randomization.sessionKey.length > 0
+        ) {
+          randomization.sessionKey = `${randomization.sessionKey}-${cycleIndex}-${stepIndex}`;
+        } else {
+          randomization.sessionKey = `${flow.key}-${cycleIndex}-${stepIndex}`;
+        }
+      }
       const entry = {
         ...step,
         fromMint: resolvedFromMint,
         toMint: resolvedToMint,
         amount,
+        randomization,
       };
       if (randomResolutions.length > 0) {
         entry.randomResolutions = randomResolutions;
@@ -7166,16 +7999,30 @@ async function runPrewrittenFlowCli(flowKey, options = {}) {
     const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
+    let resolvedStep;
+    try {
+      resolvedStep = resolveRandomizedStep(step, flowRng, {
+        sessionState: flowRandomSessions,
+        selectMint: selectMintForFlow,
+      });
+    } catch (err) {
+      console.error(
+        paint(`  Flow hop skipped: ${err?.message || err}`, "warn")
+      );
+      continue;
+    }
+    const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
+    const resolvedToMint = resolvedStep?.outMint ?? step.toMint;
     const descriptionParts = [
       hopLabel,
-      `${describeMintLabel(step.fromMint)} → ${describeMintLabel(step.toMint)}`,
+      `${describeMintLabel(resolvedFromMint)} → ${describeMintLabel(resolvedToMint)}`,
       amountLabel,
     ];
     if (step.description) descriptionParts.push(`— ${step.description}`);
     console.log(paint(descriptionParts.join(" "), "info"));
 
     try {
-      await doSwapAcross(step.fromMint, step.toMint, normalizedAmount, {
+      await doSwapAcross(resolvedFromMint, resolvedToMint, normalizedAmount, {
         wallets: walletList,
         quietSkips: true,
         suppressMetadata: true,
@@ -7185,7 +8032,7 @@ async function runPrewrittenFlowCli(flowKey, options = {}) {
           options.walletDelayMs ??
           DELAY_BETWEEN_CALLS_MS,
       });
-      currentMint = step.toMint;
+      currentMint = resolvedToMint;
     } catch (err) {
       console.error(
         paint(`  Flow hop failed: ${err?.message || err}`, "error")
@@ -12074,8 +12921,7 @@ export {
   ensureAtaForMint,
   ensureWrappedSolBalance,
   resolveTokenProgramForMint,
+  resolveRandomCatalogMint,
   stepsFromMints,
-  pickRandomCatalogMint,
-  createDeterministicRng,
-  SOL_MINT,
+  snapshotTokenCatalog,
 };
