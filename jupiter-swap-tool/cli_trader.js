@@ -199,6 +199,222 @@ const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+
+const DEFAULT_RNG = Math.random;
+
+function normaliseRng(rng) {
+  return typeof rng === "function" ? rng : DEFAULT_RNG;
+}
+
+function randomFloat(rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
+  let value = generator();
+  if (!Number.isFinite(value)) value = 0;
+  if (value >= 1 || value <= -1) {
+    value = value % 1;
+  }
+  if (value < 0) value += 1;
+  if (value >= 1) value = 0;
+  return value;
+}
+
+function randomIntInclusive(minValue, maxValue, rng = DEFAULT_RNG) {
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    return 0;
+  }
+  const lower = Math.ceil(Math.min(minValue, maxValue));
+  const upper = Math.floor(Math.max(minValue, maxValue));
+  if (upper <= lower) return lower;
+  const span = upper - lower + 1;
+  const pick = Math.floor(randomFloat(rng) * span);
+  return lower + Math.min(span - 1, pick);
+}
+
+function createDeterministicRng(seedInput) {
+  const seedString =
+    typeof seedInput === "string"
+      ? seedInput
+      : JSON.stringify(seedInput ?? "");
+  let h = 1779033703 ^ seedString.length;
+  for (let i = 0; i < seedString.length; i += 1) {
+    h = Math.imul(h ^ seedString.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return function deterministicRng() {
+    h = Math.imul(h ^ (h >>> 16), 2246822507);
+    h = Math.imul(h ^ (h >>> 13), 3266489909);
+    const result = (h ^= h >>> 16) >>> 0;
+    return result / 4294967296;
+  };
+}
+
+const EMPTY_RANDOM_MINT_OPTIONS = Object.freeze({
+  includeTags: [],
+  excludeTags: [],
+  excludeMints: [],
+  excludeSymbols: [],
+  allowSol: false,
+  matchAnyTags: false,
+});
+
+function normaliseTagList(tags) {
+  if (!tags) return [];
+  const list = Array.isArray(tags) ? tags : [tags];
+  return list
+    .map((tag) =>
+      typeof tag === "string" ? tag.trim().toLowerCase() : ""
+    )
+    .filter((tag) => tag.length > 0);
+}
+
+function normaliseSymbolList(symbols) {
+  if (!symbols) return [];
+  const list = Array.isArray(symbols) ? symbols : [symbols];
+  return list
+    .map((symbol) =>
+      typeof symbol === "string" ? symbol.trim().toUpperCase() : ""
+    )
+    .filter((symbol) => symbol.length > 0);
+}
+
+function normaliseMintValue(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  try {
+    return new PublicKey(trimmed).toBase58();
+  } catch (_) {
+    return trimmed;
+  }
+}
+
+function normaliseMintList(values) {
+  if (!values) return [];
+  const list = Array.isArray(values) ? values : [values];
+  const result = [];
+  for (const value of list) {
+    const normalised = normaliseMintValue(
+      typeof value === "string" ? value : String(value ?? "")
+    );
+    if (normalised) result.push(normalised);
+  }
+  return result;
+}
+
+function normaliseRandomMintOptions(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...EMPTY_RANDOM_MINT_OPTIONS };
+  }
+  const includeTags = normaliseTagList(
+    raw.includeTags ?? raw.tags ?? raw.withTags
+  );
+  const excludeTags = normaliseTagList(raw.excludeTags ?? raw.withoutTags);
+  const excludeMints = normaliseMintList(raw.excludeMints ?? raw.exclude);
+  const excludeSymbols = normaliseSymbolList(raw.excludeSymbols);
+  const allowSol = raw.allowSol === true;
+  const matchAnyTags =
+    raw.matchAnyTags === true ||
+    raw.matchAny === true ||
+    raw.anyTag === true;
+  return {
+    includeTags,
+    excludeTags,
+    excludeMints,
+    excludeSymbols,
+    allowSol,
+    matchAnyTags,
+  };
+}
+
+function combineRandomMintOptions(...sources) {
+  const combined = {
+    includeTags: new Set(),
+    excludeTags: new Set(),
+    excludeMints: new Set(),
+    excludeSymbols: new Set(),
+    allowSol: false,
+    matchAnyTags: false,
+  };
+  for (const source of sources) {
+    if (!source || typeof source !== "object") continue;
+    const normalised = normaliseRandomMintOptions(source);
+    for (const tag of normalised.includeTags) combined.includeTags.add(tag);
+    for (const tag of normalised.excludeTags) combined.excludeTags.add(tag);
+    for (const mint of normalised.excludeMints)
+      combined.excludeMints.add(mint);
+    for (const symbol of normalised.excludeSymbols)
+      combined.excludeSymbols.add(symbol);
+    if (normalised.allowSol) combined.allowSol = true;
+    if (normalised.matchAnyTags) combined.matchAnyTags = true;
+  }
+  return {
+    includeTags: Array.from(combined.includeTags),
+    excludeTags: Array.from(combined.excludeTags),
+    excludeMints: Array.from(combined.excludeMints),
+    excludeSymbols: Array.from(combined.excludeSymbols),
+    allowSol: combined.allowSol,
+    matchAnyTags: combined.matchAnyTags,
+  };
+}
+
+function parseRandomMintRequest(raw) {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return null;
+    if (trimmed.toLowerCase() !== "random") return null;
+    return {
+      placeholder: raw,
+      ...EMPTY_RANDOM_MINT_OPTIONS,
+    };
+  }
+  if (typeof raw === "object") {
+    const mode =
+      typeof raw.mode === "string" ? raw.mode.trim().toLowerCase() : null;
+    const mintField =
+      typeof raw.mint === "string" ? raw.mint.trim().toLowerCase() : null;
+    const randomFlag =
+      raw.random === true ||
+      mode === "random" ||
+      mintField === "random";
+    if (!randomFlag) return null;
+    const options = normaliseRandomMintOptions(raw);
+    return {
+      placeholder: raw,
+      ...options,
+    };
+  }
+  return null;
+}
+
+function resolveRandomMintRequest(request, context = {}) {
+  const baseOptions = combineRandomMintOptions(
+    EMPTY_RANDOM_MINT_OPTIONS,
+    context.baseOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    request || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const additionalExclusions = normaliseMintList(
+    context.additionalExclusions || []
+  );
+  const excludeMints = new Set([
+    ...baseOptions.excludeMints,
+    ...additionalExclusions,
+  ]);
+  const entry = pickRandomCatalogMint({
+    includeTags: baseOptions.includeTags,
+    matchAnyTags: baseOptions.matchAnyTags,
+    excludeTags: baseOptions.excludeTags,
+    excludeMints: Array.from(excludeMints),
+    excludeSymbols: baseOptions.excludeSymbols,
+    allowSol: baseOptions.allowSol,
+    rng: context.rng,
+  });
+  return {
+    entry,
+    options: baseOptions,
+  };
+}
+
 const clamp = (value, min, max) => {
   if (Number.isNaN(value)) return min;
   if (!Number.isFinite(value)) return max;
@@ -823,6 +1039,51 @@ function mintBySymbol(symbol, fallbackMint) {
   if (token && token.mint) return token.mint;
   if (fallbackMint) return fallbackMint;
   throw new Error(`Token catalog is missing symbol ${symbol}`);
+}
+
+function pickRandomCatalogMint(options = {}) {
+  const normalized = normaliseRandomMintOptions(options);
+  const allowSol = options.allowSol === true || normalized.allowSol === true;
+  const matchAnyTags =
+    options.matchAnyTags === true || normalized.matchAnyTags === true;
+  const includeTags = normalized.includeTags;
+  const excludeTags = normalized.excludeTags;
+  const excludeSymbols = new Set(normalized.excludeSymbols);
+  const excludeMints = new Set(normalized.excludeMints);
+  const rng = options.rng;
+
+  const candidates = TOKEN_CATALOG.filter((entry) => {
+    if (!entry || typeof entry.mint !== "string") return false;
+    if (!allowSol && SOL_LIKE_MINTS.has(entry.mint)) return false;
+    if (excludeMints.has(entry.mint)) return false;
+    if (entry.symbol && excludeSymbols.has(entry.symbol)) return false;
+    const tags = Array.isArray(entry.tags) ? entry.tags : [];
+    if (includeTags.length > 0) {
+      if (matchAnyTags) {
+        if (!includeTags.some((tag) => tags.includes(tag))) return false;
+      } else {
+        for (const tag of includeTags) {
+          if (!tags.includes(tag)) return false;
+        }
+      }
+    }
+    if (excludeTags.length > 0) {
+      for (const tag of excludeTags) {
+        if (tags.includes(tag)) return false;
+      }
+    }
+    return true;
+  });
+
+  if (candidates.length === 0) {
+    throw new Error("No matching tokens found in catalog for random selection");
+  }
+
+  const index = Math.min(
+    candidates.length - 1,
+    Math.floor(randomFloat(rng) * candidates.length)
+  );
+  return candidates[index];
 }
 
 async function loadJupiterTokenMap() {
@@ -3917,6 +4178,18 @@ function listTokenCatalog(options = {}) {
   }
 }
 
+function logRandomMintResolution(resolution) {
+  if (!resolution || !resolution.entry) return;
+  const descriptor = resolution.entry.symbol
+    ? `${resolution.entry.symbol} (${resolution.entry.mint})`
+    : resolution.entry.mint;
+  const label =
+    typeof resolution.label === "string" && resolution.label.length > 0
+      ? ` (${resolution.label})`
+      : "";
+  console.log(paint(`  Random mint resolved${label}: ${descriptor}`, "muted"));
+}
+
 function logDetailedError(prefix, err) {
   const baseMsg = err?.message || String(err);
   const key = `${prefix}::${baseMsg}`;
@@ -4270,17 +4543,8 @@ const extractDurationOverride = (options, candidates) => {
   return null;
 };
 
-const pickIntInclusive = (rng, min, max) => {
-  const floorMin = Math.round(min);
-  const floorMax = Math.round(max);
-  if (floorMax <= floorMin) {
-    return floorMin;
-  }
-  const random = typeof rng === "function" ? rng() : Math.random();
-  const span = floorMax - floorMin + 1;
-  const pick = Math.floor(random * span);
-  return floorMin + pick;
-};
+const pickIntInclusive = (rng, min, max) =>
+  randomIntInclusive(min, max, rng);
 
 const applyScalingToSegments = (segments, rawTotal, target) => {
   if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
@@ -4412,7 +4676,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   loops = Math.floor(loops);
   if (loops <= 0) loops = 1;
 
-  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const rng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const sampledSegments = [];
   for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
@@ -4512,10 +4779,12 @@ function balanceRpcDelay() {
   return delay(BALANCE_RPC_DELAY_MS);
 }
 
-function shuffleArray(array) {
+function shuffleArray(array, rng = DEFAULT_RNG) {
+  const generator = normaliseRng(rng);
   const result = [...array];
   for (let i = result.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const randomValue = randomFloat(generator);
+    const j = Math.floor(randomValue * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
@@ -5616,6 +5885,51 @@ function normaliseSolMint(mint) {
   return SOL_LIKE_MINTS.has(mint) ? SOL_MINT : mint;
 }
 
+function resolveMintCandidate(rawMint, context = {}) {
+  const {
+    fallbackMint = null,
+    rng = DEFAULT_RNG,
+    baseRandomOptions = EMPTY_RANDOM_MINT_OPTIONS,
+    disallowMints = [],
+    label = null,
+  } = context;
+
+  let candidate = rawMint;
+  if (
+    candidate === undefined ||
+    candidate === null ||
+    (typeof candidate === "string" && candidate.trim().length === 0)
+  ) {
+    candidate = fallbackMint;
+  }
+
+  if (candidate === undefined || candidate === null) {
+    throw new Error("Mint candidate is undefined and no fallback provided");
+  }
+
+  const request = parseRandomMintRequest(candidate);
+  if (!request) {
+    const resolved =
+      typeof candidate === "string" ? candidate : String(candidate);
+    return { mint: normaliseSolMint(resolved), resolution: null };
+  }
+
+  const { entry } = resolveRandomMintRequest(request, {
+    baseOptions: baseRandomOptions,
+    additionalExclusions: disallowMints,
+    rng,
+  });
+
+  return {
+    mint: normaliseSolMint(entry.mint),
+    resolution: {
+      placeholder: request.placeholder,
+      entry,
+      label,
+    },
+  };
+}
+
 const CREW1_CYCLE_TOKENS = [
   { mint: POPCAT_MINT, symbol: 'POPCAT' },
   { mint: PUMP_MINT, symbol: 'PUMP' },
@@ -5676,26 +5990,91 @@ const BUCKSHOT_TOKEN_MINTS = Array.from(
 function stepsFromMints(mints, options = {}) {
   const steps = [];
   if (!Array.isArray(mints) || mints.length < 2) return steps;
-  for (let i = 0; i < mints.length - 1; i += 1) {
-    const from = normaliseSolMint(mints[i]);
-    const to = normaliseSolMint(mints[i + 1]);
+
+  const rng = normaliseRng(options.rng);
+  const baseRandomOptions = normaliseRandomMintOptions(
+    options.randomMintOptions
+  );
+  const logRandomResolutions = options.logRandomResolutions !== false;
+  const onRandomMintResolved =
+    typeof options.onRandomMintResolved === "function"
+      ? options.onRandomMintResolved
+      : null;
+
+  const resolvedMints = [];
+  const randomResolutionByIndex = new Map();
+
+  for (let i = 0; i < mints.length; i += 1) {
+    const previousMint = resolvedMints[resolvedMints.length - 1] ?? null;
+    const nextRaw = i + 1 < mints.length ? mints[i + 1] : null;
+    const nextRequest = parseRandomMintRequest(nextRaw);
+    const nextFixed =
+      !nextRequest && typeof nextRaw === "string" && nextRaw.length > 0
+        ? normaliseSolMint(nextRaw)
+        : null;
+
+    const disallow = [];
+    if (previousMint) disallow.push(previousMint);
+    if (nextFixed) disallow.push(nextFixed);
+
+    const label = `path index ${i}`;
+    const { mint, resolution } = resolveMintCandidate(mints[i], {
+      fallbackMint: i > 0 ? previousMint : null,
+      rng,
+      baseRandomOptions,
+      disallowMints: disallow,
+      label,
+    });
+    resolvedMints.push(mint);
+
+    if (resolution) {
+      const record = { ...resolution, index: i, label };
+      randomResolutionByIndex.set(i, record);
+      if (onRandomMintResolved) {
+        onRandomMintResolved(record);
+      } else if (logRandomResolutions) {
+        logRandomMintResolution(record);
+      }
+    }
+  }
+
+  for (let i = 0; i < resolvedMints.length - 1; i += 1) {
+    const from = normaliseSolMint(resolvedMints[i]);
+    const to = normaliseSolMint(resolvedMints[i + 1]);
     if (from === to) continue;
-    steps.push({
+    const step = {
       from,
       to,
       description: `${symbolForMint(from)} -> ${symbolForMint(to)}`,
       forceAll: options.forceAll === true,
-    });
+    };
+    const randomDetails = [];
+    const fromResolution = randomResolutionByIndex.get(i);
+    if (fromResolution) {
+      randomDetails.push({ ...fromResolution, role: "from" });
+    }
+    const toResolution = randomResolutionByIndex.get(i + 1);
+    if (toResolution) {
+      randomDetails.push({ ...toResolution, role: "to" });
+    }
+    if (randomDetails.length > 0) {
+      step.randomResolutions = randomDetails;
+    }
+    steps.push(step);
   }
+
   return steps;
 }
 
-function flattenSegmentsToSteps(segments) {
+function flattenSegmentsToSteps(segments, options = {}) {
   const steps = [];
   for (const segment of segments) {
-    steps.push(
-      ...stepsFromMints(segment.mints, { forceAll: segment.forceAll })
-    );
+    const stepOptions = {
+      ...options,
+      forceAll:
+        segment.forceAll === true || options.forceAll === true,
+    };
+    steps.push(...stepsFromMints(segment.mints, stepOptions));
   }
   return steps;
 }
@@ -5714,15 +6093,16 @@ function determineAutomationAmountArg(forceAll = false) {
 // Choose which swap segments a wallet should execute. Random mode ensures
 // every wallet performs a meaningful number of swaps by expanding the subset
 // when the dice roll comes back too small.
-function selectSegmentsForWallet(randomMode) {
+function selectSegmentsForWallet(randomMode, options = {}) {
   if (!randomMode) return LONG_CHAIN_SEGMENTS_BASE;
-  const shuffled = shuffleArray(LONG_CHAIN_SEGMENTS_BASE);
+  const rng = normaliseRng(options.rng);
+  const shuffled = shuffleArray(LONG_CHAIN_SEGMENTS_BASE, rng);
   const maxSegments = LONG_CHAIN_SEGMENTS_BASE.length;
   const minSegments = Math.min(2, maxSegments);
   for (let attempt = 0; attempt < maxSegments; attempt += 1) {
-    const chosenCount = randomIntInclusive(minSegments, maxSegments);
+    const chosenCount = randomIntInclusive(minSegments, maxSegments, rng);
     const candidate = shuffled.slice(0, chosenCount);
-    if (flattenSegmentsToSteps(candidate).length >= 3) {
+    if (flattenSegmentsToSteps(candidate, { logRandomResolutions: false }).length >= 3) {
       return candidate;
     }
   }
@@ -5732,17 +6112,25 @@ function selectSegmentsForWallet(randomMode) {
 // Generates the optional post-chain random sweep path. Ensures at least
 // three hops so the run is meaningful, falling back to the full token list
 // if random selection still ends up too short.
-function buildSecondaryPathMints(randomMode) {
+function buildSecondaryPathMints(randomMode, options = {}) {
   if (!randomMode) {
     return [SOL_MINT, DEFAULT_USDC_MINT];
   }
+  const rng = normaliseRng(options.rng);
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const terminal = SECONDARY_TERMINALS[randomIntInclusive(0, SECONDARY_TERMINALS.length - 1)];
+    const terminal = SECONDARY_TERMINALS[
+      randomIntInclusive(0, SECONDARY_TERMINALS.length - 1, rng)
+    ];
     const pool = shuffleArray(
-      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal)
+      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal),
+      rng
     );
     const maxIntermediates = Math.min(SECONDARY_RANDOM_POOL.length, pool.length);
-    let intermediateCount = randomIntInclusive(1, Math.max(1, maxIntermediates));
+    let intermediateCount = randomIntInclusive(
+      1,
+      Math.max(1, maxIntermediates),
+      rng
+    );
     const intermediates = pool.slice(0, intermediateCount);
     const path = [SOL_MINT, ...intermediates, terminal];
     const deduped = [];
@@ -5955,15 +6343,34 @@ async function runLongCircle(options = {}) {
 
   const plans = await measureAsync("long-circle:plan-wallets", async () => {
     const built = wallets.map((wallet) => {
-      let segments = selectSegmentsForWallet(randomMode);
-      let steps = flattenSegmentsToSteps(segments);
+      const walletSeed = wallet.kp.publicKey.toBase58();
+      const segmentsSeed = `${walletSeed}:long-circle:segments`;
+      let segments = selectSegmentsForWallet(randomMode, {
+        rng: createDeterministicRng(segmentsSeed),
+      });
+
+      const evaluateSteps = (segmentList, label) =>
+        flattenSegmentsToSteps(segmentList, {
+          rng: createDeterministicRng(`${walletSeed}:long-circle:${label}`),
+          logRandomResolutions: false,
+        });
+
+      let steps = evaluateSteps(segments, "steps-eval");
       if (randomMode && steps.length < 3) {
         const extended = new Set(segments);
+        let attempt = 0;
         for (const segment of LONG_CHAIN_SEGMENTS_BASE) {
-          if (extended.has(segment)) continue;
+          if (extended.has(segment)) {
+            attempt += 1;
+            continue;
+          }
           extended.add(segment);
           const candidateSegments = Array.from(extended);
-          const candidateSteps = flattenSegmentsToSteps(candidateSegments);
+          const candidateSteps = evaluateSteps(
+            candidateSegments,
+            `candidate-${attempt}`
+          );
+          attempt += 1;
           if (candidateSteps.length >= 3) {
             segments = candidateSegments;
             steps = candidateSteps;
@@ -5971,10 +6378,14 @@ async function runLongCircle(options = {}) {
           }
         }
       }
+
+      const finalSteps = flattenSegmentsToSteps(segments, {
+        rng: createDeterministicRng(`${walletSeed}:long-circle:steps-final`),
+      });
       return {
         wallet,
-        steps,
-        summary: describeStepSequence(steps),
+        steps: finalSteps,
+        summary: describeStepSequence(finalSteps),
         skipRegistry: new Set(),
       };
     });
@@ -5996,8 +6407,17 @@ async function runLongCircle(options = {}) {
     if (enableSecondary) {
       console.log(paint('\n-- secondary random order sweep --', 'label'));
       for (const plan of plans) {
-        const secondaryPath = buildSecondaryPathMints(randomMode);
-        const secondarySteps = stepsFromMints(secondaryPath);
+        const walletSeed = plan.wallet.kp.publicKey.toBase58();
+        const secondaryPath = buildSecondaryPathMints(randomMode, {
+          rng: createDeterministicRng(
+            `${walletSeed}:long-circle:secondary-path`
+          ),
+        });
+        const secondarySteps = stepsFromMints(secondaryPath, {
+          rng: createDeterministicRng(
+            `${walletSeed}:long-circle:secondary-steps`
+          ),
+        });
         if (secondarySteps.length === 0) continue;
         const summary = describeStepSequence(secondarySteps);
         console.log(
@@ -6289,7 +6709,7 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
-const PREWRITTEN_FLOW_DEFINITIONS = new Map([
+const PREWRITTEN_FLOW_DEFINITIONS_MAP = new Map([
   [
     "arpeggio",
     {
@@ -6350,11 +6770,11 @@ function normalizePrewrittenFlowKey(key) {
   return key.trim().toLowerCase();
 }
 
-function sampleIntegerInRange(minValue, maxValue) {
+function sampleIntegerInRange(minValue, maxValue, rng = DEFAULT_RNG) {
   const min = Math.max(0, Math.floor(minValue));
   const max = Math.max(min, Math.floor(maxValue));
   if (max === min) return min;
-  return min + Math.floor(Math.random() * (max - min + 1));
+  return randomIntInclusive(min, max, rng);
 }
 
 function formatDurationMs(totalMs) {
@@ -6370,7 +6790,7 @@ function formatDurationMs(totalMs) {
   return parts.join(" ");
 }
 
-function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
+function allocateHopDelays(totalDurationMs, hopCount, options = {}, rng = DEFAULT_RNG) {
   const count = Math.max(0, hopCount | 0);
   const delays = new Array(count).fill(0);
   if (count === 0) return delays;
@@ -6386,7 +6806,7 @@ function allocateHopDelays(totalDurationMs, hopCount, options = {}) {
       ? null
       : Math.max(minMs, Math.floor(Number(rawMax) || 0));
 
-  const weights = Array.from({ length: count }, () => Math.random() + 0.01);
+  const weights = Array.from({ length: count }, () => randomFloat(rng) + 0.01);
   const weightTotal = weights.reduce((acc, value) => acc + value, 0);
   let allocated = 0;
   for (let i = 0; i < count; i += 1) {
@@ -6483,7 +6903,8 @@ function cloneFlowAmount(amount) {
   return amount;
 }
 
-function normalizeFlowAmount(amount) {
+function normalizeFlowAmount(amount, options = {}) {
+  const rng = options.rng;
   const source = cloneFlowAmount(amount);
   if (source === null || source === undefined) return null;
   if (typeof source === "string") {
@@ -6506,7 +6927,7 @@ function normalizeFlowAmount(amount) {
       if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
       const lower = Math.min(min, max);
       const upper = Math.max(min, max);
-      const sampled = lower + Math.random() * (upper - lower);
+      const sampled = lower + randomFloat(rng) * (upper - lower);
       return sampled.toString();
     }
     if (source.value !== undefined && source.value !== null) {
@@ -6524,11 +6945,11 @@ function describeFlowAmount(normalizedAmount) {
   return `(amount ${normalizedAmount})`;
 }
 
-async function runPrewrittenFlow(flowKey, options = {}) {
+async function runPrewrittenFlowCli(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
-    PREWRITTEN_FLOW_DEFINITIONS.get(normalizedKey) ||
-    PREWRITTEN_FLOW_DEFINITIONS.get(flowKey);
+    PREWRITTEN_FLOW_DEFINITIONS_MAP.get(normalizedKey) ||
+    PREWRITTEN_FLOW_DEFINITIONS_MAP.get(flowKey);
   if (!flow) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
@@ -6548,9 +6969,13 @@ async function runPrewrittenFlow(flowKey, options = {}) {
     };
   }
 
-  const cycleTemplate = Array.isArray(flow.cycleTemplate) ? flow.cycleTemplate : [];
+  const cycleTemplate = Array.isArray(flow.cycleTemplate)
+    ? flow.cycleTemplate
+    : [];
   if (cycleTemplate.length === 0) {
-    throw new Error(`Prewritten flow ${flow.label} has no cycle template defined`);
+    throw new Error(
+      `Prewritten flow ${flow.label} has no cycle template defined`
+    );
   }
 
   const swapRange = flow.swapCountRange || {};
@@ -6558,11 +6983,22 @@ async function runPrewrittenFlow(flowKey, options = {}) {
   const rangeMin = Math.max(cycleLength, Math.floor(swapRange.min ?? cycleLength));
   const rangeMax = Math.max(rangeMin, Math.floor(swapRange.max ?? rangeMin));
   const overrideTarget = options.swapTarget ?? options.swapCount ?? null;
+
+  const seedSource =
+    walletList[0]?.kp?.publicKey?.toBase58?.() ?? flow.key ?? "prewritten";
+  const flowRng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${flow.key}:${seedSource}:flow`);
+
   let sampledTarget;
   if (overrideTarget !== null && overrideTarget !== undefined) {
-    sampledTarget = Math.max(rangeMin, Math.floor(Number(overrideTarget) || rangeMin));
+    sampledTarget = Math.max(
+      rangeMin,
+      Math.floor(Number(overrideTarget) || rangeMin)
+    );
   } else {
-    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax);
+    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax, flowRng);
   }
 
   const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
@@ -6575,24 +7011,93 @@ async function runPrewrittenFlow(flowKey, options = {}) {
   let cycles = Math.ceil(effectiveSwapTarget / cycleLength);
   if (cycles < minimumCycles) cycles = minimumCycles;
 
+  const combinedRandomOptions = combineRandomMintOptions(
+    flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
+    options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+  );
+  const logRandomResolutions = options.logRandomResolutions !== false;
+  const resolutionHandler =
+    typeof options.onRandomMintResolved === "function"
+      ? options.onRandomMintResolved
+      : logRandomResolutions
+      ? logRandomMintResolution
+      : null;
+
+  const startCandidate = pickFirstDefined(
+    options.startMint,
+    flow.startMint,
+    SOL_MINT
+  );
+  const startResult = resolveMintCandidate(startCandidate, {
+    fallbackMint: SOL_MINT,
+    rng: flowRng,
+    baseRandomOptions: combinedRandomOptions,
+    label: `${flow.label} start`,
+  });
+  let currentMint = startResult.mint;
+  if (startResult.resolution && resolutionHandler) {
+    resolutionHandler({
+      ...startResult.resolution,
+      role: "start",
+      stepIndex: -1,
+    });
+  }
+
   const schedule = [];
-  let currentMint = options.startMint || flow.startMint || SOL_MINT;
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     for (const step of cycleTemplate) {
-      const fromMint = step.fromMint || currentMint;
-      const toMint = step.toMint;
-      if (!toMint) {
-        throw new Error(`Flow ${flow.label} step is missing a toMint value`);
+      const stepRandomOptions = combineRandomMintOptions(
+        combinedRandomOptions,
+        step.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+      );
+      const stepIndex = schedule.length;
+      const fromResult = resolveMintCandidate(step.fromMint, {
+        fallbackMint: currentMint,
+        rng: flowRng,
+        baseRandomOptions: stepRandomOptions,
+        label: `${flow.label} step ${stepIndex + 1} from`,
+      });
+      const resolvedFromMint = fromResult.mint;
+      const randomResolutions = [];
+      if (fromResult.resolution) {
+        const record = {
+          ...fromResult.resolution,
+          role: "from",
+          stepIndex,
+        };
+        randomResolutions.push(record);
+        if (resolutionHandler) resolutionHandler(record);
       }
+
+      const toResult = resolveMintCandidate(step.toMint, {
+        rng: flowRng,
+        baseRandomOptions: stepRandomOptions,
+        disallowMints: [resolvedFromMint],
+        label: `${flow.label} step ${stepIndex + 1} to`,
+      });
+      const resolvedToMint = toResult.mint;
+      if (toResult.resolution) {
+        const record = {
+          ...toResult.resolution,
+          role: "to",
+          stepIndex,
+        };
+        randomResolutions.push(record);
+        if (resolutionHandler) resolutionHandler(record);
+      }
+
       const amount = cloneFlowAmount(step.amount);
       const entry = {
         ...step,
-        fromMint,
-        toMint,
+        fromMint: resolvedFromMint,
+        toMint: resolvedToMint,
         amount,
       };
+      if (randomResolutions.length > 0) {
+        entry.randomResolutions = randomResolutions;
+      }
       schedule.push(entry);
-      currentMint = toMint;
+      currentMint = resolvedToMint;
     }
   }
 
@@ -6625,7 +7130,8 @@ async function runPrewrittenFlow(flowKey, options = {}) {
   const perHopDelays = allocateHopDelays(
     requestedDurationMs,
     plannedSwaps,
-    waitOptions
+    waitOptions,
+    flowRng
   );
   const actualWaitTotal = perHopDelays.reduce((acc, value) => acc + value, 0);
 
@@ -6657,7 +7163,7 @@ async function runPrewrittenFlow(flowKey, options = {}) {
 
   for (let index = 0; index < schedule.length; index += 1) {
     const step = schedule[index];
-    const normalizedAmount = normalizeFlowAmount(step.amount);
+    const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
     const descriptionParts = [
@@ -11568,6 +12074,8 @@ export {
   ensureAtaForMint,
   ensureWrappedSolBalance,
   resolveTokenProgramForMint,
-  runPrewrittenFlow,
-  PREWRITTEN_FLOW_DEFINITIONS,
+  stepsFromMints,
+  pickRandomCatalogMint,
+  createDeterministicRng,
+  SOL_MINT,
 };
