@@ -75,11 +75,32 @@ function resolveWallet(options, fallbackWallet) {
       return providedWallet;
     }
     if (providedWallet.publicKey) {
-      return new ReadOnlyWallet(providedWallet.publicKey);
+      const coercedPublicKey = coercePublicKey(providedWallet.publicKey);
+      try {
+        providedWallet.publicKey = coercedPublicKey;
+        return providedWallet;
+      } catch (err) {
+        return new ReadOnlyWallet(coercedPublicKey);
+      }
     }
     return new ReadOnlyWallet(providedWallet);
   }
-  if (fallbackWallet) return fallbackWallet;
+  if (fallbackWallet) {
+    if (fallbackWallet.publicKey && !(fallbackWallet.publicKey instanceof PublicKey)) {
+      const coercedPublicKey = coercePublicKey(fallbackWallet.publicKey);
+      try {
+        fallbackWallet.publicKey = coercedPublicKey;
+        return fallbackWallet;
+      } catch (err) {
+        const clone = Object.create(Object.getPrototypeOf(fallbackWallet) || Object.prototype);
+        return Object.assign(clone, fallbackWallet, { publicKey: coercedPublicKey });
+      }
+    }
+    if (typeof fallbackWallet === "string" || isBytesLike(fallbackWallet)) {
+      return new ReadOnlyWallet(fallbackWallet);
+    }
+    return fallbackWallet;
+  }
   if (options?.publicKey) {
     return new ReadOnlyWallet(options.publicKey);
   }
