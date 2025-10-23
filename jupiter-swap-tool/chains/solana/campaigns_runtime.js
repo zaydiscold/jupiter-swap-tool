@@ -13,6 +13,7 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
   const scaled = Math.ceil(numeric * 1_000_000_000);
@@ -343,6 +344,7 @@ export function instantiateCampaignForWallets({
 
 let HOOKS = {
   getSolLamports: null,
+  getSplLamports: null,
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
@@ -356,16 +358,6 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
-  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
-  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-  const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
-  if (spendable <= 0n) {
-    throw new Error("insufficient spendable SOL");
-  }
-  const amountLamports = pickPortionLamports(rng, spendable);
-  if (amountLamports <= 0n) {
-    throw new Error("amount below dust floor");
-  }
   const inMint = logicalStep?.inMint;
   const outMint = logicalStep?.outMint;
   const useSolFallback = logicalStep?.fallbackToSOL === true;
@@ -375,6 +367,29 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   }
   if (!outMint) {
     throw new Error("missing out mint");
+  }
+  let spendable;
+  if (SOL_LIKE_MINTS.has(resolvedInMint)) {
+    const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+    const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+    spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+    if (spendable <= 0n) {
+      throw new Error("insufficient spendable SOL");
+    }
+  } else {
+    if (!HOOKS.getSplLamports) {
+      throw new Error("campaign hooks not registered");
+    }
+    const balanceLamportsRaw = await HOOKS.getSplLamports(pubkeyBase58, resolvedInMint);
+    const balanceLamports = BigInt(balanceLamportsRaw ?? 0);
+    spendable = balanceLamports > 0n ? balanceLamports : 0n;
+    if (spendable <= 0n) {
+      throw new Error("insufficient spendable balance");
+    }
+  }
+  const amountLamports = pickPortionLamports(rng, spendable);
+  if (amountLamports <= 0n) {
+    throw new Error("amount below dust floor");
   }
   return HOOKS.jupiterLiteSwap(pubkeyBase58, resolvedInMint, outMint, amountLamports);
 }
