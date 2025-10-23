@@ -171,12 +171,28 @@ export function buildTimedPlanForWallet({
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
   let logicalSteps = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
-    const chainLength = Math.max(safeTarget, 12);
-    const chain = planLongChainMints(rng, poolMints, chainLength);
-    logicalSteps = chain.map((entry) => ({
-      outMint: entry?.mint,
-      requiresAta: entry?.mint !== WSOL_MINT,
-    }));
+    const lapLength = Math.min(Math.max(safeTarget, 10), 25);
+    const chain = planLongChainMints(rng, poolMints, lapLength);
+    if (!chain.length) {
+      logicalSteps = [];
+    } else {
+      logicalSteps = [];
+      let previousOutMint = WSOL_MINT;
+      for (let idx = 0; idx < safeTarget; idx += 1) {
+        const hop = chain[idx % chain.length];
+        const outMint = hop?.mint;
+        if (!outMint) {
+          logicalSteps = [];
+          break;
+        }
+        logicalSteps.push({
+          inMint: idx === 0 ? WSOL_MINT : previousOutMint,
+          outMint,
+          requiresAta: outMint !== WSOL_MINT,
+        });
+        previousOutMint = outMint;
+      }
+    }
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
@@ -184,12 +200,14 @@ export function buildTimedPlanForWallet({
       logicalSteps = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
+        inMint: WSOL_MINT,
         outMint: picks[idx % picks.length].mint,
         requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
       }));
     }
   } else {
     logicalSteps = Array.from({ length: safeTarget }, () => ({
+      inMint: WSOL_MINT,
       outMint: poolMints[Math.floor(rng() * poolMints.length)]?.mint,
       requiresAta: true,
     }));
@@ -224,7 +242,7 @@ export function buildTimedPlanForWallet({
       schedule.push({
         kind: "checkpointToSOL",
         dueAt: dueAt + checkpointDelay,
-        logicalStep: { outMint: WSOL_MINT, requiresAta: false },
+        logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false },
         idx: idx + 0.1,
       });
     }
@@ -348,11 +366,17 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
+  const inMint = logicalStep?.inMint;
   const outMint = logicalStep?.outMint;
+  const useSolFallback = logicalStep?.fallbackToSOL === true;
+  const resolvedInMint = inMint || (useSolFallback ? WSOL_MINT : null);
+  if (!resolvedInMint) {
+    throw new Error("missing in mint");
+  }
   if (!outMint) {
     throw new Error("missing out mint");
   }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, resolvedInMint, outMint, amountLamports);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {
