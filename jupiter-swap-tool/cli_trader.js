@@ -547,6 +547,111 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
       },
     ]),
   }),
+  icarus: Object.freeze({
+    key: "icarus",
+    label: "Icarus",
+    description:
+      "Fast rotation that mirrors Arpeggio's pacing while sampling random catalog tokens each hop.",
+    defaultLoops: 1,
+    defaultDurationMs: 15 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "ignite",
+        label: "Ignition cadence",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+      {
+        key: "soar",
+        label: "Ascent shuffle",
+        segmentWaitsMs: segmentWindow(3, 5),
+      },
+      {
+        key: "apex",
+        label: "Apex recycle",
+        segmentWaitsMs: segmentWindow(4, 6),
+      },
+      {
+        key: "glide",
+        label: "Glide cooldown",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+    ]),
+  }),
+  zenith: Object.freeze({
+    key: "zenith",
+    label: "Zenith",
+    description:
+      "Hourly cadence companion to Horizon that rotates through randomised catalog picks.",
+    defaultLoops: 1,
+    defaultDurationMs: 60 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "glow",
+        label: "Glow block",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+      {
+        key: "rise",
+        label: "Rise push",
+        segmentWaitsMs: segmentWindow(10, 14),
+      },
+      {
+        key: "halo",
+        label: "Halo sustain",
+        segmentWaitsMs: segmentWindow(12, 18),
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(10, 16),
+      },
+      {
+        key: "anchor",
+        label: "Anchor wrap",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+    ]),
+  }),
+  aurora: Object.freeze({
+    key: "aurora",
+    label: "Aurora",
+    description:
+      "Echo's long-form schedule with dynamic mint sampling for each rotation leg.",
+    defaultLoops: 1,
+    defaultDurationMs: 6 * HOUR_MS,
+    legs: freezeLegs([
+      {
+        key: "spark",
+        label: "Spark accumulation",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+      {
+        key: "arc",
+        label: "Arc climb",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "zenith",
+        label: "Zenith crest",
+        segmentWaitsMs: segmentWindow(60, 90),
+      },
+      {
+        key: "drift",
+        label: "Drift glide",
+        segmentWaitsMs: segmentWindow(55, 95),
+      },
+      {
+        key: "veil",
+        label: "Veil fade",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "reset",
+        label: "Reset twilight",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+    ]),
+  }),
 });
 const LEND_SOL_BASE_PERCENT = BigInt(
   process.env.LEND_SOL_BASE_PERCENT
@@ -7866,7 +7971,14 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       const step = cycleTemplate[stepIndex];
       const fromMint = step.fromMint || currentMint;
       const toMint = step.toMint;
-      if (!toMint) {
+      const resolvedToMint = mintResolver.resolveMint(toMint, {
+        exclude: [
+          resolvedFromMint,
+          currentMint,
+          ...(Array.isArray(step.avoidMints) ? step.avoidMints : []),
+        ],
+      });
+      if (!resolvedToMint) {
         throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
 
