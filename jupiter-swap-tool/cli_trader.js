@@ -67,7 +67,7 @@ import {
 
 const TOOL_VERSION = "1.1.2";
 const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | flow run <arpeggio|horizon|echo|icarus|zenith|aurora> | force-reset-wallets";
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
@@ -325,6 +325,111 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
       {
         key: "twilight",
         label: "Twilight reset",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+    ]),
+  }),
+  icarus: Object.freeze({
+    key: "icarus",
+    label: "Icarus",
+    description:
+      "Fast rotation that mirrors Arpeggio's pacing while sampling random catalog tokens each hop.",
+    defaultLoops: 1,
+    defaultDurationMs: 15 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "ignite",
+        label: "Ignition cadence",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+      {
+        key: "soar",
+        label: "Ascent shuffle",
+        segmentWaitsMs: segmentWindow(3, 5),
+      },
+      {
+        key: "apex",
+        label: "Apex recycle",
+        segmentWaitsMs: segmentWindow(4, 6),
+      },
+      {
+        key: "glide",
+        label: "Glide cooldown",
+        segmentWaitsMs: segmentWindow(2, 4),
+      },
+    ]),
+  }),
+  zenith: Object.freeze({
+    key: "zenith",
+    label: "Zenith",
+    description:
+      "Hourly cadence companion to Horizon that rotates through randomised catalog picks.",
+    defaultLoops: 1,
+    defaultDurationMs: 60 * MINUTE_MS,
+    legs: freezeLegs([
+      {
+        key: "glow",
+        label: "Glow block",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+      {
+        key: "rise",
+        label: "Rise push",
+        segmentWaitsMs: segmentWindow(10, 14),
+      },
+      {
+        key: "halo",
+        label: "Halo sustain",
+        segmentWaitsMs: segmentWindow(12, 18),
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(10, 16),
+      },
+      {
+        key: "anchor",
+        label: "Anchor wrap",
+        segmentWaitsMs: segmentWindow(8, 12),
+      },
+    ]),
+  }),
+  aurora: Object.freeze({
+    key: "aurora",
+    label: "Aurora",
+    description:
+      "Echo's long-form schedule with dynamic mint sampling for each rotation leg.",
+    defaultLoops: 1,
+    defaultDurationMs: 6 * HOUR_MS,
+    legs: freezeLegs([
+      {
+        key: "spark",
+        label: "Spark accumulation",
+        segmentWaitsMs: segmentWindow(35, 55),
+      },
+      {
+        key: "arc",
+        label: "Arc climb",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "zenith",
+        label: "Zenith crest",
+        segmentWaitsMs: segmentWindow(60, 90),
+      },
+      {
+        key: "drift",
+        label: "Drift glide",
+        segmentWaitsMs: segmentWindow(55, 95),
+      },
+      {
+        key: "veil",
+        label: "Veil fade",
+        segmentWaitsMs: segmentWindow(45, 75),
+      },
+      {
+        key: "reset",
+        label: "Reset twilight",
         segmentWaitsMs: segmentWindow(35, 55),
       },
     ]),
@@ -6289,6 +6394,123 @@ async function runBuckshot() {
 /* Prewritten flows                                                           */
 /* -------------------------------------------------------------------------- */
 
+const FLOW_RANDOM_PLACEHOLDER = "RANDOM";
+const DEFAULT_RANDOM_MINT_TAGS = Object.freeze([
+  "crew-cycle",
+  "long-circle",
+  "secondary-pool",
+  "default-sweep",
+]);
+
+function normaliseFlowPlaceholder(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed.toUpperCase() : null;
+}
+
+function collectFlowRandomMintPool(flow) {
+  const explicit = Array.isArray(flow?.randomMintCandidates)
+    ? flow.randomMintCandidates
+        .map((mint) => (typeof mint === "string" ? mint.trim() : null))
+        .filter((mint) => mint && !SOL_LIKE_MINTS.has(mint))
+    : [];
+  const pool = new Set(explicit);
+  const tagCandidates = Array.isArray(flow?.randomMintTags) && flow.randomMintTags.length > 0
+    ? flow.randomMintTags
+        .map((tag) => (typeof tag === "string" ? tag.trim().toLowerCase() : null))
+        .filter(Boolean)
+    : DEFAULT_RANDOM_MINT_TAGS;
+
+  for (const entry of TOKEN_CATALOG) {
+    if (!entry || typeof entry.mint !== "string") continue;
+    const mint = entry.mint.trim();
+    if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+    const hasTag = tagCandidates.some((tag) => tokenHasTag(entry, tag));
+    if (hasTag) {
+      pool.add(mint);
+    }
+  }
+
+  if (pool.size === 0) {
+    for (const entry of TOKEN_CATALOG) {
+      if (!entry || typeof entry.mint !== "string") continue;
+      const mint = entry.mint.trim();
+      if (!mint || SOL_LIKE_MINTS.has(mint)) continue;
+      pool.add(mint);
+    }
+  }
+
+  return Array.from(pool);
+}
+
+function createFlowMintResolver(flow, options = {}) {
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const pool = collectFlowRandomMintPool(flow);
+  const used = new Set();
+  const baseExclusions = new Set(
+    [
+      ...(Array.isArray(flow?.randomMintExclusions) ? flow.randomMintExclusions : []),
+      ...(Array.isArray(options?.exclude) ? options.exclude : []),
+    ]
+      .map((mint) => (typeof mint === "string" ? mint.trim() : null))
+      .filter((mint) => mint && !SOL_LIKE_MINTS.has(mint))
+  );
+
+  const sampleRandomMint = (exclude = []) => {
+    if (pool.length === 0) {
+      throw new Error(
+        `Flow ${flow?.label || flow?.key || "unknown"} has no eligible random mint candidates`
+      );
+    }
+    const excludeSet = new Set(baseExclusions);
+    const additions = Array.isArray(exclude) ? exclude : [exclude];
+    for (const value of additions) {
+      if (typeof value !== "string") continue;
+      const trimmed = value.trim();
+      if (!trimmed) continue;
+      excludeSet.add(trimmed);
+    }
+
+    let candidates = pool.filter((mint) => !excludeSet.has(mint) && !used.has(mint));
+    if (candidates.length === 0) {
+      used.clear();
+      candidates = pool.filter((mint) => !excludeSet.has(mint));
+    }
+    if (candidates.length === 0) {
+      candidates = pool.slice();
+    }
+    const pickIndex = Math.floor(rng() * candidates.length);
+    const chosen = candidates[pickIndex] ?? pool[0];
+    if (chosen) {
+      used.add(chosen);
+    }
+    return chosen;
+  };
+
+  const resolveMint = (value, context = {}) => {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    if (normaliseFlowPlaceholder(trimmed) === FLOW_RANDOM_PLACEHOLDER) {
+      const exclusionList = Array.isArray(context.exclude)
+        ? context.exclude
+        : context.exclude !== undefined
+        ? [context.exclude]
+        : [];
+      return sampleRandomMint(
+        exclusionList
+          .map((mint) => (typeof mint === "string" ? mint.trim() : null))
+          .filter((mint) => mint && !SOL_LIKE_MINTS.has(mint))
+      );
+    }
+    return trimmed;
+  };
+
+  return {
+    resolveMint,
+  };
+}
+
 const PREWRITTEN_FLOW_DEFINITIONS = new Map([
   [
     "arpeggio",
@@ -6341,6 +6563,123 @@ const PREWRITTEN_FLOW_DEFINITIONS = new Map([
       requireTerminalSolHop: true,
       waitBoundsMs: { min: 45_000, max: 120_000 },
       defaultDurationMs: 45 * 60 * 1000,
+    },
+  ],
+  [
+    "icarus",
+    {
+      key: "icarus",
+      label: "Icarus",
+      description:
+        "Catalog-randomised analogue to Arpeggio that keeps SOL as the anchor between exploratory hops.",
+      startMint: SOL_MINT,
+      randomMintTags: ["crew-cycle", "long-circle", "secondary-pool"],
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: null,
+          description: "Seed a catalog sample from SOL reserves",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Pivot into a second sampled mint",
+        },
+        {
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Collapse the rotation back into SOL",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Fan out into a fresh catalog draw",
+        },
+      ],
+      swapCountRange: { min: 10, max: 100 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 2 * MINUTE_MS, max: 6 * MINUTE_MS },
+      defaultDurationMs: 15 * MINUTE_MS,
+    },
+  ],
+  [
+    "zenith",
+    {
+      key: "zenith",
+      label: "Zenith",
+      description:
+        "Hourly random rotation inspired by Horizon with SOL consolidation between catalog picks.",
+      startMint: SOL_MINT,
+      randomMintTags: ["crew-cycle", "long-circle", "secondary-pool"],
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: null,
+          description: "Stage a long-form run with a catalog sample",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Rotate into a complementary sampled mint",
+        },
+        {
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest gains back to SOL to reset risk",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Redeploy part of the SOL stack into a new catalog mint",
+        },
+      ],
+      swapCountRange: { min: 16, max: 160 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 8 * MINUTE_MS, max: 18 * MINUTE_MS },
+      defaultDurationMs: 60 * MINUTE_MS,
+    },
+  ],
+  [
+    "aurora",
+    {
+      key: "aurora",
+      label: "Aurora",
+      description:
+        "Echo-length expedition that re-samples catalog mints each leg while always orbiting SOL.",
+      startMint: SOL_MINT,
+      randomMintTags: ["crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: null,
+          description: "Open the long-form loop with a sampled mint",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Shift into another catalog selection for depth",
+        },
+        {
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Re-base to SOL mid-cycle",
+        },
+        {
+          toMint: FLOW_RANDOM_PLACEHOLDER,
+          amount: "random",
+          description: "Diversify again with a fresh catalog draw",
+        },
+      ],
+      swapCountRange: { min: 24, max: 240 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 35 * MINUTE_MS, max: 95 * MINUTE_MS },
+      defaultDurationMs: 6 * HOUR_MS,
     },
   ],
 ]);
@@ -6533,6 +6872,15 @@ async function runPrewrittenFlow(flowKey, options = {}) {
     throw new Error(`Unknown prewritten flow: ${flowKey}`);
   }
 
+  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const resolverBaseExclusions = [flow.startMint, options.startMint]
+    .map((mint) => (typeof mint === "string" ? mint.trim() : null))
+    .filter((mint) => mint && !SOL_LIKE_MINTS.has(mint));
+  const mintResolver = createFlowMintResolver(flow, {
+    rng,
+    exclude: resolverBaseExclusions,
+  });
+
   let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
     ? options.wallets
     : listWallets();
@@ -6579,20 +6927,31 @@ async function runPrewrittenFlow(flowKey, options = {}) {
   let currentMint = options.startMint || flow.startMint || SOL_MINT;
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     for (const step of cycleTemplate) {
-      const fromMint = step.fromMint || currentMint;
+      const baseFromMint = step.fromMint || currentMint;
+      const resolvedFromMint =
+        mintResolver.resolveMint(baseFromMint, {
+          exclude: [currentMint],
+        }) || baseFromMint || currentMint;
       const toMint = step.toMint;
-      if (!toMint) {
+      const resolvedToMint = mintResolver.resolveMint(toMint, {
+        exclude: [
+          resolvedFromMint,
+          currentMint,
+          ...(Array.isArray(step.avoidMints) ? step.avoidMints : []),
+        ],
+      });
+      if (!resolvedToMint) {
         throw new Error(`Flow ${flow.label} step is missing a toMint value`);
       }
       const amount = cloneFlowAmount(step.amount);
       const entry = {
         ...step,
-        fromMint,
-        toMint,
+        fromMint: resolvedFromMint,
+        toMint: resolvedToMint,
         amount,
       };
       schedule.push(entry);
-      currentMint = toMint;
+      currentMint = resolvedToMint;
     }
   }
 
