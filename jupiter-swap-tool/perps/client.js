@@ -35,6 +35,17 @@ function coercePublicKey(value) {
   if (value instanceof PublicKey) {
     return value;
   }
+  if (typeof value?.toBase58 === "function") {
+    const base58 = String(value.toBase58()).trim();
+    if (!base58) {
+      return ZERO_PUBKEY;
+    }
+    try {
+      return new PublicKey(base58);
+    } catch (err) {
+      throw new Error(`Failed to parse public key from base58: ${err.message}`);
+    }
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -83,7 +94,8 @@ function resolveWallet(options, fallbackWallet) {
         return new ReadOnlyWallet(coercedPublicKey);
       }
     }
-    return new ReadOnlyWallet(providedWallet);
+
+    return new ReadOnlyWallet(normalizedPublicKey);
   }
   if (fallbackWallet) {
     if (fallbackWallet.publicKey && !(fallbackWallet.publicKey instanceof PublicKey)) {
