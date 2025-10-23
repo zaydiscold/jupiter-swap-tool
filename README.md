@@ -183,6 +183,10 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 - `perps keeper fulfil [--path <config>] [--tag <label>]` – load `perps_config.json`, scan for orders that require off-chain keeper fulfilment (reduce-only exits, take-profit triggers, etc.), and submit them using the designated keeper wallet. Combine with `PERPS_KEEPER_ONLY=1` to run passive monitoring without direct trading commands.
 - `tokens --refresh` – force-refresh the token catalog via Jupiter Tokens API v2 before printing (fallback/local entries remain merged in).
 
+### Prewritten flows
+
+Automation presets (for example the Arpeggio rotation) are backed by `runPrewrittenFlow`. Each flow now owns a `swapCountRange` describing the hop window it should randomise across and an optional `requireTerminalSolHop` flag to guarantee the final leg returns to SOL. When invoked, the helper samples a hop target inside the declared range, converts it into whole cycles (six hops per cycle for Arpeggio), and enforces the per-flow minimum so runs never look abnormally short. The requested session duration is partitioned into random per-hop waits so the cumulative pause budget stays close to the operator’s target while still injecting jitter between swaps.
+
 All swap commands print:
 - Input/output mint metadata (program ID + decimals).
 - Chosen amount per wallet plus SOL/token balance deltas after every confirmed swap (makes P/L obvious).
