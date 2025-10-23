@@ -4267,6 +4267,9 @@ function ensureCampaignHooksRegistered() {
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },
+    getSplBalanceLamports: async (pubkeyBase58, mint) => {
+      return campaignGetSplBalanceLamports(pubkeyBase58, mint);
+    },
   });
   campaignHooksRegistered = true;
 }
@@ -4411,6 +4414,35 @@ async function campaignFindLargestHolding(pubkeyBase58) {
     }
     if (!best) return null;
     return { mint: best.mint, uiAmount: best.uiAmount, decimals: best.decimals };
+  } finally {
+    try {
+      connection?.destroy?.();
+    } catch (_) {}
+  }
+}
+
+async function campaignGetSplBalanceLamports(pubkeyBase58, mint) {
+  if (!mint) {
+    return 0n;
+  }
+  const entry = getCampaignWallet(pubkeyBase58);
+  const owner = entry.wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  try {
+    const parsed = await getAllParsedTokenAccounts(connection, owner);
+    let total = 0n;
+    for (const { account } of parsed) {
+      const info = account?.data?.parsed?.info;
+      if (!info) continue;
+      if (info.mint !== mint) continue;
+      const rawAmount = info.tokenAmount?.amount ?? "0";
+      try {
+        total += BigInt(rawAmount);
+      } catch (_) {
+        continue;
+      }
+    }
+    return total;
   } finally {
     try {
       connection?.destroy?.();
