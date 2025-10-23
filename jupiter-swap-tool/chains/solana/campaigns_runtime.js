@@ -3,6 +3,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
+export const RANDOM_MINT_PLACEHOLDER = "RANDOM";
 export const MAX_INFLIGHT = 4;
 export const JITTER_FRACTION = 0.6;
 export const CHECKPOINT_SOL_EVERY_MIN = 5;
@@ -15,6 +16,7 @@ export const ATA_RENT_EST_SOL = 0.002;
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 const RANDOM_PLACEHOLDER = "RANDOM";
 const RANDOM_HOPS_KIND = "random-hop-rotation";
+const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
   const scaled = Math.ceil(numeric * 1_000_000_000);
@@ -26,6 +28,7 @@ const WALLET_MIN_REST_LAMPORTS = SOL_TO_LAMPORTS(WALLET_MIN_REST_SOL);
 const ATA_RENT_EST_LAMPORTS = SOL_TO_LAMPORTS(ATA_RENT_EST_SOL);
 const FEE_LAMPORTS = SOL_TO_LAMPORTS(0.00001);
 const JUP_BUFFER_LAMPORTS = SOL_TO_LAMPORTS(0.0005);
+const BPS_SCALE = 10_000n;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -103,12 +106,38 @@ export function pickPortionLamports(rng, spendableLamports, options = {}) {
   return amount > 0n ? amount : 0n;
 }
 
+function pickSpendFraction(rng) {
+  const baseDenominator = pickInt(rng, 4, 9);
+  const base = 1 / baseDenominator;
+  const jitter = 0.8 + rng() * 0.4;
+  const raw = base * jitter;
+  return Math.min(0.65, Math.max(0.08, raw));
+}
+
+function clampSpendFraction(value) {
+  if (!Number.isFinite(value)) {
+    return 0.25;
+  }
+  return Math.min(0.65, Math.max(0.05, value));
+}
+
 function estimateStepCostLamports(step) {
   let total = FEE_LAMPORTS + JUP_BUFFER_LAMPORTS;
   if (step?.logicalStep?.requiresAta) {
     total += ATA_RENT_EST_LAMPORTS;
   }
   return total;
+}
+
+const scatterBudgetStateByWallet = new Map();
+
+function computeSpendableLamports(balanceLamports) {
+  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+  return balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+}
+
+function resetScatterState(pubkeyBase58) {
+  scatterBudgetStateByWallet.delete(pubkeyBase58);
 }
 
 export function truncatePlanToBudget(planSteps, solBalanceLamports) {
@@ -172,114 +201,53 @@ function planBuckshotScatterTargets(rng, poolMints, count) {
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
-function planRandomPlaceholderSteps(count) {
-  const hopCount = Math.max(1, Number.isFinite(count) ? Math.floor(count) : 0);
-  if (hopCount <= 0) {
+function normalizeHoldings(rawHoldings) {
+  if (!Array.isArray(rawHoldings)) return [];
+  const results = [];
+  for (const entry of rawHoldings) {
+    const mint = entry?.mint;
+    if (!mint || mint === WSOL_MINT) continue;
+    let amountLamports = entry?.amountLamports ?? entry?.amount ?? entry?.uiAmount ?? 0;
+    if (typeof amountLamports === "string") {
+      try {
+        amountLamports = BigInt(amountLamports);
+      } catch (_) {
+        amountLamports = 0n;
+      }
+    }
+    if (typeof amountLamports === "number") {
+      amountLamports = BigInt(Math.max(0, Math.floor(amountLamports)));
+    }
+    if (typeof amountLamports !== "bigint") {
+      continue;
+    }
+    if (amountLamports <= 0n) continue;
+    const locked = entry?.locked === true || entry?.isFrozen === true;
+    if (locked) continue;
+    const decimals = typeof entry?.decimals === "number" ? entry.decimals : 0;
+    results.push({ mint, amountLamports, decimals });
+  }
+  return results;
+}
+
+function pickCycleFanTargets(rng, poolMints) {
+  if (!Array.isArray(poolMints) || poolMints.length === 0) {
     return [];
   }
-  if (hopCount === 1) {
-    return [
-      {
-        inMint: WSOL_MINT,
-        outMint: RANDOM_PLACEHOLDER,
-        requiresAta: true,
-        sourceBalance: { kind: "sol" },
-      },
-    ];
-  }
-  const steps = [];
-  for (let idx = 0; idx < hopCount; idx += 1) {
-    const isFirst = idx === 0;
-    const isLast = idx === hopCount - 1;
-    steps.push({
-      inMint: isFirst ? WSOL_MINT : RANDOM_PLACEHOLDER,
-      outMint: isLast ? WSOL_MINT : RANDOM_PLACEHOLDER,
-      requiresAta: !isLast,
-      sourceBalance: isFirst ? { kind: "sol" } : { kind: "spl", mint: RANDOM_PLACEHOLDER },
-    });
-  }
-  return steps;
-}
-
-function stepHasRandomPlaceholder(step) {
-  if (!step || typeof step !== "object") {
-    return false;
-  }
-  if (step.inMint === RANDOM_PLACEHOLDER || step.outMint === RANDOM_PLACEHOLDER) {
-    return true;
-  }
-  if (step?.sourceBalance?.mint === RANDOM_PLACEHOLDER) {
-    return true;
-  }
-  return false;
-}
-
-function pickRandomPlaceholderMint(rng, poolMints, excludeMints = []) {
-  if (!Array.isArray(poolMints) || poolMints.length === 0) {
-    return null;
-  }
-  const excludes = new Set((excludeMints || []).filter(Boolean));
   const shuffled = shuffle(rng, poolMints);
-  for (const entry of shuffled) {
-    if (!entry || !entry.mint) {
-      continue;
-    }
-    if (excludes.has(entry.mint)) {
-      continue;
-    }
-    return entry;
-  }
-  return poolMints.find((entry) => entry && entry.mint) || null;
+  const minTargets = Math.min(2, shuffled.length);
+  const maxTargets = Math.min(3, shuffled.length);
+  const count = Math.max(minTargets, pickInt(rng, minTargets, maxTargets || minTargets));
+  const picks = shuffled.slice(0, count);
+  const weighted = rng() < 0.5;
+  return picks.map((entry) => ({
+    mint: entry.mint,
+    weight: weighted ? pickInt(rng, 1, 100) : 1,
+  }));
 }
 
-function resolveRandomPlaceholderStep(baseStep, context) {
-  if (!baseStep) {
-    return { resolved: null, nextMint: context?.currentMint ?? WSOL_MINT, lastRandomMint: context?.lastRandomMint ?? null };
-  }
-  const resolved = {
-    ...baseStep,
-    sourceBalance: baseStep.sourceBalance ? { ...baseStep.sourceBalance } : undefined,
-  };
-  const currentMint = context?.currentMint ?? WSOL_MINT;
-  let lastRandomMint = context?.lastRandomMint ?? null;
-
-  if (resolved.inMint === RANDOM_PLACEHOLDER) {
-    resolved.inMint = currentMint;
-  }
-
-  if (resolved.outMint === RANDOM_PLACEHOLDER) {
-    const pick = pickRandomPlaceholderMint(context?.rng, context?.poolMints, [resolved.inMint, lastRandomMint]);
-    if (!pick?.mint) {
-      return { resolved: null, nextMint: currentMint, lastRandomMint };
-    }
-    resolved.outMint = pick.mint;
-    lastRandomMint = resolved.outMint;
-  }
-
-  if (resolved.sourceBalance?.kind === "spl") {
-    const mint = resolved.sourceBalance.mint;
-    resolved.sourceBalance = {
-      ...resolved.sourceBalance,
-      mint:
-        mint && mint !== RANDOM_PLACEHOLDER
-          ? mint
-          : resolved.inMint,
-    };
-  } else if (resolved.sourceBalance?.kind === "sol") {
-    resolved.sourceBalance = { ...resolved.sourceBalance, kind: "sol" };
-  } else if (!resolved.sourceBalance) {
-    resolved.sourceBalance =
-      resolved.inMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: resolved.inMint };
-  }
-
-  resolved.requiresAta = resolved.outMint !== WSOL_MINT;
-  const nextMint = resolved.outMint ?? currentMint;
-  if (resolved.outMint === WSOL_MINT) {
-    lastRandomMint = null;
-  }
-
-  return { resolved, nextMint, lastRandomMint };
-}
+const SWEEP_MIN_DELAY_MS = 5_000;
+const SWEEP_MAX_DELAY_MS = 10_000;
 
 export function buildTimedPlanForWallet({
   pubkey,
@@ -288,19 +256,21 @@ export function buildTimedPlanForWallet({
   durationMs,
   kind,
   poolMints,
+  holdings = [],
+  solBalanceLamports = 0n,
 }) {
   if (!pubkey || !rng || !Number.isFinite(targetSwaps) || targetSwaps <= 0) {
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
+  let basePath = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
   } else if (kind === "scatter-then-converge") {
-    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
+    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8) || 3));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      basePath = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
         inMint: WSOL_MINT,
@@ -315,6 +285,35 @@ export function buildTimedPlanForWallet({
     } else {
       logicalSteps = planRandomPlaceholderSteps(safeTarget);
     }
+  } else if (kind === "icarus" || kind === "zenith" || kind === "aurora") {
+    const pairs = Math.max(1, Math.ceil(safeTarget / 2));
+    const steps = [];
+    for (let pairIndex = 0; pairIndex < pairs; pairIndex += 1) {
+      const sessionKey = `${kind}-${pubkey}-${pairIndex}`;
+      steps.push({
+        inMint: WSOL_MINT,
+        outMint: RANDOM_MINT_PLACEHOLDER,
+        requiresAta: true,
+        sourceBalance: { kind: "sol" },
+        randomization: {
+          mode: "sol-to-random",
+          sessionKey,
+          poolMints,
+          excludeMints: [WSOL_MINT],
+        },
+      });
+      steps.push({
+        inMint: RANDOM_MINT_PLACEHOLDER,
+        outMint: WSOL_MINT,
+        requiresAta: false,
+        sourceBalance: {},
+        randomization: {
+          mode: "session-to-sol",
+          sessionKey,
+        },
+      });
+    }
+    logicalSteps = steps;
   } else {
     logicalSteps = Array.from({ length: safeTarget }, () => {
       const choice = poolMints[Math.floor(rng() * poolMints.length)]?.mint;
@@ -327,14 +326,18 @@ export function buildTimedPlanForWallet({
     });
   }
 
-  if (!logicalSteps.length) {
+  if (!basePath.length) {
     return { schedule: [] };
   }
 
-  const baseInterval = Math.max(10_000, Math.floor(durationMs / safeTarget));
+  const fanSteps = logicalSteps.filter((step) => step.kind === "fanOutSwap" || !step.kind).length;
+  const swapCountForInterval = kind === "btc-eth-circuit" && fanSteps > 0 ? fanSteps : safeTarget;
+  const baseInterval = Math.max(10_000, Math.floor(durationMs / Math.max(1, swapCountForInterval)));
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
+  let pathIdx = 0;
+  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
   const placeholderState = {
@@ -343,42 +346,52 @@ export function buildTimedPlanForWallet({
   };
 
   for (let idx = 0; idx < safeTarget; idx += 1) {
-    const template = logicalSteps[idx % logicalSteps.length];
-    if (!template) {
-      continue;
+    const template = basePath[pathIdx % basePath.length];
+    const toMint = template?.toMint;
+    if (!toMint) {
+      break;
     }
-    if (stepHasRandomPlaceholder(template) && idx % logicalSteps.length === 0) {
-      placeholderState.currentMint = WSOL_MINT;
-      placeholderState.lastRandomMint = null;
-    }
-    let logical = template;
-    if (stepHasRandomPlaceholder(template)) {
-      const { resolved, nextMint, lastRandomMint } = resolveRandomPlaceholderStep(template, {
-        rng,
-        poolMints,
-        currentMint: placeholderState.currentMint,
-        lastRandomMint: placeholderState.lastRandomMint,
-      });
-      if (!resolved || !resolved.outMint) {
-        return { schedule: [] };
-      }
-      logical = resolved;
-      placeholderState.currentMint = nextMint ?? placeholderState.currentMint;
-      placeholderState.lastRandomMint = lastRandomMint ?? null;
-    }
+    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
+    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
+    const logical = {
+      fromMint: fromMintForStep,
+      toMint,
+      spendFraction,
+      requiresAta: toMint !== WSOL_MINT,
+    };
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
-    const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
+    const delta =
+      kind === "btc-eth-circuit" && logical?.kind === "sweepToSOL"
+        ? pickInt(rng, SWEEP_MIN_DELAY_MS, SWEEP_MAX_DELAY_MS)
+        : Math.max(3_000, Math.floor(baseInterval * jitterAmount));
     dueAt += delta;
+    if (logical?.kind === "sweepToSOL") {
+      schedule.push({
+        kind: "sweepToSOL",
+        dueAt,
+        logicalStep: logical.logicalStep,
+        idx,
+      });
+      continue;
+    }
+
+    const normalizedLogical = logical?.logicalStep ? logical.logicalStep : logical;
     schedule.push({
-      kind: "swapHop",
+      kind: logical?.kind === "fanOutSwap" ? "fanOutSwap" : "swapHop",
       dueAt,
-      logicalStep: logical,
+      logicalStep: normalizedLogical,
       idx,
     });
+    sequenceIdx += 1;
     sinceCheckpoint += 1;
+    currentFromMint = toMint;
+    pathIdx = (pathIdx + 1) % basePath.length;
     if (sinceCheckpoint >= checkpointEvery) {
       sinceCheckpoint = 0;
+    }
+
+    if (!checkpointForced && sinceCheckpoint >= checkpointEvery) {
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
       schedule.push({
         kind: "checkpointToSOL",
@@ -386,10 +399,11 @@ export function buildTimedPlanForWallet({
         logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false, sourceBalance: { kind: "sol" } },
         idx: idx + 0.1,
       });
+      currentFromMint = WSOL_MINT;
     }
   }
 
-  return { schedule, checkpointEvery };
+  return { schedule, checkpointEvery, ...planMeta };
 }
 
 export const CAMPAIGNS = {
@@ -424,33 +438,33 @@ export const CAMPAIGNS = {
     },
   },
   icarus: {
-    kind: RANDOM_HOPS_KIND,
-    tokenTags: ["icarus"],
+    kind: "icarus",
+    tokenTags: ["fanout", "default-sweep", "long-circle"],
     durations: {
-      "30m": [20, 60],
-      "1h": [60, 120],
-      "2h": [140, 260],
-      "6h": [300, 600],
+      "30m": [24, 64],
+      "1h": [60, 140],
+      "2h": [140, 320],
+      "6h": [360, 720],
     },
   },
   zenith: {
-    kind: RANDOM_HOPS_KIND,
-    tokenTags: ["zenith"],
+    kind: "zenith",
+    tokenTags: ["default-sweep", "long-circle", "secondary-pool"],
     durations: {
-      "30m": [20, 60],
-      "1h": [60, 120],
-      "2h": [140, 260],
-      "6h": [300, 600],
+      "30m": [18, 42],
+      "1h": [48, 108],
+      "2h": [110, 240],
+      "6h": [280, 560],
     },
   },
   aurora: {
-    kind: RANDOM_HOPS_KIND,
-    tokenTags: ["aurora"],
+    kind: "aurora",
+    tokenTags: ["fanout", "secondary-pool"],
     durations: {
-      "30m": [20, 60],
-      "1h": [60, 120],
-      "2h": [140, 260],
-      "6h": [300, 600],
+      "30m": [12, 32],
+      "1h": [36, 80],
+      "2h": [90, 180],
+      "6h": [220, 420],
     },
   },
 };
@@ -459,6 +473,8 @@ export function instantiateCampaignForWallets({
   campaignKey,
   durationKey,
   walletPubkeys,
+  walletHoldings = new Map(),
+  walletSolBalances = new Map(),
 }) {
   const preset = CAMPAIGNS[campaignKey];
   if (!preset) {
@@ -495,6 +511,8 @@ export function instantiateCampaignForWallets({
   for (const pubkey of walletPubkeys) {
     const rng = walletSeededRng(pubkey);
     const targetSwaps = pickInt(rng, minSwaps, maxSwaps);
+    const holdings = walletHoldings instanceof Map ? walletHoldings.get(pubkey) : null;
+    const solBalanceLamports = walletSolBalances instanceof Map ? walletSolBalances.get(pubkey) : null;
     const plan = buildTimedPlanForWallet({
       pubkey,
       rng,
@@ -502,8 +520,15 @@ export function instantiateCampaignForWallets({
       durationMs,
       kind: preset.kind,
       poolMints,
+      holdings,
+      solBalanceLamports,
     });
-    plansByWallet.set(pubkey, { schedule: plan.schedule, rng });
+    plansByWallet.set(pubkey, {
+      schedule: plan.schedule,
+      rng,
+      randomSessions: new Map(),
+      poolMints,
+    });
   }
 
   return {
@@ -514,6 +539,7 @@ export function instantiateCampaignForWallets({
 
 let HOOKS = {
   getSolLamports: null,
+  getSplLamports: null,
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
@@ -524,19 +550,17 @@ export function registerHooks(nextHooks) {
   HOOKS = { ...HOOKS, ...nextHooks };
 }
 
-export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
+export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {}) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
-  const outMint = logicalStep?.outMint;
-  const inMint = logicalStep?.inMint ?? WSOL_MINT;
-  const sourceMeta = logicalStep?.sourceBalance;
-  if (outMint === RANDOM_PLACEHOLDER || inMint === RANDOM_PLACEHOLDER) {
-    throw new Error("logical step placeholders must be resolved before execution");
-  }
-  if (sourceMeta?.mint === RANDOM_PLACEHOLDER) {
-    throw new Error("logical step source mint placeholder unresolved");
-  }
+  const resolved = resolveRandomizedStep(logicalStep, rng, {
+    sessionState: planContext?.randomSessions,
+    poolMints: planContext?.poolMints,
+  });
+  const outMint = resolved?.outMint ?? logicalStep?.outMint;
+  const inMint = resolved?.inMint ?? logicalStep?.inMint ?? WSOL_MINT;
+  const sourceMeta = resolved?.sourceBalance ?? logicalStep?.sourceBalance;
   const usesSol = sourceMeta?.kind === "sol" || inMint === WSOL_MINT;
   if (!outMint) {
     throw new Error("missing out mint");
@@ -601,6 +625,112 @@ export async function doCheckpointToSOL(pubkeyBase58, rng) {
   return HOOKS.jupiterLiteSwap(pubkeyBase58, holding.mint, WSOL_MINT, lamportsIn);
 }
 
+async function doSweepToSOLStep(pubkeyBase58, logicalStep) {
+  if (!HOOKS.listSweepableHoldings || !HOOKS.jupiterLiteSwap) {
+    return null;
+  }
+  const mint = logicalStep?.mint;
+  if (!mint || mint === WSOL_MINT) {
+    return null;
+  }
+  const holdings = await HOOKS.listSweepableHoldings(pubkeyBase58);
+  if (!Array.isArray(holdings) || holdings.length === 0) {
+    return null;
+  }
+  const target = holdings.find((entry) => entry?.mint === mint);
+  if (!target) {
+    return null;
+  }
+  let amountLamports = target?.amountLamports ?? target?.amount ?? 0n;
+  if (typeof amountLamports === "string") {
+    try {
+      amountLamports = BigInt(amountLamports);
+    } catch (_) {
+      amountLamports = 0n;
+    }
+  }
+  if (typeof amountLamports === "number") {
+    amountLamports = BigInt(Math.max(0, Math.floor(amountLamports)));
+  }
+  if (typeof amountLamports !== "bigint" || amountLamports <= 0n) {
+    return null;
+  }
+  const dustFloor = logicalStep?.dustFloorLamports;
+  if (typeof dustFloor === "number" && dustFloor > 0 && amountLamports < BigInt(Math.floor(dustFloor))) {
+    return null;
+  }
+  if (typeof dustFloor === "bigint" && amountLamports < dustFloor) {
+    return null;
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, mint, WSOL_MINT, amountLamports);
+}
+
+function ensurePlanState(planStates, pubkey) {
+  if (!planStates.has(pubkey)) {
+    planStates.set(pubkey, {
+      fanOutCycles: new Map(),
+    });
+  }
+  return planStates.get(pubkey);
+}
+
+async function doFanoutSwapStep(pubkeyBase58, logicalStep, rng, planStates) {
+  if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
+    throw new Error("campaign hooks not registered");
+  }
+  const cycleId = logicalStep?.cycleId ?? 0;
+  const state = ensurePlanState(planStates, pubkeyBase58);
+  const cycleState = state.fanOutCycles.get(cycleId) || {
+    totalSpendable: null,
+    remaining: null,
+    allocations: new Map(),
+  };
+  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+  if (balanceLamports <= baseReserve) {
+    throw new Error("insufficient spendable SOL for fan-out");
+  }
+  const spendable = balanceLamports - baseReserve;
+  if (cycleState.totalSpendable === null || logicalStep?.targetIndex === 0) {
+    cycleState.totalSpendable = spendable;
+    cycleState.remaining = spendable;
+    cycleState.allocations.clear();
+  }
+  if (cycleState.remaining === null || cycleState.remaining <= 0n) {
+    state.fanOutCycles.set(cycleId, cycleState);
+    return null;
+  }
+  const totalTargets = logicalStep?.totalTargets ?? 1;
+  const weight = BigInt(logicalStep?.weight ?? 0);
+  const totalWeight = BigInt(logicalStep?.totalWeight ?? 0);
+  let amountLamports = 0n;
+  if (logicalStep?.targetIndex === totalTargets - 1) {
+    amountLamports = cycleState.remaining;
+  } else if (totalWeight > 0n) {
+    amountLamports = (cycleState.totalSpendable * weight) / totalWeight;
+  } else {
+    amountLamports = pickPortionLamports(rng, cycleState.remaining);
+  }
+  if (amountLamports > cycleState.remaining) {
+    amountLamports = cycleState.remaining;
+  }
+  if (amountLamports <= 0n) {
+    state.fanOutCycles.set(cycleId, cycleState);
+    return null;
+  }
+  cycleState.remaining -= amountLamports;
+  cycleState.allocations.set(logicalStep?.targetIndex ?? 0, amountLamports);
+  state.fanOutCycles.set(cycleId, cycleState);
+  if (logicalStep?.targetIndex === totalTargets - 1) {
+    state.fanOutCycles.delete(cycleId);
+  }
+  const outMint = logicalStep?.outMint;
+  if (!outMint) {
+    throw new Error("missing fan-out target mint");
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+}
+
 async function withBackoff(fn) {
   const delays = [400, 900, 1800, 3600];
   let lastError = null;
@@ -630,6 +760,7 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
     throw new Error("plansByWallet must be a Map");
   }
   const inflight = new Set();
+  const planStates = new Map();
   const queue = [];
   for (const [pubkey, { schedule, rng }] of plansByWallet.entries()) {
     if (Array.isArray(schedule) && schedule.length > 0) {
@@ -661,8 +792,14 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
     try {
       if (step.kind === "checkpointToSOL") {
         await withBackoff(() => doCheckpointToSOL(current.pubkey, current.rng));
+      } else if (step.kind === "sweepToSOL") {
+        await withBackoff(() => doSweepToSOLStep(current.pubkey, step.logicalStep));
+      } else if (step.kind === "fanOutSwap") {
+        await withBackoff(() => doFanoutSwapStep(current.pubkey, step.logicalStep, current.rng, planStates));
       } else {
-        await withBackoff(() => doSwapStep(current.pubkey, step.logicalStep, current.rng));
+        await withBackoff(() =>
+          doSwapStep(current.pubkey, step.logicalStep, current.rng, plan)
+        );
       }
     } catch (err) {
       console.warn(`[${current.pubkey}] step ${step.idx ?? "?"} failed: ${err?.message ?? err}`);
@@ -683,8 +820,29 @@ export function estimateCampaignVolumeSOL({ plansByWallet }) {
   let lamports = 0n;
   for (const { schedule } of plansByWallet.values()) {
     if (!Array.isArray(schedule)) continue;
-    const swaps = schedule.filter((step) => step.kind === "swapHop").length;
-    lamports += BigInt(swaps) * 10_000_000n;
+    for (const step of schedule) {
+      if (!step || typeof step !== "object") continue;
+      if (step.kind === "fanOutSwap" || step.kind === "swapHop") {
+        let estimated = step?.logicalStep?.estimatedLamports;
+        if (typeof estimated === "string") {
+          try {
+            estimated = BigInt(estimated);
+          } catch (_) {
+            estimated = null;
+          }
+        }
+        if (typeof estimated === "number") {
+          estimated = BigInt(Math.max(0, Math.floor(estimated)));
+        }
+        if (typeof estimated === "bigint" && estimated > 0n) {
+          lamports += estimated;
+        } else {
+          lamports += 10_000_000n;
+        }
+      } else if (step.kind === "sweepToSOL") {
+        lamports += 5_000_000n;
+      }
+    }
   }
   return Number(lamports) / 1_000_000_000;
 }
