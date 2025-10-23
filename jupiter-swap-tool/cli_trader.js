@@ -4153,6 +4153,121 @@ const DEFAULT_SWEEP_MINTS = Array.from(
   )
 );
 
+const RECENT_RANDOM_CATALOG_LIMIT = 24;
+const recentCatalogMintHistory = [];
+
+function rememberRecentCatalogMint(mint, limit = RECENT_RANDOM_CATALOG_LIMIT) {
+  if (!mint) return;
+  const normalized = typeof mint === "string" ? mint : String(mint ?? "");
+  const existingIndex = recentCatalogMintHistory.indexOf(normalized);
+  if (existingIndex !== -1) {
+    recentCatalogMintHistory.splice(existingIndex, 1);
+  }
+  const effectiveLimit = Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : RECENT_RANDOM_CATALOG_LIMIT);
+  recentCatalogMintHistory.push(normalized);
+  while (recentCatalogMintHistory.length > effectiveLimit) {
+    recentCatalogMintHistory.shift();
+  }
+}
+
+function normaliseTagList(value) {
+  if (!value) return [];
+  const list = Array.isArray(value) ? value : [value];
+  return list
+    .map((entry) => (typeof entry === "string" ? entry.trim().toLowerCase() : null))
+    .filter((entry) => entry && entry.length > 0);
+}
+
+function combineTagLists(...lists) {
+  const combined = new Set();
+  for (const list of lists) {
+    for (const tag of normaliseTagList(list)) {
+      combined.add(tag);
+    }
+  }
+  return [...combined];
+}
+
+function combineMintExclusions(...lists) {
+  const result = new Set();
+  const addMint = (mint) => {
+    if (typeof mint === "string" && mint.length > 0) {
+      result.add(mint);
+    }
+  };
+  for (const list of lists) {
+    if (!list) continue;
+    if (list instanceof Set) {
+      for (const mint of list) addMint(mint);
+      continue;
+    }
+    if (Array.isArray(list)) {
+      for (const mint of list) addMint(mint);
+      continue;
+    }
+    if (typeof list === "string") {
+      addMint(list);
+    }
+  }
+  return result;
+}
+
+function sampleMintFromCatalog(options = {}) {
+  const skipSolLike = options.skipSolLike !== false;
+  const avoidRecent = options.avoidRecent !== false;
+  const remember = options.remember !== false;
+  const rememberLimit = Number.isFinite(options.rememberLimit)
+    ? Math.max(1, Math.floor(options.rememberLimit))
+    : RECENT_RANDOM_CATALOG_LIMIT;
+  const requireTags = combineTagLists(options.requireTags, options.tags);
+  const anyTags = combineTagLists(options.anyTags);
+  const exclude = combineMintExclusions(options.exclude);
+  const preferFile = options.preferFile !== false;
+  const filterFn = typeof options.filter === "function" ? options.filter : null;
+
+  const sources = [];
+  if (FILE_TOKEN_CATALOG.length > 0 && preferFile) {
+    sources.push(FILE_TOKEN_CATALOG);
+  }
+  sources.push(TOKEN_CATALOG);
+
+  const seen = new Set();
+  const pool = [];
+  for (const source of sources) {
+    for (const entry of source) {
+      if (!entry || typeof entry.mint !== "string") continue;
+      const mint = entry.mint;
+      if (seen.has(mint)) continue;
+      seen.add(mint);
+      if (skipSolLike && SOL_LIKE_MINTS.has(mint)) continue;
+      if (exclude.has(mint)) continue;
+      if (requireTags.length > 0 && !requireTags.every((tag) => tokenHasTag(entry, tag))) continue;
+      if (anyTags.length > 0 && !anyTags.some((tag) => tokenHasTag(entry, tag))) continue;
+      if (filterFn && !filterFn(entry)) continue;
+      pool.push(entry);
+    }
+  }
+
+  if (pool.length === 0) return null;
+
+  let candidates = pool;
+  if (avoidRecent && recentCatalogMintHistory.length > 0) {
+    const recentSet = new Set(recentCatalogMintHistory);
+    const filtered = pool.filter((entry) => !recentSet.has(entry.mint));
+    if (filtered.length > 0) {
+      candidates = filtered;
+    }
+  }
+
+  const pickIndex = Math.floor(Math.random() * candidates.length);
+  const chosen = candidates[pickIndex];
+  if (!chosen) return null;
+  if (remember) {
+    rememberRecentCatalogMint(chosen.mint, rememberLimit);
+  }
+  return chosen;
+}
+
 
 const mintMetadataCache = new Map();
 let cachedAtaRentLamports = null;
@@ -4281,6 +4396,8 @@ const pickIntInclusive = (rng, min, max) => {
   const pick = Math.floor(random * span);
   return floorMin + pick;
 };
+
+const randomIntInclusive = (min, max) => pickIntInclusive(Math.random, min, max);
 
 const applyScalingToSegments = (segments, rawTotal, target) => {
   if (!Number.isFinite(rawTotal) || rawTotal <= 0) {
@@ -5596,11 +5713,43 @@ async function runSwapSequence(steps, label) {
     )
   );
   let index = 0;
+  const resolutionState = createMintResolutionState();
   for (const step of steps) {
     index += 1;
-    const fromSymbol = MINT_SYMBOL_OVERRIDES.get(step.from) || step.from.slice(0, 4);
-    const toSymbol = MINT_SYMBOL_OVERRIDES.get(step.to) || step.to.slice(0, 4);
-    const descriptor = step.description || `${fromSymbol} -> ${toSymbol}`;
+
+    const excludeForFrom = combineMintExclusions(resolutionState.used);
+    const resolvedFrom = resolveMintDescriptor(step.from, {
+      exclude: excludeForFrom,
+    });
+    const excludeForTo = combineMintExclusions(
+      resolutionState.used,
+      [resolvedFrom.mint]
+    );
+    const resolvedTo = resolveMintDescriptor(step.to, {
+      exclude: excludeForTo,
+    });
+
+    const fromMint = normaliseSolMint(resolvedFrom.mint);
+    const toMint = normaliseSolMint(resolvedTo.mint);
+    resolutionState.used.add(fromMint);
+    resolutionState.used.add(toMint);
+
+    const fromLabel =
+      resolvedFrom.description || resolvedFrom.symbol || symbolForMint(fromMint);
+    const toLabel =
+      resolvedTo.description || resolvedTo.symbol || symbolForMint(toMint);
+    const descriptorNeedsUpdate =
+      !step.description || resolvedFrom.random || resolvedTo.random;
+
+    step.from = fromMint;
+    step.to = toMint;
+    step.resolvedFrom = resolvedFrom;
+    step.resolvedTo = resolvedTo;
+    if (descriptorNeedsUpdate) {
+      step.description = `${fromLabel} -> ${toLabel}`;
+    }
+    const descriptor = step.description || `${fromLabel} -> ${toLabel}`;
+
     console.log(paint(`Step ${index}/${steps.length}: ${descriptor}`, "info"));
     if (step.noop) {
       console.log(paint("  (no on-chain action required)", "muted"));
@@ -5614,6 +5763,188 @@ async function runSwapSequence(steps, label) {
 
 function normaliseSolMint(mint) {
   return SOL_LIKE_MINTS.has(mint) ? SOL_MINT : mint;
+}
+
+function createMintResolutionState(initial = []) {
+  const state = { used: new Set() };
+  if (Array.isArray(initial)) {
+    for (const mint of initial) {
+      if (typeof mint === "string" && mint.length > 0) {
+        state.used.add(normaliseSolMint(mint));
+      }
+    }
+  }
+  return state;
+}
+
+function resolveMintDescriptor(candidate, options = {}) {
+  const baseSampleOptions =
+    options.sampleOptions && typeof options.sampleOptions === "object"
+      ? { ...options.sampleOptions }
+      : {};
+  if (options.requireTags) {
+    baseSampleOptions.requireTags = combineTagLists(
+      baseSampleOptions.requireTags,
+      options.requireTags
+    );
+  }
+  if (options.anyTags) {
+    baseSampleOptions.anyTags = combineTagLists(
+      baseSampleOptions.anyTags,
+      options.anyTags
+    );
+  }
+  const combinedExclude = combineMintExclusions(
+    baseSampleOptions.exclude,
+    options.exclude
+  );
+  baseSampleOptions.exclude = combinedExclude;
+
+  const skipSolDefault = pickFirstDefined(
+    baseSampleOptions.skipSolLike,
+    options.skipSolLike
+  );
+  const avoidRecentDefault = pickFirstDefined(
+    baseSampleOptions.avoidRecent,
+    options.avoidRecent
+  );
+
+  const coerceBoolean = (value, fallback) => {
+    if (value === true) return true;
+    if (value === false) return false;
+    return fallback;
+  };
+
+  if (typeof candidate === "string") {
+    const trimmed = candidate.trim();
+    if (trimmed.length === 0) {
+      throw new Error("Empty mint descriptor encountered");
+    }
+
+    const randomMatch = trimmed.match(/^RANDOM(?::(.+))?$/i);
+    if (randomMatch) {
+      const directiveRaw = randomMatch[1] || "";
+      const segments = directiveRaw
+        .split(",")
+        .map((segment) => segment.trim())
+        .filter((segment) => segment.length > 0);
+
+      let skipSolLike = coerceBoolean(skipSolDefault, true);
+      let avoidRecent = coerceBoolean(avoidRecentDefault, true);
+      let requireTags = [];
+      let anyTags = [];
+
+      for (const segment of segments) {
+        const lower = segment.toLowerCase();
+        if (lower === "sol-ok" || lower === "allow-sol") {
+          skipSolLike = false;
+          continue;
+        }
+        if (lower === "allow-recent" || lower === "recent-ok") {
+          avoidRecent = false;
+          continue;
+        }
+        if (lower === "no-recent" || lower === "avoid-recent") {
+          avoidRecent = true;
+          continue;
+        }
+        const eqIndex = segment.indexOf("=");
+        if (eqIndex !== -1) {
+          const key = segment.slice(0, eqIndex).trim().toLowerCase();
+          const value = segment.slice(eqIndex + 1).trim();
+          if (!value) continue;
+          if (key === "tag" || key === "tags") {
+            requireTags = requireTags.concat(value.split("|"));
+            continue;
+          }
+          if (key === "any" || key === "anytag" || key === "anytags") {
+            anyTags = anyTags.concat(value.split("|"));
+            continue;
+          }
+          if (key === "exclude") {
+            for (const part of value.split("|")) {
+              const trimmedPart = part.trim();
+              if (trimmedPart) combinedExclude.add(trimmedPart);
+            }
+            continue;
+          }
+        }
+        requireTags.push(segment);
+      }
+
+      const descriptorLabel =
+        segments.length > 0 ? `RANDOM:${segments.join(",")}` : "RANDOM";
+
+      const entry = sampleMintFromCatalog({
+        ...baseSampleOptions,
+        skipSolLike,
+        avoidRecent,
+        requireTags: combineTagLists(
+          baseSampleOptions.requireTags,
+          requireTags
+        ),
+        anyTags: combineTagLists(baseSampleOptions.anyTags, anyTags),
+        exclude: combinedExclude,
+      });
+
+      if (!entry) {
+        throw new Error(
+          `Unable to resolve ${descriptorLabel}: no eligible catalog entries found`
+        );
+      }
+
+      const symbol = entry.symbol || symbolForMint(entry.mint);
+      return {
+        mint: entry.mint,
+        symbol,
+        description: `${descriptorLabel} (${symbol})`,
+        random: true,
+        catalogEntry: entry,
+        label: descriptorLabel,
+      };
+    }
+
+    const symbolEntry = tokenBySymbol(trimmed);
+    if (symbolEntry?.mint) {
+      const symbol = symbolEntry.symbol || symbolForMint(symbolEntry.mint);
+      return {
+        mint: symbolEntry.mint,
+        symbol,
+        description: symbol,
+        random: false,
+        catalogEntry: symbolEntry,
+        label: symbol,
+      };
+    }
+
+    const symbol = symbolForMint(trimmed);
+    return {
+      mint: trimmed,
+      symbol,
+      description: symbol,
+      random: false,
+      catalogEntry: TOKEN_CATALOG_BY_MINT.get(trimmed) || null,
+      label: symbol,
+    };
+  }
+
+  if (candidate && typeof candidate === "object") {
+    const objectMint =
+      typeof candidate.mint === "string" ? candidate.mint : null;
+    if (objectMint) {
+      const symbol = candidate.symbol || symbolForMint(objectMint);
+      return {
+        mint: objectMint,
+        symbol,
+        description: candidate.label || symbol,
+        random: false,
+        catalogEntry: TOKEN_CATALOG_BY_MINT.get(objectMint) || null,
+        label: candidate.label || symbol,
+      };
+    }
+  }
+
+  throw new Error(`Unsupported mint descriptor: ${String(candidate)}`);
 }
 
 const CREW1_CYCLE_TOKENS = [
@@ -5641,60 +5972,63 @@ const LONG_CHAIN_SEGMENTS_BASE = [
   { name: 'sol-weth', mints: [SOL_MINT, WETH_MINT, SOL_MINT] },
 ];
 
-const SECONDARY_RANDOM_POOL = [
-  DEFAULT_USDC_MINT,
-  POPCAT_MINT,
-  PUMP_MINT,
-  PENGU_MINT,
-  FARTCOIN_MINT,
-  USELESS_MINT,
-  WIF_MINT,
-  PFP_MINT,
-  WBTC_MINT,
-  CBBTC_MINT,
-  WETH_MINT,
-];
-
-const SECONDARY_TERMINALS = [
-  DEFAULT_USDC_MINT,
-  WBTC_MINT,
-  CBBTC_MINT,
-  WETH_MINT,
-  SOL_MINT,
-];
-
-const BUCKSHOT_TOKEN_MINTS = Array.from(
-  new Set(
-    LONG_CHAIN_SEGMENTS_BASE.flatMap((segment) =>
-      segment.mints
-        .map((mint) => normaliseSolMint(mint))
-        .filter((mint) => !SOL_LIKE_MINTS.has(mint))
-    )
-  )
-);
-
 function stepsFromMints(mints, options = {}) {
   const steps = [];
   if (!Array.isArray(mints) || mints.length < 2) return steps;
-  for (let i = 0; i < mints.length - 1; i += 1) {
-    const from = normaliseSolMint(mints[i]);
-    const to = normaliseSolMint(mints[i + 1]);
+
+  const resolutionState =
+    options.resolutionState && typeof options.resolutionState === "object"
+      ? options.resolutionState
+      : createMintResolutionState();
+  if (!(resolutionState.used instanceof Set)) {
+    resolutionState.used = new Set();
+  }
+
+  const resolved = [];
+  for (let i = 0; i < mints.length; i += 1) {
+    const exclude = combineMintExclusions(resolutionState.used, options.exclude);
+    const descriptor = resolveMintDescriptor(mints[i], {
+      skipSolLike: options.skipSolLike,
+      avoidRecent: options.avoidRecent,
+      sampleOptions: options.sampleOptions,
+      requireTags: options.requireTags,
+      anyTags: options.anyTags,
+      exclude,
+    });
+    resolved.push(descriptor);
+    resolutionState.used.add(normaliseSolMint(descriptor.mint));
+  }
+
+  for (let i = 0; i < resolved.length - 1; i += 1) {
+    const from = normaliseSolMint(resolved[i].mint);
+    const to = normaliseSolMint(resolved[i + 1].mint);
     if (from === to) continue;
+    const fromLabel =
+      resolved[i].description || resolved[i].symbol || symbolForMint(from);
+    const toLabel =
+      resolved[i + 1].description || resolved[i + 1].symbol || symbolForMint(to);
     steps.push({
       from,
       to,
-      description: `${symbolForMint(from)} -> ${symbolForMint(to)}`,
+      description: `${fromLabel} -> ${toLabel}`,
       forceAll: options.forceAll === true,
+      resolvedFrom: resolved[i],
+      resolvedTo: resolved[i + 1],
     });
   }
+
   return steps;
 }
 
 function flattenSegmentsToSteps(segments) {
   const steps = [];
+  const resolutionState = createMintResolutionState();
   for (const segment of segments) {
     steps.push(
-      ...stepsFromMints(segment.mints, { forceAll: segment.forceAll })
+      ...stepsFromMints(segment.mints, {
+        forceAll: segment.forceAll,
+        resolutionState,
+      })
     );
   }
   return steps;
@@ -5736,36 +6070,106 @@ function buildSecondaryPathMints(randomMode) {
   if (!randomMode) {
     return [SOL_MINT, DEFAULT_USDC_MINT];
   }
+
+  const poolMints = Array.from(
+    new Set(
+      TOKEN_CATALOG.filter(
+        (entry) =>
+          entry &&
+          typeof entry.mint === "string" &&
+          tokenHasTag(entry, "secondary-pool") &&
+          !SOL_LIKE_MINTS.has(entry.mint)
+      ).map((entry) => entry.mint)
+    )
+  );
+
+  const availableIntermediates = poolMints.length;
+  if (availableIntermediates === 0) {
+    return [SOL_MINT, DEFAULT_USDC_MINT];
+  }
+
+  const maxIntermediateCount = Math.max(1, Math.min(availableIntermediates, 4));
+
   for (let attempt = 0; attempt < 5; attempt += 1) {
-    const terminal = SECONDARY_TERMINALS[randomIntInclusive(0, SECONDARY_TERMINALS.length - 1)];
-    const pool = shuffleArray(
-      SECONDARY_RANDOM_POOL.filter((mint) => mint !== terminal)
+    const resolutionState = createMintResolutionState([SOL_MINT]);
+    const path = [SOL_MINT];
+    const intermediateCount = pickIntInclusive(
+      Math.random,
+      1,
+      maxIntermediateCount
     );
-    const maxIntermediates = Math.min(SECONDARY_RANDOM_POOL.length, pool.length);
-    let intermediateCount = randomIntInclusive(1, Math.max(1, maxIntermediates));
-    const intermediates = pool.slice(0, intermediateCount);
-    const path = [SOL_MINT, ...intermediates, terminal];
+
+    for (let i = 0; i < intermediateCount; i += 1) {
+      const entry = sampleMintFromCatalog({
+        requireTags: ["secondary-pool"],
+        exclude: resolutionState.used,
+        skipSolLike: true,
+      });
+      if (!entry) break;
+      path.push(entry.mint);
+      resolutionState.used.add(entry.mint);
+    }
+
+    if (path.length <= 1) continue;
+
+    let terminalEntry = sampleMintFromCatalog({
+      requireTags: ["secondary-terminal"],
+      exclude: resolutionState.used,
+      skipSolLike: false,
+    });
+    let terminalMint = terminalEntry?.mint;
+    if (!terminalMint || resolutionState.used.has(terminalMint)) {
+      if (!resolutionState.used.has(DEFAULT_USDC_MINT)) {
+        terminalMint = DEFAULT_USDC_MINT;
+      } else if (!resolutionState.used.has(SOL_MINT)) {
+        terminalMint = SOL_MINT;
+      } else {
+        const fallbackTerminal = sampleMintFromCatalog({
+          requireTags: ["secondary-pool"],
+          exclude: resolutionState.used,
+          skipSolLike: true,
+          avoidRecent: false,
+        });
+        terminalMint = fallbackTerminal?.mint || DEFAULT_USDC_MINT;
+      }
+    }
+    path.push(terminalMint);
+
     const deduped = [];
     for (const mint of path) {
       if (deduped.length === 0 || deduped[deduped.length - 1] !== mint) {
         deduped.push(mint);
       }
     }
-    if (deduped.length - 1 >= 3) {
-      return deduped;
+
+    const unique = [];
+    const seen = new Set();
+    for (const mint of deduped) {
+      if (seen.has(mint)) continue;
+      seen.add(mint);
+      unique.push(mint);
+    }
+
+    if (unique.length - 1 >= 3) {
+      return unique;
     }
   }
-  const fallback = [SOL_MINT, ...SECONDARY_RANDOM_POOL, DEFAULT_USDC_MINT];
-  const uniqueFallback = [];
-  const seen = new Set();
-  for (const mint of fallback) {
-    if (seen.has(mint)) continue;
-    seen.add(mint);
-    uniqueFallback.push(mint);
-  }
-  return uniqueFallback;
-}
 
+  const fallback = [SOL_MINT];
+  const seenFallback = new Set([SOL_MINT]);
+  for (const entry of TOKEN_CATALOG) {
+    if (!entry || typeof entry.mint !== "string") continue;
+    if (!tokenHasTag(entry, "secondary-pool")) continue;
+    if (SOL_LIKE_MINTS.has(entry.mint)) continue;
+    if (seenFallback.has(entry.mint)) continue;
+    seenFallback.add(entry.mint);
+    fallback.push(entry.mint);
+  }
+  if (!seenFallback.has(DEFAULT_USDC_MINT)) {
+    fallback.push(DEFAULT_USDC_MINT);
+  }
+  return fallback;
+}
 async function executeSwapPlanForWallet(wallet, steps, label, options = {}) {
   if (!steps || steps.length === 0) return;
   if (isWalletDisabledByGuard(wallet.name)) {
@@ -6029,26 +6433,76 @@ function computeBuckshotSpendable(solLamports, ataRent) {
   return solLamports - reserve;
 }
 
+function buildBuckshotTargets(maxTargets = 12) {
+  const eligibleEntries = TOKEN_CATALOG.filter(
+    (entry) =>
+      entry &&
+      typeof entry.mint === "string" &&
+      tokenHasTag(entry, "crew-cycle") &&
+      !SOL_LIKE_MINTS.has(entry.mint)
+  );
+  const uniqueMints = Array.from(new Set(eligibleEntries.map((entry) => entry.mint)));
+  if (uniqueMints.length === 0) return [];
+
+  const targetCount = Math.min(Math.max(1, maxTargets), uniqueMints.length);
+  const used = new Set();
+  const targets = [];
+  let attempts = 0;
+  const maxAttempts = targetCount * 6;
+
+  while (targets.length < targetCount && attempts < maxAttempts) {
+    attempts += 1;
+    const entry = sampleMintFromCatalog({
+      requireTags: ["crew-cycle"],
+      exclude: used,
+      skipSolLike: true,
+    });
+    if (!entry) break;
+    if (used.has(entry.mint)) continue;
+    used.add(entry.mint);
+    targets.push({
+      mint: entry.mint,
+      symbol: entry.symbol || symbolForMint(entry.mint),
+      name: entry.name || entry.symbol || symbolForMint(entry.mint),
+    });
+  }
+
+  if (targets.length === 0) {
+    return uniqueMints.slice(0, targetCount).map((mint) => ({
+      mint,
+      symbol: symbolForMint(mint),
+      name: symbolForMint(mint),
+    }));
+  }
+
+  return targets;
+}
+
 async function runBuckshot() {
   const wallets = listWallets();
   if (wallets.length === 0) {
     console.log(paint("No wallets found", "muted"));
     return;
   }
-  if (BUCKSHOT_TOKEN_MINTS.length === 0) {
+  const targets = buildBuckshotTargets();
+  if (targets.length === 0) {
     console.log(paint("Buckshot token list empty; nothing to do.", "muted"));
     return;
   }
 
   console.log(
     paint(
-      `Buckshot mode — targeting ${BUCKSHOT_TOKEN_MINTS.length} token${BUCKSHOT_TOKEN_MINTS.length === 1 ? '' : 's'} from round-robin set`,
+      `Buckshot mode — targeting ${targets.length} token${targets.length === 1 ? '' : 's'} from token catalog`,
       "label"
     )
   );
+  const targetSummary = targets.map((target) => target.symbol).join(', ');
+  if (targetSummary) {
+    console.log(paint(`  Tokens: ${targetSummary}`, 'muted'));
+  }
 
   const walletHoldings = new Map();
-  const tokenCount = BigInt(BUCKSHOT_TOKEN_MINTS.length);
+  const tokenCount = BigInt(targets.length);
 
   const planEntries = await measureAsync("buckshot:plan-wallets", async () => {
     const entries = [];
@@ -6081,7 +6535,7 @@ async function runBuckshot() {
       if (perToken <= 0n) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: spendable SOL too small to distribute across ${BUCKSHOT_TOKEN_MINTS.length} tokens.`,
+            `Skipping ${wallet.name}: spendable SOL too small to distribute across ${targets.length} tokens.`,
             "muted"
           )
         );
@@ -6130,15 +6584,15 @@ async function runBuckshot() {
 
       const holdingsSet = walletHoldings.get(wallet.name) || new Set();
 
-      for (const mint of BUCKSHOT_TOKEN_MINTS) {
-        const symbol = symbolForMint(mint);
+      for (const target of targets) {
+        const symbol = target.symbol || symbolForMint(target.mint);
         console.log(
           paint(
             `  ${symbol}: swapping ${perTokenDecimal} SOL -> ${symbol}`,
             "info"
           )
         );
-        await doSwapAcross(SOL_MINT, mint, perTokenDecimal, {
+        await doSwapAcross(SOL_MINT, target.mint, perTokenDecimal, {
           wallets: [wallet],
           quietSkips: true,
           suppressMetadata: true,
@@ -6147,7 +6601,7 @@ async function runBuckshot() {
           slippageBoostStrategy: "add",
           slippageBoostIncrementBps: 200,
         });
-        holdingsSet.add(mint);
+        holdingsSet.add(target.mint);
         await passiveSleep();
       }
 
