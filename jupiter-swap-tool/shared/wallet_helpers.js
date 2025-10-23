@@ -264,14 +264,21 @@ export async function ensureWrappedSolBalance(
       )
     );
   }
-  const tx = new Transaction().add(
-    SystemProgram.transfer({
-      fromPubkey: wallet.kp.publicKey,
-      toPubkey: ata,
-      lamports: Number(lamportsToWrap),
-    }),
-    createSyncNativeInstruction(ata, TOKEN_PROGRAM_ID)
-  );
+  const tx = new Transaction();
+  const maxChunk = BigInt(Number.MAX_SAFE_INTEGER);
+  let remaining = lamportsToWrap;
+  while (remaining > 0n) {
+    const chunk = remaining > maxChunk ? maxChunk : remaining;
+    tx.add(
+      SystemProgram.transfer({
+        fromPubkey: wallet.kp.publicKey,
+        toPubkey: ata,
+        lamports: Number(chunk),
+      })
+    );
+    remaining -= chunk;
+  }
+  tx.add(createSyncNativeInstruction(ata, TOKEN_PROGRAM_ID));
   tx.feePayer = wallet.kp.publicKey;
   const { blockhash } = await connection.getLatestBlockhash();
   tx.recentBlockhash = blockhash;
