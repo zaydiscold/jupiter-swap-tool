@@ -56,3 +56,7 @@ export function ensureAtaForMint(...args) {
 export function ensureWrappedSolBalance(...args) {
   return helperEnsureWrappedSolBalance(...args);
 }
+
+export function resolveTokenProgramForMint(...args) {
+  return cliResolveTokenProgramForMint(...args);
+}
