@@ -4880,6 +4880,9 @@ function ensureCampaignHooksRegistered() {
     findLargestSplHolding: async (pubkeyBase58) => {
       return campaignFindLargestHolding(pubkeyBase58);
     },
+    findSplHoldingByMint: async (pubkeyBase58, mint) => {
+      return campaignFindHolding(pubkeyBase58, mint);
+    },
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },

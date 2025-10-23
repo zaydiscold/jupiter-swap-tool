@@ -127,6 +127,17 @@ function estimateStepCostLamports(step) {
   return total;
 }
 
+const scatterBudgetStateByWallet = new Map();
+
+function computeSpendableLamports(balanceLamports) {
+  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+  return balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+}
+
+function resetScatterState(pubkeyBase58) {
+  scatterBudgetStateByWallet.delete(pubkeyBase58);
+}
+
 export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   const balanceLamports =
     typeof solBalanceLamports === "bigint"
@@ -254,7 +265,7 @@ export function buildTimedPlanForWallet({
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
   } else if (kind === "scatter-then-converge") {
-    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
+    const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8) || 3));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
       basePath = [];
