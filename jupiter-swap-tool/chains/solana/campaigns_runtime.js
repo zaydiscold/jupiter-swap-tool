@@ -339,12 +339,14 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
         currentMint === WSOL_MINT
           ? { kind: "sol" }
           : { kind: "spl", mint: currentMint },
-    });
+    };
+
+    steps.push(step);
 
     currentMint = nextMint;
   }
 
-  if (steps.length < safeHopCount && currentMint !== WSOL_MINT) {
+  if (steps.length < hopCount && currentMint !== WSOL_MINT) {
     steps.push({
       inMint: currentMint,
       outMint: WSOL_MINT,
