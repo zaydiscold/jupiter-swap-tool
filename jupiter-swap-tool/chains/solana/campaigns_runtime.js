@@ -165,6 +165,9 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints = []) {
   const steps = [];
   for (let hop = 0; hop < hopCount; hop += 1) {
     const isFinalHop = hop === hopCount - 1;
+    if (isFinalHop && currentMint === WSOL_MINT) {
+      break;
+    }
     let nextMint;
     if (isFinalHop) {
       nextMint = WSOL_MINT;
