@@ -74,26 +74,33 @@ function resolveWallet(options, fallbackWallet) {
     if (providedWallet.publicKey instanceof PublicKey) {
       return providedWallet;
     }
-    if (typeof providedWallet === "string" || providedWallet instanceof PublicKey || isBytesLike(providedWallet)) {
-      return new ReadOnlyWallet(providedWallet);
-    }
-    if (providedWallet.publicKey !== undefined) {
+    if (providedWallet.publicKey) {
       const coercedPublicKey = coercePublicKey(providedWallet.publicKey);
       try {
-        // Some wallet-like objects expose a mutable `publicKey` property. When this
-        // is the case we prefer to update the existing wallet so that any custom
-        // signing behaviour is preserved.
         providedWallet.publicKey = coercedPublicKey;
         return providedWallet;
-      } catch (error) {
-        // If the property is read-only (for example, a getter) fall back to a
-        // lightweight read-only wallet instance instead.
+      } catch (err) {
         return new ReadOnlyWallet(coercedPublicKey);
       }
     }
     return new ReadOnlyWallet(providedWallet);
   }
-  if (fallbackWallet) return fallbackWallet;
+  if (fallbackWallet) {
+    if (fallbackWallet.publicKey && !(fallbackWallet.publicKey instanceof PublicKey)) {
+      const coercedPublicKey = coercePublicKey(fallbackWallet.publicKey);
+      try {
+        fallbackWallet.publicKey = coercedPublicKey;
+        return fallbackWallet;
+      } catch (err) {
+        const clone = Object.create(Object.getPrototypeOf(fallbackWallet) || Object.prototype);
+        return Object.assign(clone, fallbackWallet, { publicKey: coercedPublicKey });
+      }
+    }
+    if (typeof fallbackWallet === "string" || isBytesLike(fallbackWallet)) {
+      return new ReadOnlyWallet(fallbackWallet);
+    }
+    return fallbackWallet;
+  }
   if (options?.publicKey) {
     return new ReadOnlyWallet(options.publicKey);
   }
