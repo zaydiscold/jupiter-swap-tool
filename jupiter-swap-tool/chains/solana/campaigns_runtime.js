@@ -239,8 +239,17 @@ export function resolveRandomizedStep(logicalStep, rng, context = {}) {
     : [];
   const selectMint =
     typeof context.selectMint === "function"
-      ? context.selectMint
-      : () => pickRandomMintFromPool(rngFn, pool, randomization);
+      ? (options = randomization, overrideRng = rngFn) =>
+          context.selectMint(
+            { ...randomization, ...(options || {}) },
+            typeof overrideRng === "function" ? overrideRng : rngFn
+          )
+      : (options = randomization, overrideRng = rngFn) =>
+          pickRandomMintFromPool(
+            typeof overrideRng === "function" ? overrideRng : rngFn,
+            pool,
+            { ...randomization, ...(options || {}) }
+          );
 
   const sessionKey = randomization.sessionKey || null;
   const excludeMints = randomization.excludeMints || [];
