@@ -82,19 +82,38 @@ function tokensByTags(tokens, tags) {
   );
 }
 
-export function pickPortionLamports(rng, spendableLamports) {
-  if (spendableLamports <= WALLET_MIN_REST_LAMPORTS) {
+export function pickPortionLamports(rng, spendableLamports, options = {}) {
+  const minRestLamports =
+    typeof options.minRestLamports === "bigint" ? options.minRestLamports : WALLET_MIN_REST_LAMPORTS;
+  const dustFloorLamports =
+    typeof options.dustFloorLamports === "bigint" ? options.dustFloorLamports : 10_000n;
+  if (spendableLamports <= minRestLamports) {
     return 0n;
   }
   const denominator = BigInt(pickInt(rng, 3, 9));
   let amount = spendableLamports / denominator;
-  if (amount < 10_000n) {
-    amount = 10_000n;
+  if (amount < dustFloorLamports) {
+    amount = dustFloorLamports;
   }
-  if (spendableLamports - amount < WALLET_MIN_REST_LAMPORTS) {
-    amount = spendableLamports - WALLET_MIN_REST_LAMPORTS;
+  if (spendableLamports - amount < minRestLamports) {
+    amount = spendableLamports - minRestLamports;
   }
   return amount > 0n ? amount : 0n;
+}
+
+function pickSpendFraction(rng) {
+  const baseDenominator = pickInt(rng, 4, 9);
+  const base = 1 / baseDenominator;
+  const jitter = 0.8 + rng() * 0.4;
+  const raw = base * jitter;
+  return Math.min(0.65, Math.max(0.08, raw));
+}
+
+function clampSpendFraction(value) {
+  if (!Number.isFinite(value)) {
+    return 0.25;
+  }
+  return Math.min(0.65, Math.max(0.05, value));
 }
 
 function estimateStepCostLamports(step) {
@@ -126,27 +145,36 @@ export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   return accepted;
 }
 
-function planLongChainMints(rng, poolMints, length) {
+function planLongChainSteps(rng, poolMints) {
   if (!Array.isArray(poolMints) || poolMints.length === 0) {
     return [];
   }
-  const sequence = [];
-  let last = null;
-  let prev = null;
-  for (let i = 0; i < length; i += 1) {
-    const shuffled = shuffle(rng, poolMints);
-    let pick = shuffled[0];
-    if (last && pick?.mint === last.mint && shuffled[1]) {
-      pick = shuffled[1];
+  const hopCount = pickInt(rng, 10, 25);
+  const steps = [];
+  let currentMint = WSOL_MINT;
+  for (let hop = 0; hop < hopCount; hop += 1) {
+    const isFinalHop = hop === hopCount - 1;
+    let nextMint;
+    if (isFinalHop) {
+      nextMint = WSOL_MINT;
+    } else {
+      const shuffled = shuffle(rng, poolMints);
+      const pick = shuffled.find((entry) => entry?.mint && entry.mint !== currentMint);
+      nextMint = pick?.mint;
     }
-    if (prev && pick?.mint === prev.mint && shuffled[2]) {
-      pick = shuffled[2];
+    if (!nextMint) {
+      return [];
     }
-    sequence.push(pick);
-    prev = last;
-    last = pick;
+    const step = {
+      inMint: currentMint,
+      outMint: nextMint,
+      requiresAta: nextMint !== WSOL_MINT,
+      sourceBalance: currentMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: currentMint },
+    };
+    steps.push(step);
+    currentMint = nextMint;
   }
-  return sequence;
+  return steps;
 }
 
 function planBuckshotScatterTargets(rng, poolMints, count) {
@@ -219,105 +247,35 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
-  if (kind === "meme-carousel") {
-    const chainLength = Math.max(safeTarget, 12);
-    const chain = planLongChainMints(rng, poolMints, chainLength);
-    logicalSteps = chain.map((entry) => ({
-      outMint: entry?.mint,
-      requiresAta: entry?.mint !== WSOL_MINT,
-    }));
-  } else if (kind === "btc-eth-circuit") {
-    const sweepHoldings = normalizeHoldings(holdings);
-    const availablePool = Array.isArray(poolMints)
-      ? poolMints.filter((entry) => entry?.mint && entry.mint !== WSOL_MINT)
-      : [];
-    if (availablePool.length === 0) {
-      logicalSteps = [];
-    } else {
-      const cycles = [];
-      const fanTargetsPerCycle = Math.max(1, Math.min(3, availablePool.length));
-      const cyclesNeeded = Math.max(1, Math.ceil(safeTarget / fanTargetsPerCycle));
-      const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-      const solBalance = typeof solBalanceLamports === "bigint"
-        ? solBalanceLamports
-        : BigInt(solBalanceLamports ?? 0);
-      const estimatedSpendable = solBalance > baseReserve ? solBalance - baseReserve : 0n;
-      let cycleId = 0;
-      for (let cycleIndex = 0; cycleIndex < cyclesNeeded; cycleIndex += 1) {
-        const cycleTargets = pickCycleFanTargets(rng, availablePool);
-        if (cycleTargets.length === 0) {
-          continue;
-        }
-        const totalWeight = cycleTargets.reduce((sum, entry) => sum + BigInt(entry.weight || 0), 0n);
-        const steps = [];
-        for (const holding of sweepHoldings) {
-          steps.push({
-            kind: "sweepToSOL",
-            logicalStep: {
-              mint: holding.mint,
-              requiresAta: false,
-              estimatedLamports: 0n,
-              cycleId,
-            },
-          });
-        }
-        let remainingEstimate = estimatedSpendable;
-        for (let idx = 0; idx < cycleTargets.length; idx += 1) {
-          const target = cycleTargets[idx];
-          const weightBigInt = BigInt(target.weight || 0);
-          let allocation = 0n;
-          if (idx === cycleTargets.length - 1) {
-            allocation = remainingEstimate;
-          } else if (totalWeight > 0n && remainingEstimate > 0n) {
-            allocation = (estimatedSpendable * weightBigInt) / totalWeight;
-            if (allocation > remainingEstimate) {
-              allocation = remainingEstimate;
-            }
-          }
-          if (allocation < 0n) allocation = 0n;
-          remainingEstimate = remainingEstimate > allocation ? remainingEstimate - allocation : 0n;
-          steps.push({
-            kind: "fanOutSwap",
-            logicalStep: {
-              inMint: WSOL_MINT,
-              outMint: target.mint,
-              requiresAta: target.mint !== WSOL_MINT,
-              cycleId,
-              targetIndex: idx,
-              totalTargets: cycleTargets.length,
-              weight: Number(target.weight || 0),
-              totalWeight: Number(totalWeight > 0n ? totalWeight : 0n),
-              estimatedLamports: allocation,
-            },
-          });
-        }
-        if (steps.length > 0) {
-          cycles.push(...steps);
-          cycleId += 1;
-        }
-      }
-      logicalSteps = cycles;
-    }
+  let basePath = [];
+  if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
+    logicalSteps = planLongChainSteps(rng, poolMints);
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      basePath = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
+        inMint: WSOL_MINT,
         outMint: picks[idx % picks.length].mint,
         requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
+        sourceBalance: { kind: "sol" },
       }));
     }
   } else {
-    logicalSteps = Array.from({ length: safeTarget }, () => ({
-      outMint: poolMints[Math.floor(rng() * poolMints.length)]?.mint,
-      requiresAta: true,
-    }));
+    logicalSteps = Array.from({ length: safeTarget }, () => {
+      const choice = poolMints[Math.floor(rng() * poolMints.length)]?.mint;
+      return {
+        inMint: WSOL_MINT,
+        outMint: choice,
+        requiresAta: choice !== WSOL_MINT,
+        sourceBalance: { kind: "sol" },
+      };
+    });
   }
 
-  if (!logicalSteps.length) {
+  if (!basePath.length) {
     return { schedule: [] };
   }
 
@@ -327,10 +285,24 @@ export function buildTimedPlanForWallet({
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
+  let pathIdx = 0;
+  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
-  for (let idx = 0; idx < logicalSteps.length; idx += 1) {
-    const logical = logicalSteps[idx];
+  for (let idx = 0; idx < safeTarget; idx += 1) {
+    const template = basePath[pathIdx % basePath.length];
+    const toMint = template?.toMint;
+    if (!toMint) {
+      break;
+    }
+    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
+    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
+    const logical = {
+      fromMint: fromMintForStep,
+      toMint,
+      spendFraction,
+      requiresAta: toMint !== WSOL_MINT,
+    };
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta =
@@ -355,18 +327,19 @@ export function buildTimedPlanForWallet({
       logicalStep: normalizedLogical,
       idx,
     });
-    if (schedule[schedule.length - 1]?.kind === "fanOutSwap" || schedule[schedule.length - 1]?.kind === "swapHop") {
-      sinceCheckpoint += 1;
-      if (sinceCheckpoint >= checkpointEvery) {
-        sinceCheckpoint = 0;
-        const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
-        schedule.push({
-          kind: "checkpointToSOL",
-          dueAt: dueAt + checkpointDelay,
-          logicalStep: { outMint: WSOL_MINT, requiresAta: false },
-          idx: idx + 0.1,
-        });
-      }
+    sinceCheckpoint += 1;
+    currentFromMint = toMint;
+    pathIdx = (pathIdx + 1) % basePath.length;
+    if (sinceCheckpoint >= checkpointEvery) {
+      sinceCheckpoint = 0;
+      const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
+      schedule.push({
+        kind: "checkpointToSOL",
+        dueAt: dueAt + checkpointDelay,
+        logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false, sourceBalance: { kind: "sol" } },
+        idx: idx + 0.1,
+      });
+      currentFromMint = WSOL_MINT;
     }
   }
 
@@ -474,7 +447,7 @@ let HOOKS = {
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
-  listSweepableHoldings: null,
+  getSplBalanceLamports: null,
 };
 
 export function registerHooks(nextHooks) {
@@ -485,30 +458,49 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
+  const outMint = logicalStep?.outMint;
+  const inMint = logicalStep?.inMint ?? WSOL_MINT;
+  const sourceMeta = logicalStep?.sourceBalance;
+  const usesSol = sourceMeta?.kind === "sol" || inMint === WSOL_MINT;
+  if (!outMint) {
+    throw new Error("missing out mint");
+  }
   const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
   const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-  const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
-  if (spendable <= 0n) {
-    throw new Error("insufficient spendable SOL");
+  if (balanceLamports < baseReserve) {
+    throw new Error("insufficient SOL balance for fees");
   }
-  let amountLamports = logicalStep?.amountLamports;
-  if (typeof amountLamports === "string") {
-    amountLamports = BigInt(amountLamports);
-  }
-  if (typeof amountLamports === "number") {
-    amountLamports = BigInt(Math.max(0, Math.floor(amountLamports)));
-  }
-  if (typeof amountLamports !== "bigint" || amountLamports <= 0n) {
-    amountLamports = pickPortionLamports(rng, spendable);
+  let amountLamports = 0n;
+  if (usesSol) {
+    const minRest =
+      typeof sourceMeta?.minRestLamports === "bigint" ? sourceMeta.minRestLamports : WALLET_MIN_REST_LAMPORTS;
+    const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+    if (spendable <= 0n) {
+      throw new Error("insufficient spendable SOL");
+    }
+    amountLamports = pickPortionLamports(rng, spendable, {
+      minRestLamports: minRest,
+      dustFloorLamports: sourceMeta?.dustFloorLamports,
+    });
+  } else {
+    if (!HOOKS.getSplBalanceLamports) {
+      throw new Error("campaign hooks missing SPL balance reader");
+    }
+    const balanceMint = sourceMeta?.mint ?? inMint;
+    const splBalanceLamports = await HOOKS.getSplBalanceLamports(pubkeyBase58, balanceMint);
+    if (splBalanceLamports <= 0n) {
+      throw new Error("insufficient SPL balance");
+    }
+    const minRest =
+      typeof sourceMeta?.minRestLamports === "bigint" ? sourceMeta.minRestLamports : 0n;
+    amountLamports = pickPortionLamports(rng, splBalanceLamports, {
+      minRestLamports: minRest,
+      dustFloorLamports: sourceMeta?.dustFloorLamports,
+    });
   }
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
-  const outMint = logicalStep?.outMint;
-  if (!outMint) {
-    throw new Error("missing out mint");
-  }
-  const inMint = logicalStep?.inMint || WSOL_MINT;
   return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports);
 }
 
