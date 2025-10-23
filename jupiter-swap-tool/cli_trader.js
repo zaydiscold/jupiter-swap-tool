@@ -5007,7 +5007,9 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
-  const rng = typeof options.rng === "function" ? options.rng : Math.random;
+  const rng = typeof options.rng === "function"
+    ? options.rng
+    : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
@@ -5037,10 +5039,6 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     options.targetSwaps,
     options.targetHopCount
   );
-
-  if (!rng) {
-    rng = createDeterministicRng(`${normalizedKey}:scheduler`);
-  }
 
   const normalizedOverride = Number(swapTargetOverride);
   const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
