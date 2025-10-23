@@ -24,6 +24,7 @@ const WALLET_MIN_REST_LAMPORTS = SOL_TO_LAMPORTS(WALLET_MIN_REST_SOL);
 const ATA_RENT_EST_LAMPORTS = SOL_TO_LAMPORTS(ATA_RENT_EST_SOL);
 const FEE_LAMPORTS = SOL_TO_LAMPORTS(0.00001);
 const JUP_BUFFER_LAMPORTS = SOL_TO_LAMPORTS(0.0005);
+const BPS_SCALE = 10_000n;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -157,6 +158,43 @@ function planBuckshotScatterTargets(rng, poolMints, count) {
   return shuffled.slice(0, Math.min(count, shuffled.length));
 }
 
+function pickConvergenceMint(rng, picks, poolMints) {
+  const lists = [Array.isArray(picks) ? picks : [], Array.isArray(poolMints) ? poolMints : []];
+  const preferred = [];
+  for (const entries of lists) {
+    for (const entry of entries) {
+      if (!entry?.mint || entry.mint === WSOL_MINT) continue;
+      const symbol = (entry.symbol || "").toUpperCase();
+      if (/USDC|USDT|USD\b|PYUSD|USDC\.E/.test(symbol)) {
+        preferred.push(entry);
+      }
+    }
+  }
+  if (preferred.length === 0) {
+    for (const entries of lists) {
+      for (const entry of entries) {
+        if (entry?.mint && entry.mint !== WSOL_MINT) {
+          preferred.push(entry);
+        }
+      }
+    }
+  }
+  if (preferred.length === 0) {
+    return WSOL_MINT;
+  }
+  const pick = preferred[Math.floor(rng() * preferred.length)];
+  return pick?.mint || WSOL_MINT;
+}
+
+function clampBps(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return 0;
+  }
+  if (value < 0) return 0;
+  if (value > 10_000) return 10_000;
+  return Math.floor(value);
+}
+
 export function buildTimedPlanForWallet({
   pubkey,
   rng,
@@ -169,33 +207,189 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let logicalSteps = [];
+  let swapEntries = [];
+  const planMeta = {};
+
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     const chainLength = Math.max(safeTarget, 12);
     const chain = planLongChainMints(rng, poolMints, chainLength);
-    logicalSteps = chain.map((entry) => ({
-      outMint: entry?.mint,
-      requiresAta: entry?.mint !== WSOL_MINT,
-    }));
+    swapEntries = Array.from({ length: safeTarget }, (_, idx) => {
+      const entry = chain[idx % chain.length];
+      return {
+        phase: kind,
+        inMint: WSOL_MINT,
+        outMint: entry?.mint,
+        requiresAta: entry?.mint !== WSOL_MINT,
+      };
+    });
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8)));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      logicalSteps = [];
+      swapEntries = [];
     } else {
-      logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
-        outMint: picks[idx % picks.length].mint,
-        requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
-      }));
+      const convergeMint = pickConvergenceMint(rng, picks, poolMints);
+      let scatterTargets = picks.filter((entry) => entry?.mint);
+      if (convergeMint && scatterTargets.length > 1) {
+        scatterTargets = scatterTargets.filter((entry) => entry.mint !== convergeMint);
+      }
+      if (scatterTargets.length === 0) {
+        scatterTargets = picks.filter((entry) => entry?.mint);
+      }
+
+      const convergeTrigger =
+        rng() < 0.5
+          ? { mode: "manual" }
+          : {
+              mode: "auto",
+              autoAfterRounds: Math.max(
+                1,
+                Math.min(4, Math.floor(safeTarget / Math.max(1, scatterTargets.length * 2)))
+              ),
+            };
+
+      const scatterSummaries = [];
+      const swapPlan = [];
+      let swapCount = 0;
+
+      const pushScatterEntry = (target, allocationBps, round) => {
+        if (!target?.mint || swapCount >= safeTarget) {
+          return false;
+        }
+        const normalizedBps = clampBps(allocationBps);
+        if (normalizedBps <= 0) {
+          return false;
+        }
+        swapPlan.push({
+          phase: "scatter",
+          inMint: WSOL_MINT,
+          outMint: target.mint,
+          allocationBps: normalizedBps,
+          requiresAta: target.mint !== WSOL_MINT,
+          round,
+        });
+        swapCount += 1;
+        return true;
+      };
+
+      const pushConvergeEntry = (target, allocationBps, round) => {
+        if (!target?.mint || target.mint === convergeMint || swapCount >= safeTarget) {
+          return false;
+        }
+        const normalizedBps = clampBps(allocationBps);
+        if (normalizedBps <= 0) {
+          return false;
+        }
+        swapPlan.push({
+          phase: "converge",
+          inMint: target.mint,
+          outMint: convergeMint,
+          allocationBps: normalizedBps,
+          requiresAta: convergeMint !== WSOL_MINT,
+          round,
+        });
+        swapCount += 1;
+        return true;
+      };
+
+      while (swapCount < safeTarget) {
+        const cycleBudgetBps = pickInt(rng, 7000, 8000);
+        let allocatedBps = 0;
+        let roundsThisCycle = 0;
+        let scatterDone = false;
+        while (!scatterDone && swapCount < safeTarget) {
+          roundsThisCycle += 1;
+          const order = shuffle(rng, scatterTargets);
+          let scatteredThisRound = false;
+          for (const target of order) {
+            if (swapCount >= safeTarget) {
+              break;
+            }
+            const remainingBps = cycleBudgetBps - allocatedBps;
+            if (remainingBps <= 0) {
+              break;
+            }
+            let stepBps = pickInt(rng, 450, 2200);
+            if (stepBps > remainingBps) {
+              stepBps = remainingBps;
+            }
+            if (pushScatterEntry(target, stepBps, roundsThisCycle)) {
+              allocatedBps += stepBps;
+              scatteredThisRound = true;
+            }
+            if (swapCount >= safeTarget) {
+              break;
+            }
+          }
+          const autoStop =
+            convergeTrigger.mode === "auto" &&
+            roundsThisCycle >= (convergeTrigger.autoAfterRounds ?? 1) &&
+            allocatedBps >= Math.floor(cycleBudgetBps * 0.65);
+          if (allocatedBps >= cycleBudgetBps || autoStop || !scatteredThisRound) {
+            scatterDone = true;
+          }
+        }
+        scatterSummaries.push({
+          rounds: roundsThisCycle,
+          budgetBps: cycleBudgetBps,
+          allocatedBps,
+        });
+
+        if (swapCount >= safeTarget) {
+          break;
+        }
+
+        if (swapPlan.length > 0 && rng() < 0.55) {
+          swapPlan[swapPlan.length - 1].checkpointAfter = true;
+        }
+
+        const remainingSwaps = safeTarget - swapCount;
+        const perRound = Math.max(1, scatterTargets.length);
+        const convergeRounds = Math.max(1, Math.min(2, Math.floor(remainingSwaps / perRound) || 1));
+        for (let round = 1; round <= convergeRounds && swapCount < safeTarget; round += 1) {
+          const order = shuffle(rng, scatterTargets);
+          let convertedThisRound = false;
+          for (const target of order) {
+            if (swapCount >= safeTarget) {
+              break;
+            }
+            if (pushConvergeEntry(target, pickInt(rng, 6000, 10000), round)) {
+              convertedThisRound = true;
+            }
+          }
+          if (convertedThisRound && rng() < 0.35) {
+            swapPlan[swapPlan.length - 1].checkpointAfter = true;
+          }
+        }
+      }
+
+      while (swapCount < safeTarget) {
+        const fallback =
+          scatterTargets.length > 0 ? scatterTargets[swapCount % scatterTargets.length] : picks[0];
+        if (!pushScatterEntry(fallback, pickInt(rng, 500, 1500), 0)) {
+          break;
+        }
+      }
+
+      swapEntries = swapPlan;
+      planMeta.convergeTrigger = convergeTrigger;
+      planMeta.convergeMint = convergeMint;
+      planMeta.scatterTargets = scatterTargets.map((entry) => entry?.mint).filter(Boolean);
+      planMeta.scatterSummaries = scatterSummaries;
     }
   } else {
-    logicalSteps = Array.from({ length: safeTarget }, () => ({
-      outMint: poolMints[Math.floor(rng() * poolMints.length)]?.mint,
-      requiresAta: true,
-    }));
+    swapEntries = Array.from({ length: safeTarget }, () => {
+      const pick = poolMints[Math.floor(rng() * poolMints.length)];
+      return {
+        phase: "default",
+        inMint: WSOL_MINT,
+        outMint: pick?.mint,
+        requiresAta: (pick?.mint || "") !== WSOL_MINT,
+      };
+    });
   }
 
-  if (!logicalSteps.length) {
+  if (!swapEntries.length) {
     return { schedule: [] };
   }
 
@@ -205,8 +399,10 @@ export function buildTimedPlanForWallet({
   let sinceCheckpoint = 0;
   const schedule = [];
 
-  for (let idx = 0; idx < safeTarget; idx += 1) {
-    const logical = logicalSteps[idx % logicalSteps.length];
+  let sequenceIdx = 0;
+  for (let idx = 0; idx < swapEntries.length; idx += 1) {
+    const entry = swapEntries[idx];
+    const { checkpointAfter, ...logical } = entry;
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta = Math.max(3_000, Math.floor(baseInterval * jitterAmount));
@@ -215,22 +411,36 @@ export function buildTimedPlanForWallet({
       kind: "swapHop",
       dueAt,
       logicalStep: logical,
-      idx,
+      idx: sequenceIdx,
     });
+    sequenceIdx += 1;
     sinceCheckpoint += 1;
-    if (sinceCheckpoint >= checkpointEvery) {
-      sinceCheckpoint = 0;
+
+    let checkpointForced = checkpointAfter === true;
+    if (checkpointForced) {
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
       schedule.push({
         kind: "checkpointToSOL",
         dueAt: dueAt + checkpointDelay,
         logicalStep: { outMint: WSOL_MINT, requiresAta: false },
-        idx: idx + 0.1,
+        idx: sequenceIdx + 0.1,
       });
+      sinceCheckpoint = 0;
+    }
+
+    if (!checkpointForced && sinceCheckpoint >= checkpointEvery) {
+      const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
+      schedule.push({
+        kind: "checkpointToSOL",
+        dueAt: dueAt + checkpointDelay,
+        logicalStep: { outMint: WSOL_MINT, requiresAta: false },
+        idx: sequenceIdx + 0.1,
+      });
+      sinceCheckpoint = 0;
     }
   }
 
-  return { schedule, checkpointEvery };
+  return { schedule, checkpointEvery, ...planMeta };
 }
 
 export const CAMPAIGNS = {
@@ -314,7 +524,15 @@ export function instantiateCampaignForWallets({
       kind: preset.kind,
       poolMints,
     });
-    plansByWallet.set(pubkey, { schedule: plan.schedule, rng });
+    plansByWallet.set(pubkey, {
+      schedule: plan.schedule,
+      rng,
+      checkpointEvery: plan.checkpointEvery,
+      convergeTrigger: plan.convergeTrigger,
+      convergeMint: plan.convergeMint,
+      scatterTargets: plan.scatterTargets,
+      scatterSummaries: plan.scatterSummaries,
+    });
   }
 
   return {
@@ -328,6 +546,7 @@ let HOOKS = {
   jupiterLiteSwap: null,
   findLargestSplHolding: null,
   splToLamports: null,
+  findSplHoldingForMint: null,
 };
 
 export function registerHooks(nextHooks) {
@@ -338,21 +557,73 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng) {
   if (!HOOKS.getSolLamports || !HOOKS.jupiterLiteSwap) {
     throw new Error("campaign hooks not registered");
   }
-  const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
-  const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
-  const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
-  if (spendable <= 0n) {
-    throw new Error("insufficient spendable SOL");
-  }
-  const amountLamports = pickPortionLamports(rng, spendable);
-  if (amountLamports <= 0n) {
-    throw new Error("amount below dust floor");
-  }
   const outMint = logicalStep?.outMint;
   if (!outMint) {
     throw new Error("missing out mint");
   }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+  const inMint = logicalStep?.inMint || WSOL_MINT;
+  const allocationBps = clampBps(logicalStep?.allocationBps ?? 0);
+
+  if (inMint === WSOL_MINT) {
+    const balanceLamports = await HOOKS.getSolLamports(pubkeyBase58);
+    const baseReserve = WALLET_MIN_REST_LAMPORTS + GAS_BASE_RESERVE_LAMPORTS;
+    const spendable = balanceLamports > baseReserve ? balanceLamports - baseReserve : 0n;
+    if (spendable <= 0n) {
+      throw new Error("insufficient spendable SOL");
+    }
+    let amountLamports = 0n;
+    if (allocationBps > 0) {
+      amountLamports = (spendable * BigInt(allocationBps)) / BPS_SCALE;
+    }
+    if (amountLamports > 0n && allocationBps > 0) {
+      const jitter = BigInt(9000 + Math.floor(rng() * 2000));
+      amountLamports = (amountLamports * jitter) / BPS_SCALE;
+    }
+    if (amountLamports <= 0n) {
+      amountLamports = pickPortionLamports(rng, spendable);
+    }
+    if (amountLamports <= 0n) {
+      throw new Error("amount below dust floor");
+    }
+    if (amountLamports > spendable) {
+      amountLamports = spendable;
+    }
+    if (amountLamports <= 0n) {
+      throw new Error("unable to compute scatter amount");
+    }
+    return HOOKS.jupiterLiteSwap(pubkeyBase58, WSOL_MINT, outMint, amountLamports);
+  }
+
+  if (!HOOKS.findSplHoldingForMint || !HOOKS.splToLamports) {
+    throw new Error("spl balance hooks not registered");
+  }
+  const holding = await HOOKS.findSplHoldingForMint(pubkeyBase58, inMint);
+  if (!holding || !holding.uiAmount) {
+    throw new Error("missing SPL holdings for converge");
+  }
+  const baseLamportsRaw = await HOOKS.splToLamports(pubkeyBase58, inMint, holding.uiAmount);
+  const baseLamports = BigInt(baseLamportsRaw ?? 0);
+  if (baseLamports <= 0n) {
+    throw new Error("empty SPL holdings for converge");
+  }
+  let lamportsIn = baseLamports;
+  if (allocationBps > 0) {
+    lamportsIn = (baseLamports * BigInt(allocationBps)) / BPS_SCALE;
+  }
+  if (lamportsIn > 0n && allocationBps > 0) {
+    const jitter = BigInt(9000 + Math.floor(rng() * 2000));
+    lamportsIn = (lamportsIn * jitter) / BPS_SCALE;
+  }
+  if (lamportsIn > baseLamports) {
+    lamportsIn = baseLamports;
+  }
+  if (lamportsIn <= 0n) {
+    lamportsIn = baseLamports;
+  }
+  if (lamportsIn <= 0n) {
+    throw new Error("unable to size converge swap");
+  }
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, lamportsIn);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {

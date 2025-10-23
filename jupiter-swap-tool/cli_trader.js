@@ -4267,6 +4267,9 @@ function ensureCampaignHooksRegistered() {
     splToLamports: async (pubkeyBase58, mint, uiAmount) => {
       return campaignSplToLamports(pubkeyBase58, mint, uiAmount);
     },
+    findSplHoldingForMint: async (pubkeyBase58, mint) => {
+      return campaignFindHoldingForMint(pubkeyBase58, mint);
+    },
   });
   campaignHooksRegistered = true;
 }
@@ -4411,6 +4414,51 @@ async function campaignFindLargestHolding(pubkeyBase58) {
     }
     if (!best) return null;
     return { mint: best.mint, uiAmount: best.uiAmount, decimals: best.decimals };
+  } finally {
+    try {
+      connection?.destroy?.();
+    } catch (_) {}
+  }
+}
+
+async function campaignFindHoldingForMint(pubkeyBase58, mint) {
+  if (!mint) {
+    return null;
+  }
+  const entry = getCampaignWallet(pubkeyBase58);
+  const owner = entry.wallet.kp.publicKey;
+  const connection = createRpcConnection("confirmed");
+  try {
+    const parsed = await getAllParsedTokenAccounts(connection, owner);
+    for (const { account } of parsed) {
+      const info = account?.data?.parsed?.info;
+      if (!info) continue;
+      if (info.mint !== mint) continue;
+      const rawAmount = info.tokenAmount?.amount ?? "0";
+      let amount;
+      try {
+        amount = BigInt(rawAmount);
+      } catch (_) {
+        amount = 0n;
+      }
+      if (amount <= 0n) {
+        const fallbackUi = info.tokenAmount?.uiAmount ?? info.tokenAmount?.uiAmountString;
+        if (!fallbackUi) {
+          continue;
+        }
+        return {
+          mint,
+          uiAmount: fallbackUi,
+          decimals: info.tokenAmount?.decimals ?? 0,
+        };
+      }
+      return {
+        mint,
+        uiAmount: rawAmount,
+        decimals: info.tokenAmount?.decimals ?? 0,
+      };
+    }
+    return null;
   } finally {
     try {
       connection?.destroy?.();
