@@ -14,6 +14,8 @@ export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
+const RANDOM_PLACEHOLDER = "RANDOM";
+const RANDOM_HOPS_KIND = "random-hop-rotation";
 const SOL_LIKE_MINTS = new Set([WSOL_MINT, "11111111111111111111111111111111"]);
 const SOL_TO_LAMPORTS = (value) => {
   const numeric = Number(value || 0);
@@ -170,11 +172,206 @@ export function truncatePlanToBudget(planSteps, solBalanceLamports) {
   return accepted;
 }
 
-function planLongChainSteps(rng, poolMints) {
-  if (!Array.isArray(poolMints) || poolMints.length === 0) {
-    return [];
+function applyTagFilters(pool, includeSets, excludeTags) {
+  const safePool = Array.isArray(pool) ? pool : [];
+  const includeList = Array.isArray(includeSets) ? includeSets : [];
+  const fallbackSets = includeList.length > 0 ? [...includeList, null] : [null];
+  const excludes = Array.isArray(excludeTags) ? excludeTags : [];
+
+  const applyExclude = (entries) => {
+    if (!Array.isArray(entries) || entries.length === 0) {
+      return [];
+    }
+    if (!excludes.length) {
+      return entries.filter((entry) => entry && entry.mint);
+    }
+    const filtered = entries.filter((entry) => {
+      if (!entry || !entry.mint) return false;
+      const tags = Array.isArray(entry.tags) ? entry.tags : [];
+      const excluded = tags.some((tag) => excludes.includes(tag));
+      return !excluded;
+    });
+    return filtered.length > 0 ? filtered : entries.filter((entry) => entry && entry.mint);
+  };
+
+  for (const tagSet of fallbackSets) {
+    let candidates = safePool;
+    if (Array.isArray(tagSet) && tagSet.length > 0) {
+      candidates = safePool.filter((entry) => {
+        if (!entry || !entry.mint) return false;
+        const tags = Array.isArray(entry.tags) ? entry.tags : [];
+        return tags.some((tag) => tagSet.includes(tag));
+      });
+    }
+    const afterExclude = applyExclude(candidates);
+    if (afterExclude.length > 0) {
+      return afterExclude;
+    }
   }
+
+  return applyExclude(safePool);
+}
+
+export function resolveScheduledLogicalStep(logicalStep, rng) {
+  if (!logicalStep) {
+    return null;
+  }
+  if (logicalStep.resolved && logicalStep.resolved.outMint) {
+    return logicalStep.resolved;
+  }
+  if (logicalStep.resolver !== "RANDOM") {
+    return logicalStep;
+  }
+
+  const pool = Array.isArray(logicalStep.pool) ? logicalStep.pool : [];
+  const validPool = pool.filter((entry) => entry && entry.mint);
+  if (validPool.length === 0) {
+    throw new Error("random logical step has empty pool");
+  }
+
+  const includeSets = [];
+  if (Array.isArray(logicalStep.includeTags) && logicalStep.includeTags.length > 0) {
+    includeSets.push(logicalStep.includeTags);
+  }
+  if (
+    Array.isArray(logicalStep.fallbackIncludeTags) &&
+    logicalStep.fallbackIncludeTags.length > 0
+  ) {
+    includeSets.push(logicalStep.fallbackIncludeTags);
+  }
+
+  const excludeTags = Array.isArray(logicalStep.excludeTags)
+    ? logicalStep.excludeTags
+    : [];
+
+  let candidates = applyTagFilters(validPool, includeSets, excludeTags);
+  const disallow = new Set();
+  if (logicalStep.inMint) {
+    disallow.add(logicalStep.inMint);
+  }
+  if (Array.isArray(logicalStep.disallowMints)) {
+    for (const mint of logicalStep.disallowMints) {
+      if (mint) disallow.add(mint);
+    }
+  }
+  if (disallow.size > 0) {
+    const filtered = candidates.filter((entry) => !disallow.has(entry.mint));
+    if (filtered.length > 0) {
+      candidates = filtered;
+    }
+  }
+
+  if (candidates.length === 0) {
+    throw new Error("random logical step has no eligible candidates");
+  }
+
+  const randomFn = typeof rng === "function" ? rng : Math.random;
+  const idx = Math.floor(randomFn() * candidates.length);
+  const chosen = candidates[Math.min(idx, candidates.length - 1)];
+  if (!chosen?.mint) {
+    throw new Error("random logical step produced invalid candidate");
+  }
+
+  const baseSource =
+    logicalStep.sourceBalance && typeof logicalStep.sourceBalance === "object"
+      ? { ...logicalStep.sourceBalance }
+      : { kind: "sol" };
+
+  const resolved = {
+    inMint: logicalStep.inMint ?? WSOL_MINT,
+    outMint: chosen.mint,
+    requiresAta: chosen.mint !== WSOL_MINT,
+    sourceBalance: baseSource,
+    metadata: {
+      random: true,
+      flow: logicalStep.flow ?? null,
+      symbol: chosen.symbol ?? null,
+      tags: Array.isArray(chosen.tags) ? chosen.tags.slice() : [],
+    },
+  };
+
+  logicalStep.resolved = resolved;
+  logicalStep.requiresAta = resolved.requiresAta;
+  logicalStep.resolvedCandidate = chosen;
+  return resolved;
+}
+
+function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
+  const normalizedPool = Array.isArray(poolMints)
+    ? poolMints
+        .map((entry) => entry?.mint)
+        .filter((mint) => mint && mint !== WSOL_MINT)
+    : [];
+  const fallbackCycle =
+    normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
+
+  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+
+  const steps = [];
+  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+  let currentMint = WSOL_MINT;
+  for (let hop = 0; hop < safeHopCount; hop += 1) {
+    const isFinalHop = hop === safeHopCount - 1;
+    if (isFinalHop && currentMint === WSOL_MINT) {
+      break;
+    }
+
+    let nextMint;
+    if (currentMint === WSOL_MINT) {
+      const candidateIdx = hop % fallbackCycle.length;
+      nextMint = fallbackCycle[candidateIdx] ?? WSOL_MINT;
+      if (!nextMint || nextMint === WSOL_MINT) {
+        nextMint = fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
+      }
+      if (!nextMint) {
+        nextMint = RANDOM_MINT_PLACEHOLDER;
+      }
+    } else {
+      nextMint = WSOL_MINT;
+    }
+
+    if (!nextMint || nextMint === currentMint) {
+      continue;
+    }
+
+    const step = {
+      inMint: currentMint,
+      outMint: nextMint,
+      requiresAta: nextMint !== WSOL_MINT,
+      sourceBalance:
+        currentMint === WSOL_MINT
+          ? { kind: "sol" }
+          : { kind: "spl", mint: currentMint },
+    };
+
+    // Record the hop so fallback chains produce the expected swaps.
+    steps.push(step);
+
+    currentMint = nextMint;
+  }
+
+  const shouldAppendFinalHop = steps.length < safeHopCount && currentMint !== WSOL_MINT;
+
+  if (shouldAppendFinalHop) {
+    steps.push({
+      inMint: currentMint,
+      outMint: WSOL_MINT,
+      requiresAta: false,
+      sourceBalance: { kind: "spl", mint: currentMint },
+    });
+  }
+
+  return steps;
+}
+
+function planLongChainSteps(rng, poolMints) {
   const hopCount = pickInt(rng, 10, 25);
+  const normalizedPool = Array.isArray(poolMints)
+    ? poolMints.filter((entry) => entry?.mint)
+    : [];
+  if (normalizedPool.length === 0) {
+    return buildFallbackLongChainSteps(rng, hopCount, poolMints);
+  }
   const steps = [];
   let currentMint = WSOL_MINT;
   for (let hop = 0; hop < hopCount; hop += 1) {
@@ -183,12 +380,12 @@ function planLongChainSteps(rng, poolMints) {
     if (isFinalHop) {
       nextMint = WSOL_MINT;
     } else {
-      const shuffled = shuffle(rng, poolMints);
+      const shuffled = shuffle(rng, normalizedPool);
       const pick = shuffled.find((entry) => entry?.mint && entry.mint !== currentMint);
       nextMint = pick?.mint;
     }
-    if (!nextMint) {
-      return [];
+    if (!nextMint || (!isFinalHop && nextMint === currentMint)) {
+      return buildFallbackLongChainSteps(rng, hopCount, poolMints);
     }
     const step = {
       inMint: currentMint,
@@ -275,6 +472,10 @@ export function buildTimedPlanForWallet({
   let basePath = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
+    if (!logicalSteps.length) {
+      const fallbackHopCount = pickInt(rng, 10, 25);
+      logicalSteps = buildFallbackLongChainSteps(rng, fallbackHopCount, poolMints);
+    }
   } else if (kind === "scatter-then-converge") {
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8) || 3));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
@@ -287,6 +488,12 @@ export function buildTimedPlanForWallet({
         requiresAta: picks[idx % picks.length].mint !== WSOL_MINT,
         sourceBalance: { kind: "sol" },
       }));
+    }
+  } else if (kind === RANDOM_HOPS_KIND) {
+    if (!Array.isArray(poolMints) || poolMints.length === 0) {
+      logicalSteps = [];
+    } else {
+      logicalSteps = planRandomPlaceholderSteps(safeTarget);
     }
   } else if (kind === "icarus" || kind === "zenith" || kind === "aurora") {
     const pairs = Math.max(1, Math.ceil(safeTarget / 2));
@@ -342,6 +549,11 @@ export function buildTimedPlanForWallet({
   let pathIdx = 0;
   let currentFromMint = WSOL_MINT;
   const schedule = [];
+
+  const placeholderState = {
+    currentMint: WSOL_MINT,
+    lastRandomMint: null,
+  };
 
   for (let idx = 0; idx < safeTarget; idx += 1) {
     const template = basePath[pathIdx % basePath.length];
@@ -502,6 +714,7 @@ export function instantiateCampaignForWallets({
       mint: token.mint,
       symbol: token.symbol,
       decimals: token.decimals ?? 6,
+      tags: Array.isArray(token.tags) ? token.tags.slice() : [],
     }))
     .filter((entry) => entry.mint);
 
@@ -749,7 +962,7 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports);
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports, resolvedStep);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {

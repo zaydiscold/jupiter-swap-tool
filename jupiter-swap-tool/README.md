@@ -1,12 +1,12 @@
-# Jupiter Swap Tool CLI (v1.1.2)
+# Jupiter Swap Tool CLI (v1.1.3)
 
 ## Getting Started
 1. Install Node.js 18+ **and** the Anchor CLI dependencies Jupiter Perps relies on (e.g. `cargo install --git https://github.com/coral-xyz/anchor anchor-cli` or follow [Anchor’s installation guide](https://www.anchor-lang.com/docs/installation)).
 2. Clone the repo and run `npm install` to pull the JavaScript dependencies the CLI expects.
 3. Double-click `run_cli_trader.command` (macOS) or run `node cli_trader.js` manually.
 4. When prompted, supply your preferred RPC (or press Enter to use the default).
-5. Open wallet tools with hotkey `1` to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
-6. Use the hotkeys listed below to run funding, sweeping, swap, lend, or perps routines.
+5. Open wallet tools with hotkey `w` (or `1`) to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
+6. Use the hotkeys listed below (or run `node cli_trader.js hotkeys`) to review funding, sweeping, swap, lend, or perps shortcuts.
 
 Run `node cli_trader.js --help` at any time to print the full command summary, or `node cli_trader.js --version` to confirm the CLI build you have installed.
 
@@ -119,27 +119,31 @@ Double-click `run_cli_trader.command` (right-click → **Open** the first time t
    The launcher banner now shows how many wallets are currently eligible for swaps (wallet guard counts) before the hotkey list.
    When you're done, type `CLOSE` (uppercase) at the final prompt to exit the launcher.
 
-- `1` – wallet tools sub-menu (balances, wallet generation/import, wallet guard reset, address listing).
-- `2` – force reset the wallet guard (clears the disabled-for-swaps list until balances runs again).
-- `3` – redistribute SOL from `crew_1.json` evenly across all wallets.
-- `4` – aggregate SOL from every wallet back into `crew_1.json`.
-- `5` – reclaim SOL (close empty SPL/Token-2022 accounts and display the post-cleanup SOL balance when anything is reclaimed).
-- `6` – swap SOL → USDC using the launcher's default amount mode.
-- `7` – buckshot mode (spend an equal SOL slice into every long-circle token, then wait for you to paste new mint addresses to rotate those holdings).
-- `8` – sweep every token balance into SOL (supports custom/unlisted mint addresses).
-- `9` – advanced trade tools (target loop, long circle, RPC tester, crew_1 cycle, BTC/ETH sweep, SOL→USDC→POPCAT lap, and the prewritten Arpeggio/Horizon/Echo flows).
+- `w` / `1` – wallet tools sub-menu (balances, wallet generation/import, wallet guard reset, address listing).
+- `g` / `2` – force reset the wallet guard (clears the disabled-for-swaps list until balances runs again).
+- `d` / `3` – redistribute SOL from `crew_1.json` evenly across all wallets.
+- `a` / `4` – aggregate SOL from every wallet back into `crew_1.json`.
+- `c` / `5` – reclaim SOL (close empty SPL/Token-2022 accounts and display the post-cleanup SOL balance when anything is reclaimed).
+- `u` / `6` – swap SOL → USDC using the launcher's default amount mode.
+- `b` / `7` – buckshot mode (spend an equal SOL slice into every long-circle token, then wait for you to paste new mint addresses to rotate those holdings).
+- `s` / `8` – sweep every token balance into SOL (supports custom/unlisted mint addresses).
+- `t` – test utilities (RPC diagnostics and the Ultra API swap check).
+- `v` / `9` – advanced trade tools (target loop, long circle, RPC tester, crew_1 cycle, BTC/ETH sweep, SOL→USDC→POPCAT lap, and the prewritten Arpeggio/Horizon/Echo flows plus the new randomised Icarus/Zenith/Aurora variants).
 
   Prewritten flow defaults:
   - **Arpeggio** – ~15 minutes end-to-end (legs wait 2–4 min, 3–5 min, 4–6 min, then 2–4 min).
   - **Horizon** – ~60 minutes (legs wait 8–12 min, 10–14 min, 12–18 min, 10–16 min, then 8–12 min).
   - **Echo** – ~6 hours (legs wait 35–55 min, 45–75 min, 60–90 min, 55–95 min, 45–75 min, then 35–55 min).
+  - **Icarus** – matches Arpeggio’s wait windows but swaps into catalog-sampled mints (`SOL → RANDOM → RANDOM → SOL → RANDOM`).
+  - **Zenith** – Horizon’s pacing with per-hop mint sampling from the catalog before returning to SOL each cycle.
+  - **Aurora** – Echo’s multi-hour rhythm with every hop drawing a fresh mint from the catalog while orbiting SOL.
 
   Launching them through the CLI honours `--loops`, `--duration-min`, `--duration`, and `--duration-max` so you can stretch or compress the schedule while the per-leg waits keep their random jitter inside the windows above.
-- `0` – quit immediately.
+- `q` / `0` – quit immediately.
 
 Each swap hotkey expands to the equivalent `swap`/`swap-all` command so you still get full logging from `cli_trader.js`.
 
-> On launch the CLI silently checks SOL balances and suppresses swap flows for any wallet holding under 0.01 SOL. Fund the wallet and rerun `balances` from the wallet tools menu (`1` → `1`) to refresh, or use hotkey `2` for a one-off force reset before the next automatic check.
+> On launch the CLI silently checks SOL balances and suppresses swap flows for any wallet holding under 0.01 SOL. Fund the wallet and rerun `balances` from the wallet tools menu (`w` → `1`) to refresh, or use hotkey `g` / `2` for a one-off force reset before the next automatic check.
 
 > The CLI prints color-coded messages when running in a TTY. Set `NO_COLOR=1` before launching if you prefer plain text.
 
@@ -153,6 +157,7 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 
 -**Perps safety note:** perpetuals are leveraged instruments. Always pre-fund the trading wallet with sufficient USDC collateral, double-check your leverage caps, and monitor liquidation thresholds printed by the CLI before placing orders.
 
+- `hotkeys [--list|--all|context...]` – print the launcher/test/advanced/lend hotkey table without opening the interactive menus.
 - `generate <n> [prefix]` – create wallets (`prefix_1.json`, etc.). Use `PRINT_SECRET_KEYS=1` to print base58 secrets.
 - `import-wallet --secret <secret> [--prefix name] [--path path] [--force]` – import an existing Solana keypair from base58, JSON, or mnemonic (default derivation path `m/44'/501'/0'/0'`).
 - `list` – list all wallet filenames + public keys.
@@ -175,7 +180,7 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 - `long-circle [extra|primary-only]` – run an extended multi-hop route that now includes SOL/USDC/POPCAT/PUMP/PENGU/FART/USELESS/WIF/PFP plus wBTC, cbBTC, and wETH. In `random` mode each wallet receives its own shuffled subset of segments and per-swap random amounts; deterministic runs execute the full cycle using whole balances. Pass `extra` to append an additional randomized SOL-out path (prompted automatically by the launcher).
 - `sweep-to-btc-eth` – sweep every non-SOL holding back into SOL, then split the available SOL across wBTC, cbBTC, and wETH (respecting rent/gas guardrails and using per-wallet random weights when the session is in `random`).
 - `reclaim-sol` – close all zero-balance associated token accounts for every wallet (legacy SPL + Token-2022). Accounts with withheld transfer fees remaining are skipped with an explanatory warning until the mint authority harvests the fees. Alias: `close-token-accounts`.
-- `flow run <arpeggio|horizon|echo> [--loops N] [--duration-min 30m] [--duration 45m] [--duration-max 2h]` – execute a prewritten flow with the defaults above (Arpeggio ≈ 15 min, Horizon ≈ 60 min, Echo ≈ 6 hr). Each leg samples a random wait inside its window (listed in the hotkey section) and overrides clamp to those bounds so custom durations keep the organic pacing.
+- `flow run <arpeggio|horizon|echo|icarus|zenith|aurora> [--loops N] [--duration-min 30m] [--duration 45m] [--duration-max 2h]` – execute a prewritten flow with the defaults above (Arpeggio ≈ 15 min, Horizon ≈ 60 min, Echo ≈ 6 hr). Icarus/Zenith/Aurora mirror those timings but resolve `RANDOM` hops into concrete mints from the catalog at runtime. Each leg samples a random wait inside its window (listed in the hotkey section) and overrides clamp to those bounds so custom durations keep the organic pacing.
 - `lend earn …` / `lend borrow …` – interact with Jupiter Lend (Earn/Borrow beta). Examples: `lend earn tokens`, `lend earn deposit crew_1.json SOL 0.1`, `lend borrow open crew_1.json SOL USDC 1 0.5`. Passing `*` for the wallet, mint, or amount fans out across every active wallet, filters to eligible base assets/share tokens, and defaults to the maximum spendable balance (SOL keeps a rent/fee reserve automatically). Responses log status codes, request IDs, and payloads to help debug the still-beta endpoints. Use `lend borrow close <wallet> *` (or leave the launcher prompt blank) to close every borrow position for a wallet without hunting IDs. Deposits/withdrawals auto-submit returned transactions, auto-create missing ATAs, subtract a ~0.0022 SOL wrap buffer, and back off the deposit amount if the wallet is short on SOL; wallets with <0.005 SOL of headroom are skipped with guidance to top-up. Use `--no-send` to dry-run only.
 - `lend overview` – pull earn positions, earnings, and borrow positions for every discovered wallet in a single call.
 - `perps markets [--group <group>]` – list the perpetual markets Jupiter exposes for the selected group (defaults to `mainnet-beta`). Always confirm you have margin in a funded wallet before trading; liquidations can eat the full deposit.
