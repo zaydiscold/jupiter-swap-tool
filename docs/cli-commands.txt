@@ -1,0 +1,198 @@
+Jupiter Swap Tool CLI Commands
+==============================
+
+Token catalog
+-------------
+- **tokens**
+  - Syntax: `tokens [--verbose|-v|--full] [--refresh]`
+  - Flags: `--verbose/-v/--full` expands catalog details; `--refresh` pulls the latest metadata from the Jupiter API before printing.
+  - Description: Prints the cached token catalog, optionally refreshing it first. 【F:jupiter-swap-tool/cli_trader.js†L12892-L12910】
+
+Wallet and key management
+-------------------------
+- **generate**
+  - Syntax: `generate <count> [prefix]`
+  - Description: Creates the requested number of keypairs under `keypairs/` using the supplied (or default) filename prefix. 【F:jupiter-swap-tool/cli_trader.js†L13015-L13028】
+- **import-wallet**
+  - Syntax: `import-wallet --secret <secret|mnemonic|JSON> [--prefix <name>] [--path <derivationPath>] [--passphrase <phrase>] [--force]`
+  - Description: Imports a wallet from a raw secret key, mnemonic, or JSON payload. Optional arguments rename the file, pick a derivation path, add a BIP39 passphrase, or overwrite an existing file. A positional secret is also accepted. 【F:jupiter-swap-tool/cli_trader.js†L13029-L13048】【F:jupiter-swap-tool/cli_trader.js†L10940-L11029】
+- **list**
+  - Syntax: `list`
+  - Description: Prints every wallet name and public key from the `keypairs/` directory. 【F:jupiter-swap-tool/cli_trader.js†L13050-L13051】【F:jupiter-swap-tool/cli_trader.js†L10080-L10118】
+- **wallet wrap**
+  - Syntax: `wallet wrap <walletName> [amount|all|*] [--raw]`
+  - Flags: `--raw` treats the amount as lamports instead of SOL.
+  - Description: Wraps SOL into wSOL for the selected wallet, defaulting to the spendable balance after gas buffers when `all`/`*` is supplied. 【F:jupiter-swap-tool/cli_trader.js†L10119-L10214】
+- **wallet unwrap**
+  - Syntax: `wallet unwrap <walletName> [amount|all|*] [--raw]`
+  - Flags: `--raw` interprets the amount in lamports.
+  - Description: Closes or partially unwraps the wallet's wSOL account, automatically re-wrapping leftovers if needed. 【F:jupiter-swap-tool/cli_trader.js†L10215-L10369】
+- **wallet**
+  - Syntax: `wallet <wrap|unwrap> ...`
+  - Description: Dispatcher that surfaces the wrap/unwrap flows and prints usage when no subcommand is provided. 【F:jupiter-swap-tool/cli_trader.js†L10371-L10403】
+- **balances**
+  - Syntax: `balances [tokenMint[:symbol] ...]`
+  - Description: Displays SOL and SPL balances per wallet, optionally filtered by mint address or symbol. 【F:jupiter-swap-tool/cli_trader.js†L13052-L13053】【F:jupiter-swap-tool/cli_trader.js†L9526-L10078】
+- **wallet-guard-status**
+  - Syntax: `wallet-guard-status [--summary] [--refresh]`
+  - Description: Shows swap-guard state for all wallets, optionally refreshing guard data or printing a terse summary. 【F:jupiter-swap-tool/cli_trader.js†L13083-L13117】
+- **force-reset-wallets**
+  - Syntax: `force-reset-wallets`
+  - Description: Clears the swap guard disable cache so every wallet is re-enabled until the next balance scan. Alias: `force-reset-wallet`. 【F:jupiter-swap-tool/cli_trader.js†L13275-L13282】
+- **launcher-bootstrap**
+  - Syntax: `launcher-bootstrap [--refresh[=true|false]]`
+  - Description: Emits wallet-guard telemetry for the Jupiter launcher integration and optionally recomputes disable status before reporting. 【F:jupiter-swap-tool/cli_trader.js†L12949-L13014】
+
+SOL transfers and funding
+------------------------
+- **fund-all**
+  - Syntax: `fund-all <fromWalletFile> <lamportsEach>`
+  - Description: Sends the same lamport amount from the source wallet to every other wallet. 【F:jupiter-swap-tool/cli_trader.js†L13054-L13058】【F:jupiter-swap-tool/cli_trader.js†L10407-L10475】
+- **fund / send**
+  - Syntax: `fund <fromWalletFile> <toWalletFile> <lamports>` (alias: `send`)
+  - Description: Transfers lamports between two specific wallets. 【F:jupiter-swap-tool/cli_trader.js†L13065-L13069】【F:jupiter-swap-tool/cli_trader.js†L10645-L10684】
+- **redistribute**
+  - Syntax: `redistribute <anchorWalletFile>`
+  - Description: Rebalances SOL across every wallet, keeping configured reserves and routing transfers directly between surplus and deficit wallets. 【F:jupiter-swap-tool/cli_trader.js†L13059-L13062】【F:jupiter-swap-tool/cli_trader.js†L10477-L10644】
+- **aggregate**
+  - Syntax: `aggregate <targetWalletFile>`
+  - Description: Sweeps SOL from every wallet into the specified target wallet. 【F:jupiter-swap-tool/cli_trader.js†L13070-L13073】【F:jupiter-swap-tool/cli_trader.js†L10686-L10776】
+- **airdrop**
+  - Syntax: `airdrop <walletFile> <lamports>`
+  - Description: Requests a devnet/testnet SOL airdrop for the named wallet. 【F:jupiter-swap-tool/cli_trader.js†L13074-L13078】【F:jupiter-swap-tool/cli_trader.js†L10778-L10828】
+- **airdrop-all**
+  - Syntax: `airdrop-all <lamports>`
+  - Description: Issues SOL airdrops for every wallet. 【F:jupiter-swap-tool/cli_trader.js†L13079-L13082】【F:jupiter-swap-tool/cli_trader.js†L10830-L10934】
+
+Swaps and token maintenance
+---------------------------
+- **swap**
+  - Syntax: `swap <inputMint> <outputMint> [amount|all|random]`
+  - Description: Runs a Jupiter swap from the input mint to the output mint across all wallets. Amount defaults to the configured mode when omitted. 【F:jupiter-swap-tool/cli_trader.js†L13223-L13242】
+- **swap-all**
+  - Syntax: `swap-all <inputMint> <outputMint>`
+  - Description: Converts the entire balance of the input mint into the output mint across all wallets. 【F:jupiter-swap-tool/cli_trader.js†L13243-L13257】
+- **swap-sol-to**
+  - Syntax: `swap-sol-to <targetMint> [amount|all]`
+  - Description: Swaps SOL into the specified mint for every wallet, defaulting to the full spendable amount. 【F:jupiter-swap-tool/cli_trader.js†L13258-L13269】
+- **buckshot**
+  - Syntax: `buckshot`
+  - Description: Splits spendable SOL across a curated list of target tokens for each wallet, creates ATAs as needed, and offers an interactive rotation prompt for future retargeting. 【F:jupiter-swap-tool/cli_trader.js†L13270-L13271】【F:jupiter-swap-tool/cli_trader.js†L7360-L7559】
+- **target-loop**
+  - Syntax: `target-loop [startMint]`
+  - Description: Opens an interactive prompt that repeatedly rotates all wallets between SOL and user-supplied mints. 【F:jupiter-swap-tool/cli_trader.js†L13272-L13274】【F:jupiter-swap-tool/cli_trader.js†L8441-L8623】
+- **sol-usdc-popcat**
+  - Syntax: `sol-usdc-popcat`
+  - Description: Ensures POPCAT associated token accounts exist, then chains SOL→USDC→POPCAT swaps for every wallet. 【F:jupiter-swap-tool/cli_trader.js†L13283-L13284】【F:jupiter-swap-tool/cli_trader.js†L8627-L8660】
+- **crew1-cycle**
+  - Syntax: `crew1-cycle`
+  - Description: Executes a scripted three-lap SOL↔USDC↔token cycle for `crew_1.json`, pausing between laps to emulate the automation runbook. 【F:jupiter-swap-tool/cli_trader.js†L13285-L13286】【F:jupiter-swap-tool/cli_trader.js†L7148-L7239】
+- **long-circle**
+  - Syntax: `long-circle [extra|--extra|secondary|--secondary]`
+  - Description: Builds per-wallet multi-hop swap plans (optionally adding a secondary randomized sweep) and executes them sequentially. Pass `extra/--extra/secondary/--secondary` to enable the follow-up sweep. 【F:jupiter-swap-tool/cli_trader.js†L13287-L13290】【F:jupiter-swap-tool/cli_trader.js†L7239-L7358】
+- **sweep-defaults**
+  - Syntax: `sweep-defaults`
+  - Description: Swaps a predefined list of non-SOL mints back into SOL for each wallet. 【F:jupiter-swap-tool/cli_trader.js†L13291-L13292】【F:jupiter-swap-tool/cli_trader.js†L6402-L6457】
+- **sweep-all**
+  - Syntax: `sweep-all`
+  - Description: Enumerates every SPL balance across wallets and swaps all non-SOL holdings into SOL. 【F:jupiter-swap-tool/cli_trader.js†L13293-L13294】【F:jupiter-swap-tool/cli_trader.js†L6459-L6496】
+- **sweep-to-btc-eth**
+  - Syntax: `sweep-to-btc-eth`
+  - Description: Sweeps all tokens into SOL and reallocates spendable SOL into wBTC/cbBTC/wETH according to weighted targets. 【F:jupiter-swap-tool/cli_trader.js†L13295-L13297】【F:jupiter-swap-tool/cli_trader.js†L6498-L6719】
+- **reclaim-sol / close-token-accounts**
+  - Syntax: `reclaim-sol`
+  - Description: Closes zero-balance SPL and Token-2022 accounts for every wallet, skipping accounts with withheld fees. Alias: `close-token-accounts`. 【F:jupiter-swap-tool/cli_trader.js†L13298-L13308】
+
+Lending
+-------
+- **lend overview**
+  - Syntax: `lend overview`
+  - Description: Aggregates earn and borrow positions/earnings across every wallet and prints high-level counts. 【F:jupiter-swap-tool/cli_trader.js†L2099-L2119】【F:jupiter-swap-tool/cli_trader.js†L3180-L3248】
+- **lend earn tokens**
+  - Syntax: `lend earn tokens [--query <text>] [--limit <n>] [--category <name>] [--tag <tag>]`
+  - Description: Lists lend-eligible assets returned by the Jupiter Lend API, with optional filters. 【F:jupiter-swap-tool/cli_trader.js†L2537-L2568】【F:jupiter-swap-tool/cli_trader.js†L2620-L2670】
+- **lend earn positions**
+  - Syntax: `lend earn positions <walletName|pubkey>[,...]`
+  - Flags: `--wallets <csv>` supplies the list via flag; `*` targets all wallets.
+  - Description: Fetches earn-side positions for the selected wallets and prints sample summaries. 【F:jupiter-swap-tool/cli_trader.js†L2537-L2568】【F:jupiter-swap-tool/cli_trader.js†L2630-L2706】
+- **lend earn earnings**
+  - Syntax: `lend earn earnings <walletName|pubkey>[,...]`
+  - Flags: `--wallets <csv>` chooses wallets; `*` targets all.
+  - Description: Retrieves cumulative earn-side payouts for each wallet. 【F:jupiter-swap-tool/cli_trader.js†L2537-L2568】【F:jupiter-swap-tool/cli_trader.js†L2710-L2763】
+- **lend earn deposit / withdraw**
+  - Syntax: `lend earn <deposit|withdraw> <wallet|*> <mint|*> <amount|*> [--raw] [--field <apiField>] [--extra <json>] [--no-send|--dry-run]`
+  - Description: Posts earn-side deposit/withdrawal requests. `*` uses all wallets or available balances, `--raw` treats amounts as raw units, `--field` overrides the request field (`amount` by default), and `--extra` injects additional API fields. Skipping `--no-send` allows automatic transaction submission. 【F:jupiter-swap-tool/cli_trader.js†L2537-L2568】【F:jupiter-swap-tool/cli_trader.js†L2765-L2926】
+- **lend earn mint / redeem**
+  - Syntax: `lend earn <mint|redeem> <wallet|*> <mint|*> <amount|*> [--raw] [--field <apiField>] [--extra <json>] [--no-send|--dry-run]`
+  - Description: Similar to deposit/withdraw but operates on share tokens instead of base assets (defaults to `shares` for the value field). Instruction-only variants (`*-instructions`) request unsigned transactions without submitting them. 【F:jupiter-swap-tool/cli_trader.js†L2537-L2568】【F:jupiter-swap-tool/cli_trader.js†L2765-L3062】
+- **lend borrow pairs**
+  - Syntax: `lend borrow pairs [--collateral <mint>] [--borrow <mint>]`
+  - Description: Lists available borrow pair configurations filtered by collateral/borrow mint. 【F:jupiter-swap-tool/cli_trader.js†L3966-L4006】
+- **lend borrow positions**
+  - Syntax: `lend borrow positions <walletName|pubkey>[,...]`
+  - Flags: `--wallets <csv>` selects wallets; `*` targets all.
+  - Description: Fetches open borrow positions for each wallet. 【F:jupiter-swap-tool/cli_trader.js†L3966-L4006】【F:jupiter-swap-tool/cli_trader.js†L4008-L4040】
+- **lend borrow open**
+  - Syntax: `lend borrow open <walletFile> <collateralMint|symbol> <borrowMint|symbol> <collateralAmount> <borrowAmount> [--extra <json>] [--rawCollateral] [--rawBorrow] [additional API fields...]`
+  - Description: Opens a borrow position for the wallet, scaling human-readable amounts unless raw flags are supplied. Extra CLI flags are forwarded into the API payload. 【F:jupiter-swap-tool/cli_trader.js†L3966-L4006】【F:jupiter-swap-tool/cli_trader.js†L4042-L4087】
+- **lend borrow repay**
+  - Syntax: `lend borrow repay <walletFile> <borrowMint|symbol> <amount> [--position <id>] [--raw] [--extra <json>] [additional API fields...]`
+  - Description: Submits a repay request using decimal or raw units, optionally targeting a specific position. 【F:jupiter-swap-tool/cli_trader.js†L3966-L4006】【F:jupiter-swap-tool/cli_trader.js†L4089-L4138】
+- **lend borrow close**
+  - Syntax: `lend borrow close <walletFile> [positionId|*] [--all] [--extra <json>] [additional API fields...]`
+  - Description: Closes one or more borrow positions. `*` or `--all` fetches every open position before submitting close requests. 【F:jupiter-swap-tool/cli_trader.js†L3966-L4006】【F:jupiter-swap-tool/cli_trader.js†L4140-L4248】
+
+Perpetuals (HTTP API)
+---------------------
+- **perps markets**
+  - Syntax: `perps markets [--query <text>] [--status <state>] [--category <tag>] [--limit <n>]`
+  - Description: Queries the perps REST API for market metadata, printing a sample of results. 【F:jupiter-swap-tool/cli_trader.js†L2125-L2162】【F:jupiter-swap-tool/cli_trader.js†L2164-L2227】
+- **perps positions**
+  - Syntax: `perps positions [walletName ...] [--wallet <walletName>]`
+  - Description: Retrieves REST perps positions for one or more wallets, defaulting to all when none are supplied. 【F:jupiter-swap-tool/cli_trader.js†L2125-L2162】【F:jupiter-swap-tool/cli_trader.js†L2229-L2289】
+- **perps open**
+  - Syntax: `perps open <walletFile> <market> <side> <size> [price] [--wallet <wallet>] [--market <market>] [--side <side>] [--size|--amount|--notional <value>] [--price|--limit <value>] [--leverage <x>] [--margin <amount>] [--intent <type>] [--type <orderType>] [--time-in-force|--tif <tif>] [--client-order-id|--cid <id>] [--trigger-price <value>] [--take-profit <value>] [--stop-loss <value>] [--reduce-only] [--post-only] [--immediate-or-cancel|--ioc|--fok|--fill-or-kill] [--extra <json>] [--dry-run]`
+  - Description: Builds and submits a perps order via the REST gateway. Positional arguments are mirrored by flags for flexibility, and `--extra` merges arbitrary JSON fields. `--dry-run` prints the payload without sending. 【F:jupiter-swap-tool/cli_trader.js†L2125-L2162】【F:jupiter-swap-tool/cli_trader.js†L2291-L2412】
+- **perps close**
+  - Syntax: `perps close <walletFile> [market] [positionId] [size] [--wallet <wallet>] [--market <market>] [--position|--position-id <id>] [--size|--amount|--notional <value>] [--price|--limit <value>] [--intent <type>] [--type <orderType>] [--time-in-force|--tif <tif>] [--client-order-id|--cid <id>] [--close-all|--all] [--reduce-only] [--extra <json>] [--dry-run]`
+  - Description: Closes or reduces an existing perps exposure via the REST API. Requires a market, position id, or `--close-all`. 【F:jupiter-swap-tool/cli_trader.js†L2125-L2162】【F:jupiter-swap-tool/cli_trader.js†L2414-L2523】
+
+Perpetuals (on-chain)
+---------------------
+- **perps positions** (legacy)
+  - Syntax: `perps positions [walletName ... | --wallet <walletName>]`
+  - Description: Fetches on-chain perps positions for the selected wallets, rotating RPC endpoints on rate limits. 【F:jupiter-swap-tool/cli_trader.js†L12915-L12948】【F:jupiter-swap-tool/cli_trader.js†L11808-L11870】
+- **perps funding**
+  - Syntax: `perps funding`
+  - Description: Prints custody balances, fees, and funding rates for each perps market. 【F:jupiter-swap-tool/cli_trader.js†L12915-L12948】【F:jupiter-swap-tool/cli_trader.js†L12021-L12113】
+- **perps increase**
+  - Syntax: `perps increase <walletName> --custody <symbol|address> --collateral <symbol|address> --side <long|short> --size-usd <amount> --collateral-amount <amount> --price-slippage <amount> [--min-out <amount>] [--input-mint <mint>] [--counter <value>] [--compute-price <microlamports>] [--compute-units <units>] [--referral <pubkey>] [--skip-sim|--simulate]`
+  - Description: Builds and submits an on-chain increase instruction for the specified custody pair, optionally tweaking compute budget, simulation behaviour, and Jupiter minimum-out targets. 【F:jupiter-swap-tool/cli_trader.js†L12915-L12948】【F:jupiter-swap-tool/cli_trader.js†L12115-L12384】
+- **perps decrease**
+  - Syntax: `perps decrease <walletName> --position <pubkey> --price-slippage <amount> [--collateral-usd <amount>] [--size-usd <amount>] [--desired <mint>] [--min-out <amount>] [--entire] [--compute-price <microlamports>] [--compute-units <units>] [--referral <pubkey>] [--skip-sim|--simulate]`
+  - Description: Crafts an on-chain decrease request for an existing position, supporting partial closes, Jupiter routing hints, and compute budget overrides. 【F:jupiter-swap-tool/cli_trader.js†L12915-L12948】【F:jupiter-swap-tool/cli_trader.js†L12490-L12762】
+
+Campaign automation
+-------------------
+- **campaign**
+  - Syntax: `campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run]`
+  - Description: Instantiates the selected campaign preset, optionally filters wallets by batch label, and either runs or simulates timed swap plans across eligible wallets. 【F:jupiter-swap-tool/cli_trader.js†L13063-L13064】【F:jupiter-swap-tool/cli_trader.js†L5716-L6400】
+
+Diagnostics and testing
+-----------------------
+- **balances** *(see above)*
+- **wallet-guard-status** *(see above)*
+- **test-rpcs**
+  - Syntax: `test-rpcs [selector] [--swap] [--loops <n>] [--delay|--delay-ms <ms>] [--amount <sol>] [--confirm]`
+  - Description: Benchmarks configured RPC endpoints. Optional flags enable swap simulations, loop counts, delays, swap amount overrides, and transaction confirmation. A selector of `all`, `index`, `match`, or `url` limits the test set. 【F:jupiter-swap-tool/cli_trader.js†L13118-L13222】
+- **test-ultra**
+  - Syntax: `test-ultra [inputMint] [outputMint] [amount] [--wallet <name>] [--input <mint>] [--output <mint>] [--amount <value>] [--slippage|--slippage-bps <bps>] [--submit]`
+  - Description: Exercises the Jupiter Ultra API with configurable mints, amount, slippage, and wallet, optionally submitting the resulting transaction. 【F:jupiter-swap-tool/cli_trader.js†L13183-L13222】
+
+General utilities
+-----------------
+- **list** *(see wallet section)*
+- **tokens** *(see token catalog)*
+- **help / version flags**
+  - Syntax: `help`, `--help`, `-h`, `version`, `--version`, `-v`
+  - Description: Prints the high-level usage banner or current tool version. 【F:jupiter-swap-tool/cli_trader.js†L12860-L12891】
