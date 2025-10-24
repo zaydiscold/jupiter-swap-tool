@@ -8266,7 +8266,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 18, max: 120 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 35_000, max: 95_000 },
       defaultDurationMs: 40 * 60 * 1000,
     },
@@ -8317,7 +8317,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 24, max: 150 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 45_000, max: 120_000 },
       defaultDurationMs: 55 * 60 * 1000,
     },
@@ -8356,7 +8356,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 12, max: 90 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 60_000, max: 150_000 },
       defaultDurationMs: 70 * 60 * 1000,
     },
@@ -8686,6 +8686,17 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
     let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
     let partialCycleHops = desiredSwapTarget % cycleLength;
+    const normalizedPartialCycleTerminalMint =
+      partialCycleHops > 0 && partialCycleHops <= cycleTemplate.length
+        ? (() => {
+            const terminalStep = cycleTemplate[partialCycleHops - 1] || null;
+            const terminalMint =
+              typeof terminalStep?.toMint === "string"
+                ? terminalStep.toMint
+                : null;
+            return terminalMint ? normaliseSolMint(terminalMint) : null;
+          })()
+        : null;
     let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
     if (executedCycles < minimumCycles) {
       fullCycles = minimumCycles;
@@ -8701,10 +8712,16 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       normalizedTemplateTerminalMint &&
       normalizedStartMint === normalizedTemplateTerminalMint
     ) {
-      fullCycles += 1;
-      partialCycleHops = 0;
-      executedCycles = Math.max(executedCycles, fullCycles);
-      executedSwapTarget = fullCycles * cycleLength;
+      const shouldClosePartialCycle =
+        !normalizedPartialCycleTerminalMint ||
+        normalizedPartialCycleTerminalMint !== normalizedTemplateTerminalMint;
+
+      if (shouldClosePartialCycle) {
+        fullCycles += 1;
+        partialCycleHops = 0;
+        executedCycles = Math.max(executedCycles, fullCycles);
+        executedSwapTarget = fullCycles * cycleLength;
+      }
     }
 
     const combinedRandomOptions = combineRandomMintOptions(
