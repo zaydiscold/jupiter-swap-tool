@@ -295,18 +295,10 @@ print_hotkeys() {
     echo "Wallet files tracked: $WALLET_COUNT"
   fi
   echo "Hotkeys:"
-  echo "  1  -> wallet tools (balances / generate / import / list)"
-  echo "  2  -> force reset wallet guard (enable all wallets)"
-  echo "  3  -> redistribute $CREW_WALLET"
-  echo "  4  -> aggregate to $CREW_WALLET"
-  echo "  5  -> reclaim SOL (close empty token accounts)"
-  echo "  6  -> swap SOL -> USDC (default amount)"
-  echo "  7  -> buckshot mode (spread + interactive token rotation)"
-  echo "  8  -> sweep all token balances -> SOL"
-  echo "  t  -> test utilities (RPC / Ultra checks)"
-  echo "  9  -> advanced trade tools"
-  echo "  0  -> quit"
-  echo "(Use hotkey 0 to quit)"
+  JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+  JUPITER_SWAP_TOOL_NO_BANNER=1 \
+    node cli_trader.js hotkeys launcher --no-title --indent 2 || \
+    echo "  (unable to load hotkey map)"
 }
 
 update_launcher_state() {
@@ -339,13 +331,10 @@ wallet_menu() {
   while true; do
     echo
     echo "Wallet tools:"
-    echo "  1  -> show balances"
-    echo "  2  -> generate wallets"
-    echo "  3  -> import secret key / JSON"
-    echo "  4  -> import mnemonic phrase"
-    echo "  5  -> list wallet addresses"
-    echo "  6  -> force reset wallet guard"
-    echo "  b  -> back"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys wallet-menu --no-title --indent 2 || \
+      echo "  (unable to load wallet hotkeys)"
     read -r -p "wallet> " WALLET_OPT
     WALLET_OPT_LOWER=$(printf '%s' "$WALLET_OPT" | tr '[:upper:]' '[:lower:]')
     case "$WALLET_OPT_LOWER" in
@@ -433,12 +422,10 @@ rpc_tests_menu() {
   while true; do
     echo
     echo "RPC endpoint diagnostics:"
-    echo "  1  -> test all endpoints"
-    echo "  2  -> test by index (1-based)"
-    echo "  3  -> test by substring match"
-    echo "  4  -> test a custom URL"
-    echo "  5  -> swap stress test (requires confirmation)"
-    echo "  b  -> back"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys rpc-tests-menu --no-title --indent 2 || \
+      echo "  (unable to load RPC test hotkeys)"
     read -r -p "rpc-test option> " RPC_OPT
     RPC_OPT_LOWER=$(printf '%s' "$RPC_OPT" | tr '[:upper:]' '[:lower:]')
     case "$RPC_OPT_LOWER" in
@@ -505,9 +492,10 @@ test_menu() {
   while true; do
     echo
     echo "Test utilities:"
-    echo "  1  -> RPC endpoint diagnostics"
-    echo "  2  -> Ultra API swap check"
-    echo "  b  -> back"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys test-menu --no-title --indent 2 || \
+      echo "  (unable to load test hotkeys)"
     read -r -p "test> " TEST_OPT
     TEST_OPT_LOWER=$(printf '%s' "$TEST_OPT" | tr '[:upper:]' '[:lower:]')
     case "$TEST_OPT_LOWER" in
@@ -556,16 +544,10 @@ lend_menu() {
   while true; do
     echo
     echo "Jupiter Lend (beta):"
-    echo "  1  -> list earn tokens (refresh)"
-    echo "  2  -> earn deposit"
-    echo "  3  -> earn withdraw"
-    echo "  4  -> borrow open position"
-    echo "  5  -> borrow repay"
-    echo "  6  -> borrow close"
-    echo "  7  -> earn positions"
-    echo "  8  -> borrow positions"
-    echo "  9  -> overview (earn+borrow all wallets)"
-    echo "  b  -> back"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys lend-menu --no-title --indent 2 || \
+      echo "  (unable to load lend hotkeys)"
     read -r -p "lend> " LEND_OPT
     LEND_OPT_LOWER=$(printf '%s' "$LEND_OPT" | tr '[:upper:]' '[:lower:]')
     case "$LEND_OPT_LOWER" in
@@ -680,14 +662,10 @@ advanced_menu() {
   while true; do
     echo
     echo "Advanced trade tools:"
-    echo "  1  -> target loop (paste mint, 'sol' to flatten, 'exit' to stop)"
-    echo "  2  -> long circle swap"
-    echo "  3  -> test utilities (RPC / Ultra)"
-    echo "  4  -> crew_1 interval cycle"
-    echo "  5  -> sweep balances into wBTC / cbBTC / wETH"
-    echo "  6  -> SOL → USDC → POPCAT lap"
-    echo "  7  -> Jupiter Lend (earn / borrow beta)"
-    echo "  b  -> back"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys advanced-menu --no-title --indent 2 || \
+      echo "  (unable to load advanced hotkeys)"
     read -r -p "advanced> " ADV_OPT
     ADV_OPT_LOWER=$(printf '%s' "$ADV_OPT" | tr '[:upper:]' '[:lower:]')
     case "$ADV_OPT_LOWER" in
@@ -780,56 +758,57 @@ while true; do
 
   EXEC_DESC=""
   EXEC_ARGS=()
+  CMD_LOWER=$(printf '%s' "$CMD" | tr '[:upper:]' '[:lower:]')
 
-  case "$CMD" in
-    1|w|W)
+  case "$CMD_LOWER" in
+    1|w)
       wallet_menu
       refresh_caches_after_command
       continue
       ;;
-    2|forcereset|FORCERESET|reset|RESET)
+    2|g|forcereset|force-reset|reset)
       run_cli_command "Force resetting wallet guard" node cli_trader.js force-reset-wallets
       refresh_caches_after_command
       continue
       ;;
-    3|redistribute|REDISTRIBUTE)
+    3|d|redistribute)
       run_cli_command "Redistribute $CREW_WALLET" node cli_trader.js redistribute "$CREW_WALLET"
       refresh_caches_after_command
       continue
       ;;
-    4|aggregate|AGGREGATE)
+    4|a|aggregate)
       run_cli_command "Aggregate into $CREW_WALLET" node cli_trader.js aggregate "$CREW_WALLET"
       refresh_caches_after_command
       continue
       ;;
-    5|close|CLOSE|CLOSETOKENACCOUNTS|RECLAIMSOL|reclaimsol)
+    5|c|reclaim|close|close-token-accounts|reclaimsol)
       run_cli_command "Reclaim SOL (close empty token accounts)" node cli_trader.js reclaim-sol
       refresh_caches_after_command
       continue
       ;;
-    6|sol2usdc|SOL2USDC)
+    6|u|sol2usdc|swap-sol-usdc)
       EXEC_DESC="Swap SOL -> USDC (default amount)"
       EXEC_ARGS=(swap "$SOL_MINT" "$USDC_MINT")
       ;;
-    7|buckshot|BUCKSHOT)
+    7|b|buckshot)
       EXEC_DESC="Buckshot mode (interactive rotation)"
       EXEC_ARGS=(buckshot)
       ;;
-    8|sweepall|SWEEPALL)
+    8|s|sweep-all|sweepall|sweep)
       EXEC_DESC="Sweep all token balances -> SOL"
       EXEC_ARGS=(sweep-all)
       ;;
-    t|T|test|TEST|tests|TESTS)
+    t|test|tests)
       test_menu
       refresh_caches_after_command
       continue
       ;;
-    9|advanced|ADVANCED|s|S|sol2custom|SOL2CUSTOM|l|L|longcircle|LONGCIRCLE|r|R|rpc|RPC|c|C|crew1|CREW1|b|B|btc|BTC|btceth|BTCETH)
+    9|v|advanced)
       advanced_menu
       refresh_caches_after_command
       continue
       ;;
-    0|quit|QUIT|q|Q)
+    0|q|quit|exit)
       break
       ;;
     *)
