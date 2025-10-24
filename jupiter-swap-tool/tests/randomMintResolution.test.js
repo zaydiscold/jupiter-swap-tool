@@ -6,6 +6,10 @@ import {
   stepsFromMints,
   snapshotTokenCatalog,
 } from "../cli_trader.js";
+import {
+  resolveRandomizedStep,
+  WSOL_MINT,
+} from "../chains/solana/campaigns_runtime.js";
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
@@ -51,4 +55,39 @@ test("RANDOM sentinels resolve to catalog mints without immediate repeats", () =
   assert.notEqual(firstStep.from, firstStep.to);
   assert.equal(secondStep.from, firstStep.to);
   assert.equal(secondStep.to, SOL_MINT);
+});
+
+test("session-to-sol randomization rehydrates SPL source metadata", () => {
+  const RANDOM_MINT = "1r4nd0mMint1111111111111111111111111111111";
+  const sessionKey = "test-session";
+  const randomSessions = new Map([
+    [
+      sessionKey,
+      {
+        inMint: WSOL_MINT,
+        outMint: RANDOM_MINT,
+        sourceBalance: { kind: "sol", lamports: 123_000_000 },
+      },
+    ],
+  ]);
+
+  const resolved = resolveRandomizedStep(
+    {
+      inMint: RANDOM_MINT,
+      outMint: SOL_MINT,
+      randomization: { mode: "session-to-sol", sessionKey },
+    },
+    () => 0,
+    { sessionState: randomSessions }
+  );
+
+  assert.equal(resolved?.inMint, RANDOM_MINT);
+  assert.equal(resolved?.outMint, SOL_MINT);
+  assert(resolved?.sourceBalance);
+  assert.equal(resolved.sourceBalance.kind, "spl");
+  assert.equal(resolved.sourceBalance.mint, RANDOM_MINT);
+  const sessionRecord = randomSessions.get(sessionKey);
+  assert(sessionRecord);
+  assert.equal(sessionRecord.sourceBalance?.kind, "spl");
+  assert.equal(sessionRecord.sourceBalance?.mint, RANDOM_MINT);
 });
