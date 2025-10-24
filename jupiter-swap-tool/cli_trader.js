@@ -5124,8 +5124,16 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   );
   loops = Number.isFinite(requiredLoops) && requiredLoops > 0 ? requiredLoops : minimumCycles;
 
-  const plannedSwapTarget = loops * swapsPerCycle;
-  effectiveSwapTarget = Math.max(effectiveSwapTarget, plannedSwapTarget);
+  const minimumPlannedSwaps = Math.max(minimumSwapCount, effectiveSwapTarget);
+  let loopAlignedSwapTarget = loops * swapsPerCycle;
+  let plannedSwapTarget = Math.max(minimumPlannedSwaps, loopAlignedSwapTarget);
+  const loopRequirementFromPlanned = Math.ceil(plannedSwapTarget / swapsPerCycle);
+  if (loopRequirementFromPlanned > loops) {
+    loops = loopRequirementFromPlanned;
+    loopAlignedSwapTarget = loops * swapsPerCycle;
+    plannedSwapTarget = Math.max(minimumPlannedSwaps, loopAlignedSwapTarget);
+  }
+  effectiveSwapTarget = plannedSwapTarget;
 
   const sampledSegments = [];
   if (cycleLegSequence.length > 0 && plannedSwapTarget > 0) {
