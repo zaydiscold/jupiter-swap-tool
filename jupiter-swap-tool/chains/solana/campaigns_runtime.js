@@ -343,12 +343,15 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
           : { kind: "spl", mint: currentMint },
     };
 
+    // Record the hop so fallback chains produce the expected swaps.
     steps.push(step);
 
     currentMint = nextMint;
   }
 
-  if (steps.length < safeHopCount && currentMint !== WSOL_MINT) {
+  const shouldAppendFinalHop = steps.length < hopCount && currentMint !== WSOL_MINT;
+
+  if (shouldAppendFinalHop) {
     steps.push({
       inMint: currentMint,
       outMint: WSOL_MINT,
