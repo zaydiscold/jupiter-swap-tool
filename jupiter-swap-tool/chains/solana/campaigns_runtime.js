@@ -361,12 +361,14 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
         currentMint === WSOL_MINT
           ? { kind: "sol" }
           : { kind: "spl", mint: currentMint },
-    });
+    };
+
+    steps.push(step);
 
     currentMint = nextMint;
   }
 
-  if (steps.length < safeHopCount && currentMint !== WSOL_MINT) {
+  if (steps.length < hopCount && currentMint !== WSOL_MINT) {
     steps.push({
       inMint: currentMint,
       outMint: WSOL_MINT,
@@ -898,13 +900,14 @@ export function resolveRandomizedStep(logicalStep, rng, options = {}) {
     if (!existing || !existing.outMint) {
       throw new Error("random session has no recorded mint");
     }
+    const splSourceBalance =
+      existing.sourceBalance && existing.sourceBalance.kind === "spl"
+        ? { ...existing.sourceBalance, mint: existing.sourceBalance.mint ?? existing.outMint }
+        : { kind: "spl", mint: existing.outMint };
     return {
       inMint: existing.outMint,
       outMint: logicalStep.outMint ?? WSOL_MINT,
-      sourceBalance:
-        existing.sourceBalance && existing.sourceBalance.kind
-          ? existing.sourceBalance
-          : { kind: "spl", mint: existing.outMint },
+      sourceBalance: splSourceBalance,
     };
   }
 

@@ -80,8 +80,8 @@ All knobs are optional; unset variables fall back to the defaults below. Grouped
 | --- | --- | --- |
 | `PERPS_CONFIG_PATH` | Path to the perps configuration JSON consumed by CLI helpers. | `./perps_config.json` |
 | `PERPS_MARKET_CACHE_PATH` | Location for cached market metadata. | `perps/market_cache.json` |
-| `PERPS_COMPUTE_UNIT_LIMIT` | Compute budget override applied to perps transactions. | `1_200_000` |
-| `PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS` | Compute price override for perps transactions. | `10_000` |
+| `PERPS_COMPUTE_UNIT_LIMIT` | Compute budget override applied to perps transactions. | `1_400_000` |
+| `PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS` | Compute price override for perps transactions. | `100_000` |
 | `PERPS_KEEPER_ONLY` | When `1`, skip direct order placement and only service keeper tasks. | `0` |
 | `PERPS_DRY_RUN` | When `1`, print perps payloads without sending transactions. | `0` |
 | `JUPITER_PERPS_API_BASE` | Base URL for the Jupiter Perps REST gateway. | `https://lite-api.jup.ag/perps/v1` |
