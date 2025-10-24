@@ -305,6 +305,8 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
   const fallbackCycle =
     normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
 
+  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+
   const steps = [];
   const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
   let currentMint = WSOL_MINT;
