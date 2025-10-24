@@ -345,6 +345,10 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
       nextMint = WSOL_MINT;
     }
 
+    if (isFinalHop && currentMint !== WSOL_MINT && nextMint !== WSOL_MINT) {
+      nextMint = WSOL_MINT;
+    }
+
     if (!nextMint || nextMint === currentMint) {
       continue;
     }
