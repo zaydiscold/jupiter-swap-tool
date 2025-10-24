@@ -349,7 +349,7 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
     currentMint = nextMint;
   }
 
-  const shouldAppendFinalHop = steps.length < hopCount && currentMint !== WSOL_MINT;
+  const shouldAppendFinalHop = steps.length < safeHopCount && currentMint !== WSOL_MINT;
 
   if (shouldAppendFinalHop) {
     steps.push({
