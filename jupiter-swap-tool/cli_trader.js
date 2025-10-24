@@ -69,11 +69,560 @@ import {
 // --------------------------------------------------
 
 const TOOL_VERSION = "1.1.3";
-const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets";
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
+}
+
+function normalizeHotkeyEntry(entry) {
+  const normalized = { ...entry };
+  normalized.action = typeof entry.action === "string" ? entry.action : "";
+  normalized.keys = Array.isArray(entry.keys)
+    ? Object.freeze(entry.keys.map((key) => String(key).trim()).filter((key) => key.length > 0))
+    : Object.freeze([]);
+  normalized.displayKeys = Array.isArray(entry.displayKeys)
+    ? Object.freeze(entry.displayKeys.map((key) => String(key).trim()).filter((key) => key.length > 0))
+    : undefined;
+  if (typeof entry.description !== "string" || entry.description.trim().length === 0) {
+    normalized.description = "";
+  } else {
+    normalized.description = entry.description.trim();
+  }
+  normalized.inline = entry.inline === false ? false : true;
+  normalized.hidden = entry.hidden === true;
+  return Object.freeze(normalized);
+}
+
+function buildHotkeyMap(definitions) {
+  const contexts = new Map();
+  for (const [context, config] of definitions) {
+    const entries = Array.isArray(config.entries)
+      ? config.entries.map((entry) => normalizeHotkeyEntry(entry))
+      : [];
+    contexts.set(
+      context,
+      Object.freeze({
+        id: context,
+        label:
+          typeof config.label === "string" && config.label.trim().length > 0
+            ? config.label.trim()
+            : context,
+        entries: Object.freeze(entries),
+      })
+    );
+  }
+  return contexts;
+}
+
+const HOTKEY_MAP = buildHotkeyMap([
+  [
+    "launcher",
+    {
+      label: "Launcher hotkeys",
+      entries: [
+        {
+          action: "wallet-tools",
+          keys: ["w", "1"],
+          description: "Open wallet tools (balances / generate / import / list)",
+        },
+        {
+          action: "force-reset-guard",
+          keys: ["g", "2", "forcereset", "force-reset", "reset"],
+          description: "Force reset wallet guard (enable all wallets until next balance refresh)",
+        },
+        {
+          action: "redistribute",
+          keys: ["d", "3", "redistribute"],
+          description: "Redistribute SOL from the crew wallet across all others",
+        },
+        {
+          action: "aggregate",
+          keys: ["a", "4", "aggregate"],
+          description: "Aggregate SOL back into the crew wallet",
+        },
+        {
+          action: "reclaim-sol",
+          keys: ["c", "5", "reclaim", "close", "close-token-accounts", "reclaimsol"],
+          description: "Reclaim SOL by closing empty token accounts",
+        },
+        {
+          action: "swap-sol-usdc",
+          keys: ["u", "6", "sol2usdc", "swap-sol-usdc"],
+          description: "Swap SOL → USDC using the launcher's default amount mode",
+        },
+        {
+          action: "buckshot",
+          keys: ["b", "7", "buckshot"],
+          description: "Start buckshot mode (spread + interactive token rotation)",
+        },
+        {
+          action: "sweep-all",
+          keys: ["s", "8", "sweep-all", "sweep", "sweepall"],
+          description: "Sweep all token balances back to SOL",
+        },
+        {
+          action: "test-menu",
+          keys: ["t", "test", "tests"],
+          description: "Open test utilities (RPC diagnostics / Ultra swap check)",
+        },
+        {
+          action: "advanced-menu",
+          keys: ["v", "9", "advanced"],
+          description: "Open advanced trade tools",
+        },
+        {
+          action: "quit",
+          keys: ["q", "0", "quit", "exit"],
+          description: "Quit the launcher",
+        },
+      ],
+    },
+  ],
+  [
+    "wallet-menu",
+    {
+      label: "Wallet tools menu",
+      entries: [
+        { action: "show-balances", keys: ["1"], description: "Show balances" },
+        { action: "generate-wallets", keys: ["2"], description: "Generate wallets" },
+        {
+          action: "import-secret",
+          keys: ["3"],
+          description: "Import secret key / JSON",
+        },
+        {
+          action: "import-mnemonic",
+          keys: ["4"],
+          description: "Import mnemonic phrase",
+        },
+        {
+          action: "list-wallets",
+          keys: ["5"],
+          description: "List wallet addresses",
+        },
+        {
+          action: "force-reset-guard",
+          keys: ["6"],
+          description: "Force reset wallet guard",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to launcher" },
+      ],
+    },
+  ],
+  [
+    "rpc-tests-menu",
+    {
+      label: "RPC endpoint diagnostics menu",
+      entries: [
+        { action: "test-all", keys: ["1"], description: "Test all endpoints" },
+        {
+          action: "test-index",
+          keys: ["2"],
+          description: "Test by index (1-based)",
+        },
+        {
+          action: "test-match",
+          keys: ["3"],
+          description: "Test by substring match",
+        },
+        {
+          action: "test-url",
+          keys: ["4"],
+          description: "Test a custom URL",
+        },
+        {
+          action: "swap-stress",
+          keys: ["5"],
+          description: "Swap stress test (requires confirmation)",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to test utilities" },
+      ],
+    },
+  ],
+  [
+    "test-menu",
+    {
+      label: "Test utilities menu",
+      entries: [
+        {
+          action: "rpc-tests",
+          keys: ["1"],
+          description: "RPC endpoint diagnostics",
+        },
+        {
+          action: "ultra-swap-check",
+          keys: ["2"],
+          description: "Ultra API swap check",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to previous menu" },
+      ],
+    },
+  ],
+  [
+    "lend-menu",
+    {
+      label: "Jupiter Lend menu",
+      entries: [
+        {
+          action: "earn-tokens",
+          keys: ["1"],
+          description: "List earn tokens (refresh)",
+        },
+        {
+          action: "earn-deposit",
+          keys: ["2"],
+          description: "Earn deposit",
+        },
+        {
+          action: "earn-withdraw",
+          keys: ["3"],
+          description: "Earn withdraw",
+        },
+        {
+          action: "borrow-open",
+          keys: ["4"],
+          description: "Borrow open position",
+        },
+        {
+          action: "borrow-repay",
+          keys: ["5"],
+          description: "Borrow repay",
+        },
+        {
+          action: "borrow-close",
+          keys: ["6"],
+          description: "Borrow close",
+        },
+        {
+          action: "earn-positions",
+          keys: ["7"],
+          description: "Earn positions",
+        },
+        {
+          action: "borrow-positions",
+          keys: ["8"],
+          description: "Borrow positions",
+        },
+        {
+          action: "overview",
+          keys: ["9"],
+          description: "Overview (earn + borrow all wallets)",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to advanced tools" },
+      ],
+    },
+  ],
+  [
+    "advanced-menu",
+    {
+      label: "Advanced trade tools menu",
+      entries: [
+        {
+          action: "target-loop",
+          keys: ["1"],
+          description: "Target loop (paste mint, flatten with SOL, exit when done)",
+        },
+        {
+          action: "long-circle",
+          keys: ["2"],
+          description: "Long circle swap",
+        },
+        {
+          action: "test-menu",
+          keys: ["3"],
+          description: "Test utilities (RPC / Ultra)",
+        },
+        {
+          action: "crew-cycle",
+          keys: ["4"],
+          description: "crew_1 interval cycle",
+        },
+        {
+          action: "btc-eth-sweep",
+          keys: ["5"],
+          description: "Sweep balances into wBTC / cbBTC / wETH",
+        },
+        {
+          action: "sol-usdc-popcat",
+          keys: ["6"],
+          description: "SOL → USDC → POPCAT lap",
+        },
+        {
+          action: "lend-menu",
+          keys: ["7"],
+          description: "Jupiter Lend (earn / borrow beta)",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to launcher" },
+      ],
+    },
+  ],
+  [
+    "target-loop",
+    {
+      label: "Target loop commands",
+      entries: [
+        {
+          action: "rotate",
+          displayKeys: ["<mint>"],
+          description: "Paste a mint address to rotate holdings",
+        },
+        {
+          action: "flatten-to-sol",
+          keys: ["sol", "base"],
+          description: "Swap current holdings back to SOL",
+        },
+        {
+          action: "show-catalog",
+          keys: ["list", "catalog", "tokens"],
+          description: "Print the token catalog",
+        },
+        {
+          action: "show-help",
+          keys: ["help", "?"],
+          description: "Reprint this help",
+        },
+        {
+          action: "exit",
+          keys: ["exit", "quit", "q"],
+          description: "Exit target loop mode",
+        },
+      ],
+    },
+  ],
+  [
+    "buckshot-rotation",
+    {
+      label: "Buckshot rotation commands",
+      entries: [
+        {
+          action: "rotate",
+          displayKeys: ["<mint>"],
+          description: "Paste a mint address to rotate held tokens",
+        },
+        {
+          action: "exit",
+          keys: ["exit", "quit", "q"],
+          displayKeys: ["<enter>", "exit", "quit", "q"],
+          description: "Exit buckshot rotation mode",
+        },
+      ],
+    },
+  ],
+]);
+
+const DEFAULT_HOTKEY_CONTEXTS = Object.freeze([
+  "launcher",
+  "wallet-menu",
+  "advanced-menu",
+  "test-menu",
+  "rpc-tests-menu",
+  "lend-menu",
+  "target-loop",
+  "buckshot-rotation",
+]);
+
+function findHotkeyContext(context) {
+  if (!context) return null;
+  return HOTKEY_MAP.get(context) || null;
+}
+
+function findHotkeyEntry(context, action) {
+  const ctx = findHotkeyContext(context);
+  if (!ctx || !ctx.entries) return null;
+  if (!action) return null;
+  return ctx.entries.find((entry) => entry.action === action) || null;
+}
+
+function collectHotkeyDisplayKeys(entry) {
+  if (!entry) return [];
+  const seen = new Set();
+  const display = [];
+  const addKey = (key) => {
+    const trimmed = typeof key === "string" ? key.trim() : "";
+    if (!trimmed) return;
+    const lower = trimmed.toLowerCase();
+    if (seen.has(lower)) return;
+    seen.add(lower);
+    display.push(trimmed);
+  };
+  if (Array.isArray(entry.displayKeys)) {
+    for (const key of entry.displayKeys) addKey(key);
+  }
+  if (Array.isArray(entry.keys)) {
+    for (const key of entry.keys) addKey(key);
+  }
+  return display;
+}
+
+function formatHotkeyToken(token) {
+  if (typeof token !== "string" || token.length === 0) return "";
+  if (token.startsWith("<") && token.endsWith(">")) {
+    return token;
+  }
+  return `'${token}'`;
+}
+
+function formatHotkeyKeysFromEntry(entry, { joiner = " / " } = {}) {
+  const keys = collectHotkeyDisplayKeys(entry);
+  if (keys.length === 0) return "";
+  return keys.map((key) => formatHotkeyToken(key)).join(joiner);
+}
+
+function formatHotkeyKeys(context, action, options = {}) {
+  const entry = findHotkeyEntry(context, action);
+  if (!entry) return "";
+  return formatHotkeyKeysFromEntry(entry, options);
+}
+
+function formatHotkeyPrimaryKey(context, action) {
+  const entry = findHotkeyEntry(context, action);
+  if (!entry) return "";
+  const keys = collectHotkeyDisplayKeys(entry);
+  if (keys.length === 0) return "";
+  return formatHotkeyToken(keys[0]);
+}
+
+function isHotkeyMatch(context, action, value) {
+  if (!value) return false;
+  const entry = findHotkeyEntry(context, action);
+  if (!entry || !Array.isArray(entry.keys) || entry.keys.length === 0) return false;
+  const normalizedValue = String(value).trim().toLowerCase();
+  if (!normalizedValue) return false;
+  for (const key of entry.keys) {
+    const normalizedKey = String(key).trim().toLowerCase();
+    if (normalizedKey && normalizedKey === normalizedValue) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function buildHotkeyInlineSummary(context) {
+  const ctx = findHotkeyContext(context);
+  if (!ctx) return "";
+  const parts = [];
+  for (const entry of ctx.entries) {
+    if (entry.hidden) continue;
+    if (entry.inline === false) continue;
+    const keysLabel = formatHotkeyKeysFromEntry(entry);
+    if (!keysLabel) continue;
+    const description = entry.description || "";
+    if (!description) continue;
+    parts.push(`${keysLabel} → ${description}`);
+  }
+  return parts.join("; ");
+}
+
+function buildHotkeyLines(context, { indent = "", includeTitle = true } = {}) {
+  const ctx = findHotkeyContext(context);
+  if (!ctx) return [];
+  const visibleEntries = ctx.entries.filter((entry) => !entry.hidden);
+  const keyLabels = visibleEntries.map((entry) => formatHotkeyKeysFromEntry(entry));
+  const keyWidth = keyLabels.reduce((width, label) => Math.max(width, label.length), 0);
+  const lines = [];
+  const prefix = indent ?? "";
+  if (includeTitle && ctx.label) {
+    lines.push(`${prefix}${ctx.label}:`);
+  }
+  const entryIndent = `${prefix}${includeTitle && ctx.label ? "  " : ""}`;
+  for (let i = 0; i < visibleEntries.length; i += 1) {
+    const entry = visibleEntries[i];
+    const label = keyLabels[i];
+    const paddedLabel = label.padEnd(keyWidth, " ");
+    lines.push(`${entryIndent}${paddedLabel}  ${entry.description}`.trimEnd());
+  }
+  return lines;
+}
+
+function listHotkeyContexts() {
+  return Array.from(HOTKEY_MAP.keys()).sort();
+}
+
+function renderHotkeyTable(contexts, { indent = "", includeTitle = true } = {}) {
+  const lines = [];
+  let first = true;
+  for (const context of contexts) {
+    const block = buildHotkeyLines(context, { indent, includeTitle });
+    if (!block || block.length === 0) continue;
+    if (!first) {
+      lines.push("");
+    }
+    lines.push(...block);
+    first = false;
+  }
+  return lines;
+}
+
+function parseHotkeyIndentOption(rawIndent) {
+  if (rawIndent === undefined || rawIndent === null) return "";
+  const text = String(rawIndent);
+  if (/^\d+$/.test(text)) {
+    const count = Math.min(32, Math.max(0, parseInt(text, 10)));
+    if (count <= 0) return "";
+    return " ".repeat(count);
+  }
+  return text;
+}
+
+function normalizeHotkeyContextList(rawContexts) {
+  const normalized = [];
+  const seen = new Set();
+  for (const context of rawContexts) {
+    const trimmed = typeof context === "string" ? context.trim() : "";
+    if (!trimmed) continue;
+    const lowered = trimmed.toLowerCase();
+    if (!HOTKEY_MAP.has(lowered)) {
+      throw new Error(
+        `Unknown hotkey context '${trimmed}'. Use --list to show available contexts.`
+      );
+    }
+    if (seen.has(lowered)) continue;
+    seen.add(lowered);
+    normalized.push(lowered);
+  }
+  return normalized;
+}
+
+function handleHotkeysCommand(rawArgs = []) {
+  const { options, rest } = parseCliOptions(rawArgs);
+  if (options.list) {
+    for (const context of listHotkeyContexts()) {
+      console.log(context);
+    }
+    return;
+  }
+
+  const indent = parseHotkeyIndentOption(options.indent);
+  const includeTitle = options["no-title"] ? false : true;
+
+  let contexts = [];
+  if (options.context) {
+    contexts.push(options.context);
+  }
+  if (Array.isArray(rest) && rest.length > 0) {
+    contexts.push(...rest);
+  }
+
+  if (options.all) {
+    contexts = Array.from(DEFAULT_HOTKEY_CONTEXTS);
+  }
+
+  let normalizedContexts;
+  if (contexts.length === 0) {
+    normalizedContexts = Array.from(DEFAULT_HOTKEY_CONTEXTS);
+  } else {
+    normalizedContexts = normalizeHotkeyContextList(contexts);
+    if (normalizedContexts.length === 0) {
+      normalizedContexts = Array.from(DEFAULT_HOTKEY_CONTEXTS);
+    }
+  }
+
+  const lines = renderHotkeyTable(normalizedContexts, { indent, includeTitle });
+  for (const line of lines) {
+    console.log(line);
+  }
 }
 
 // ---------------- Config ----------------
@@ -81,6 +630,9 @@ function printGeneralUsage() {
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
+
 // Normalise a filesystem path for equality comparisons that tolerate symlinks.
 const toComparablePath = (rawPath) => {
   if (!rawPath) return null;
@@ -98,8 +650,6 @@ const toComparablePath = (rawPath) => {
     return path.normalize(normalizedInput);
   }
 };
-
-const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_COMPARABLE_PATH =
   toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
 
@@ -5058,9 +5608,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
-  const rng = typeof options.rng === "function"
-    ? options.rng
-    : createDeterministicRng(`${normalizedKey}:scheduler`);
+  const rng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
@@ -7494,9 +8045,15 @@ async function runBuckshot() {
       "success"
     )
   );
+  const buckshotSummary = buildHotkeyInlineSummary("buckshot-rotation");
+  if (buckshotSummary) {
+    console.log(paint(`Commands: ${buckshotSummary}.`, "info"));
+  }
+  const buckshotExitLabel =
+    formatHotkeyKeys("buckshot-rotation", "exit") || "<enter>";
   console.log(
     paint(
-      "Enter a mint address to rotate all held tokens into the new target (blank to exit).",
+      `Enter a mint address to rotate all held tokens into the new target (${buckshotExitLabel} to exit).`,
       "info"
     )
   );
@@ -7514,8 +8071,7 @@ async function runBuckshot() {
     if (!rawInput) {
       break;
     }
-    const lowered = rawInput.toLowerCase();
-    if (lowered === "exit" || lowered === "quit" || lowered === "q") {
+    if (isHotkeyMatch("buckshot-rotation", "exit", rawInput)) {
       break;
     }
     let targetMint;
@@ -7710,7 +8266,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 18, max: 120 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 35_000, max: 95_000 },
       defaultDurationMs: 40 * 60 * 1000,
     },
@@ -7761,7 +8317,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 24, max: 150 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 45_000, max: 120_000 },
       defaultDurationMs: 55 * 60 * 1000,
     },
@@ -7800,7 +8356,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       ],
       swapCountRange: { min: 12, max: 90 },
       minimumCycles: 2,
-      requireTerminalSolHop: false,
+      requireTerminalSolHop: true,
       waitBoundsMs: { min: 60_000, max: 150_000 },
       defaultDurationMs: 70 * 60 * 1000,
     },
@@ -8130,6 +8686,17 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
     let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
     let partialCycleHops = desiredSwapTarget % cycleLength;
+    const normalizedPartialCycleTerminalMint =
+      partialCycleHops > 0 && partialCycleHops <= cycleTemplate.length
+        ? (() => {
+            const terminalStep = cycleTemplate[partialCycleHops - 1] || null;
+            const terminalMint =
+              typeof terminalStep?.toMint === "string"
+                ? terminalStep.toMint
+                : null;
+            return terminalMint ? normaliseSolMint(terminalMint) : null;
+          })()
+        : null;
     let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
     if (executedCycles < minimumCycles) {
       fullCycles = minimumCycles;
@@ -8145,10 +8712,16 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       normalizedTemplateTerminalMint &&
       normalizedStartMint === normalizedTemplateTerminalMint
     ) {
-      fullCycles += 1;
-      partialCycleHops = 0;
-      executedCycles = Math.max(executedCycles, fullCycles);
-      executedSwapTarget = fullCycles * cycleLength;
+      const shouldClosePartialCycle =
+        !normalizedPartialCycleTerminalMint ||
+        normalizedPartialCycleTerminalMint !== normalizedTemplateTerminalMint;
+
+      if (shouldClosePartialCycle) {
+        fullCycles += 1;
+        partialCycleHops = 0;
+        executedCycles = Math.max(executedCycles, fullCycles);
+        executedSwapTarget = fullCycles * cycleLength;
+      }
     }
 
     const combinedRandomOptions = combineRandomMintOptions(
@@ -8467,9 +9040,16 @@ async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
     }
   }
 
+  const flattenKeysLabel =
+    formatHotkeyKeys("target-loop", "flatten-to-sol") || "'sol'";
+  const exitKeysLabel =
+    formatHotkeyKeys("target-loop", "exit") || "'exit'";
+  const helpKeysLabel =
+    formatHotkeyKeys("target-loop", "show-help") || "'help'";
+
   console.log(
     paint(
-      "\nTarget loop mode — paste mint addresses to rotate holdings. Type 'sol' to flatten back to SOL, or 'exit' to leave.",
+      `\nTarget loop mode — paste mint addresses to rotate holdings. Type ${flattenKeysLabel} to flatten back to SOL, or ${exitKeysLabel} to leave.`,
       "label"
     )
   );
@@ -8491,12 +9071,10 @@ async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
     );
 
   const printHelp = () => {
-    console.log(
-      paint(
-        "Commands: paste a mint to rotate into it, 'list' to print the token catalog, 'sol' to swap current holdings back to SOL, 'help' to reprint this message, 'exit' to finish.",
-        "info"
-      )
-    );
+    const summary = buildHotkeyInlineSummary("target-loop");
+    if (summary) {
+      console.log(paint(`Commands: ${summary}.`, "info"));
+    }
   };
 
   const runSegment = async (fromMint, toMint, description, options = {}) => {
@@ -8525,19 +9103,18 @@ async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
       if (!rawInput) {
         continue;
       }
-      const lowered = rawInput.toLowerCase();
-      if (lowered === "exit" || lowered === "quit" || lowered === "q") {
+      if (isHotkeyMatch("target-loop", "exit", rawInput)) {
         break;
       }
-      if (lowered === "help" || lowered === "?") {
+      if (isHotkeyMatch("target-loop", "show-help", rawInput)) {
         printHelp();
         continue;
       }
-      if (lowered === "list" || lowered === "catalog" || lowered === "tokens") {
+      if (isHotkeyMatch("target-loop", "show-catalog", rawInput)) {
         listTokenCatalog({ verbose: false });
         continue;
       }
-      if (lowered === "sol" || lowered === "base") {
+      if (isHotkeyMatch("target-loop", "flatten-to-sol", rawInput)) {
         if (SOL_LIKE_MINTS.has(currentMint)) {
           console.log(
             paint("Already holding SOL. Awaiting next mint address.", "muted")
@@ -8564,7 +9141,7 @@ async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
       } catch (_) {
         console.log(
           paint(
-            "Input not recognised. Paste a valid mint address or type 'help'.",
+            `Input not recognised. Paste a valid mint address or type ${helpKeysLabel}.`,
             "warn"
           )
         );
@@ -8607,7 +9184,7 @@ async function runInteractiveTargetLoop(startMintRaw = SOL_MINT) {
       if (swapped) {
         console.log(
           paint(
-            `Holding ${targetSymbol}. Paste another mint, type 'sol' to flatten, or 'exit' to leave.`,
+            `Holding ${targetSymbol}. Paste another mint, type ${flattenKeysLabel} to flatten, or ${exitKeysLabel} to leave.`,
             "success"
           )
         );
@@ -10079,13 +10656,25 @@ async function sendSolTransfer(connection, fromKeypair, toPubkey, lamports) {
 // listing addresses + balances
 async function listWalletAddresses() {
   const wallets = listWallets();
+  const walletMenuHotkey =
+    formatHotkeyPrimaryKey("launcher", "wallet-tools") || "'w'";
   if (wallets.length === 0) {
     if (!fs.existsSync(KEYPAIR_DIR)) {
       console.log(paint(`No keypairs directory found at ${KEYPAIR_DIR}`, "warn"));
-      console.log(paint("Use wallet menu (hotkey 'w') or 'generate <n> [prefix]' command to create wallets", "info"));
+      console.log(
+        paint(
+          `Use wallet menu (hotkey ${walletMenuHotkey}) or 'generate <n> [prefix]' command to create wallets`,
+          "info"
+        )
+      );
     } else {
       console.log(paint(`No wallets found in ${KEYPAIR_DIR}`, "warn"));
-      console.log(paint("Use wallet menu (hotkey 'w') or 'generate <n> [prefix]' command to create wallets", "info"));
+      console.log(
+        paint(
+          `Use wallet menu (hotkey ${walletMenuHotkey}) or 'generate <n> [prefix]' command to create wallets`,
+          "info"
+        )
+      );
     }
     return;
   }
@@ -10782,13 +11371,25 @@ async function airdropAll(lamports) {
 // ---- Balance display ----\n// Aggregates SOL + SPL holdings across every wallet. Explicit token arguments\n// ensure zero balances are surfaced (useful for monitoring positions).\n// show balances (optionally token)
 async function showBalances(tokenArgs = []) {
   const wallets = listWallets();
+  const walletMenuHotkey =
+    formatHotkeyPrimaryKey("launcher", "wallet-tools") || "'w'";
   if (wallets.length === 0) {
     if (!fs.existsSync(KEYPAIR_DIR)) {
       console.log(paint(`No keypairs directory found at ${KEYPAIR_DIR}`, "warn"));
-      console.log(paint("Use wallet menu (hotkey 'w') or 'generate <n> [prefix]' command to create wallets", "info"));
+      console.log(
+        paint(
+          `Use wallet menu (hotkey ${walletMenuHotkey}) or 'generate <n> [prefix]' command to create wallets`,
+          "info"
+        )
+      );
     } else {
       console.log(paint(`No wallets found in ${KEYPAIR_DIR}`, "muted"));
-      console.log(paint("Use wallet menu (hotkey 'w') or 'generate <n> [prefix]' command to create wallets", "info"));
+      console.log(
+        paint(
+          `Use wallet menu (hotkey ${walletMenuHotkey}) or 'generate <n> [prefix]' command to create wallets`,
+          "info"
+        )
+      );
     }
     return;
   }
@@ -12889,6 +13490,10 @@ async function main() {
     const healthUrl = (process.env.RPC_HEALTH_URL || process.env.RPC_HEALTH_ENDPOINT || "").trim();
     const healthIndexRaw = (process.env.RPC_HEALTH_INDEX || "").trim();
     const healthOptions = {};
+    if (cmd === "hotkeys") {
+      handleHotkeysCommand(args.slice(1));
+      process.exit(0);
+    }
     if (cmd === "tokens") {
       let verbose = false;
       let refreshRequested = false;
