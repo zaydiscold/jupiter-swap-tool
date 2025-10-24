@@ -296,46 +296,65 @@ export function resolveScheduledLogicalStep(logicalStep, rng) {
   return resolved;
 }
 
-function planLongChainSteps(rng, poolMints) {
-  if (!Array.isArray(poolMints) || poolMints.length === 0) {
-    return [];
-  }
-  let currentMint = WSOL_MINT;
-  let cycleIdx = cycle.indexOf(currentMint);
-  if (cycleIdx < 0) {
-    cycleIdx = 0;
-  }
+function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
+  const normalizedPool = Array.isArray(poolMints)
+    ? poolMints
+        .map((entry) => entry?.mint)
+        .filter((mint) => mint && mint !== WSOL_MINT)
+    : [];
+  const fallbackCycle =
+    normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
+
   const steps = [];
+  let currentMint = WSOL_MINT;
   for (let hop = 0; hop < hopCount; hop += 1) {
     const isFinalHop = hop === hopCount - 1;
     if (isFinalHop && currentMint === WSOL_MINT) {
       break;
     }
+
     let nextMint;
-    if (isFinalHop) {
-      nextMint = WSOL_MINT;
-    } else {
-      cycleIdx = (cycleIdx + 1) % cycle.length;
-      nextMint = cycle[cycleIdx];
-      if (nextMint === currentMint && cycle.length > 1) {
-        const alt = cycle.find((mint) => mint !== currentMint);
-        if (alt) {
-          nextMint = alt;
-        }
+    if (currentMint === WSOL_MINT) {
+      const candidateIdx = hop % fallbackCycle.length;
+      nextMint = fallbackCycle[candidateIdx] ?? WSOL_MINT;
+      if (!nextMint || nextMint === WSOL_MINT) {
+        nextMint = fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
       }
-    }
-    if (!nextMint) {
+      if (!nextMint) {
+        nextMint = RANDOM_MINT_PLACEHOLDER;
+      }
+    } else {
       nextMint = WSOL_MINT;
     }
+
+    if (!nextMint || nextMint === currentMint) {
+      continue;
+    }
+
     const step = {
       inMint: currentMint,
       outMint: nextMint,
       requiresAta: nextMint !== WSOL_MINT,
-      sourceBalance: currentMint === WSOL_MINT ? { kind: "sol" } : { kind: "spl", mint: currentMint },
+      sourceBalance:
+        currentMint === WSOL_MINT
+          ? { kind: "sol" }
+          : { kind: "spl", mint: currentMint },
     };
+
     steps.push(step);
+
     currentMint = nextMint;
   }
+
+  if (steps.length < hopCount && currentMint !== WSOL_MINT) {
+    steps.push({
+      inMint: currentMint,
+      outMint: WSOL_MINT,
+      requiresAta: false,
+      sourceBalance: { kind: "spl", mint: currentMint },
+    });
+  }
+
   return steps;
 }
 

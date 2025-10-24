@@ -69,8 +69,8 @@ import {
 // --------------------------------------------------
 
 const TOOL_VERSION = "1.1.3";
-const GENERAL_USAGE_MESSAGE =
-  "Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets | hotkeys [--list|--all|context...]";
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
   console.log(GENERAL_USAGE_MESSAGE);
@@ -630,6 +630,9 @@ function handleHotkeysCommand(rawArgs = []) {
 // code has a single source of truth. Most values can be overridden via
 // environment variables; RPC endpoints can also be provided via a file next
 // to the script.
+const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
+
 // Normalise a filesystem path for equality comparisons that tolerate symlinks.
 const toComparablePath = (rawPath) => {
   if (!rawPath) return null;
@@ -647,8 +650,6 @@ const toComparablePath = (rawPath) => {
     return path.normalize(normalizedInput);
   }
 };
-
-const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_COMPARABLE_PATH =
   toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
 
@@ -5607,9 +5608,10 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
-  const rng = typeof options.rng === "function"
-    ? options.rng
-    : createDeterministicRng(`${normalizedKey}:scheduler`);
+  const rng =
+    typeof options.rng === "function"
+      ? options.rng
+      : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
