@@ -884,15 +884,28 @@ export function resolveRandomizedStep(logicalStep, rng, options = {}) {
     if (!existing || !existing.outMint) {
       throw new Error("random session has no recorded mint");
     }
-    const splSourceBalance =
-      existing.sourceBalance && existing.sourceBalance.kind === "spl"
-        ? { ...existing.sourceBalance, mint: existing.sourceBalance.mint ?? existing.outMint }
-        : { kind: "spl", mint: existing.outMint };
-    return {
+    const previousBalance = existing.sourceBalance;
+    const splSourceBalance = (() => {
+      if (previousBalance?.kind === "spl") {
+        return {
+          ...previousBalance,
+          mint: previousBalance.mint ?? existing.outMint,
+        };
+      }
+      return { kind: "spl", mint: existing.outMint };
+    })();
+    const resolvedRecord = {
       inMint: existing.outMint,
       outMint: logicalStep.outMint ?? WSOL_MINT,
       sourceBalance: splSourceBalance,
     };
+    if (sessionState && sessionKey) {
+      sessionState.set(sessionKey, {
+        ...existing,
+        ...resolvedRecord,
+      });
+    }
+    return resolvedRecord;
   }
 
   return null;
