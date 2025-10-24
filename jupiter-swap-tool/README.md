@@ -5,8 +5,8 @@
 2. Clone the repo and run `npm install` to pull the JavaScript dependencies the CLI expects.
 3. Double-click `run_cli_trader.command` (macOS) or run `node cli_trader.js` manually.
 4. When prompted, supply your preferred RPC (or press Enter to use the default).
-5. Open wallet tools with hotkey `1` to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
-6. Use the hotkeys listed below to run funding, sweeping, swap, lend, or perps routines.
+5. Open wallet tools with hotkey `w` (or `1`) to generate wallets or import existing ones (the `keypairs/` directory will be created automatically if it doesn't exist).
+6. Use the hotkeys listed below (or run `node cli_trader.js hotkeys`) to review funding, sweeping, swap, lend, or perps shortcuts.
 
 Run `node cli_trader.js --help` at any time to print the full command summary, or `node cli_trader.js --version` to confirm the CLI build you have installed.
 
@@ -119,15 +119,16 @@ Double-click `run_cli_trader.command` (right-click → **Open** the first time t
    The launcher banner now shows how many wallets are currently eligible for swaps (wallet guard counts) before the hotkey list.
    When you're done, type `CLOSE` (uppercase) at the final prompt to exit the launcher.
 
-- `1` – wallet tools sub-menu (balances, wallet generation/import, wallet guard reset, address listing).
-- `2` – force reset the wallet guard (clears the disabled-for-swaps list until balances runs again).
-- `3` – redistribute SOL from `crew_1.json` evenly across all wallets.
-- `4` – aggregate SOL from every wallet back into `crew_1.json`.
-- `5` – reclaim SOL (close empty SPL/Token-2022 accounts and display the post-cleanup SOL balance when anything is reclaimed).
-- `6` – swap SOL → USDC using the launcher's default amount mode.
-- `7` – buckshot mode (spend an equal SOL slice into every long-circle token, then wait for you to paste new mint addresses to rotate those holdings).
-- `8` – sweep every token balance into SOL (supports custom/unlisted mint addresses).
-- `9` – advanced trade tools (target loop, long circle, RPC tester, crew_1 cycle, BTC/ETH sweep, SOL→USDC→POPCAT lap, and the prewritten Arpeggio/Horizon/Echo flows plus the new randomised Icarus/Zenith/Aurora variants).
+- `w` / `1` – wallet tools sub-menu (balances, wallet generation/import, wallet guard reset, address listing).
+- `g` / `2` – force reset the wallet guard (clears the disabled-for-swaps list until balances runs again).
+- `d` / `3` – redistribute SOL from `crew_1.json` evenly across all wallets.
+- `a` / `4` – aggregate SOL from every wallet back into `crew_1.json`.
+- `c` / `5` – reclaim SOL (close empty SPL/Token-2022 accounts and display the post-cleanup SOL balance when anything is reclaimed).
+- `u` / `6` – swap SOL → USDC using the launcher's default amount mode.
+- `b` / `7` – buckshot mode (spend an equal SOL slice into every long-circle token, then wait for you to paste new mint addresses to rotate those holdings).
+- `s` / `8` – sweep every token balance into SOL (supports custom/unlisted mint addresses).
+- `t` – test utilities (RPC diagnostics and the Ultra API swap check).
+- `v` / `9` – advanced trade tools (target loop, long circle, RPC tester, crew_1 cycle, BTC/ETH sweep, SOL→USDC→POPCAT lap, and the prewritten Arpeggio/Horizon/Echo flows plus the new randomised Icarus/Zenith/Aurora variants).
 
   Prewritten flow defaults:
   - **Arpeggio** – ~15 minutes end-to-end (legs wait 2–4 min, 3–5 min, 4–6 min, then 2–4 min).
@@ -138,11 +139,11 @@ Double-click `run_cli_trader.command` (right-click → **Open** the first time t
   - **Aurora** – Echo’s multi-hour rhythm with every hop drawing a fresh mint from the catalog while orbiting SOL.
 
   Launching them through the CLI honours `--loops`, `--duration-min`, `--duration`, and `--duration-max` so you can stretch or compress the schedule while the per-leg waits keep their random jitter inside the windows above.
-- `0` – quit immediately.
+- `q` / `0` – quit immediately.
 
 Each swap hotkey expands to the equivalent `swap`/`swap-all` command so you still get full logging from `cli_trader.js`.
 
-> On launch the CLI silently checks SOL balances and suppresses swap flows for any wallet holding under 0.01 SOL. Fund the wallet and rerun `balances` from the wallet tools menu (`1` → `1`) to refresh, or use hotkey `2` for a one-off force reset before the next automatic check.
+> On launch the CLI silently checks SOL balances and suppresses swap flows for any wallet holding under 0.01 SOL. Fund the wallet and rerun `balances` from the wallet tools menu (`w` → `1`) to refresh, or use hotkey `g` / `2` for a one-off force reset before the next automatic check.
 
 > The CLI prints color-coded messages when running in a TTY. Set `NO_COLOR=1` before launching if you prefer plain text.
 
@@ -156,6 +157,7 @@ Run these either from the launcher prompt or directly via `node cli_trader.js �
 
 -**Perps safety note:** perpetuals are leveraged instruments. Always pre-fund the trading wallet with sufficient USDC collateral, double-check your leverage caps, and monitor liquidation thresholds printed by the CLI before placing orders.
 
+- `hotkeys [--list|--all|context...]` – print the launcher/test/advanced/lend hotkey table without opening the interactive menus.
 - `generate <n> [prefix]` – create wallets (`prefix_1.json`, etc.). Use `PRINT_SECRET_KEYS=1` to print base58 secrets.
 - `import-wallet --secret <secret> [--prefix name] [--path path] [--force]` – import an existing Solana keypair from base58, JSON, or mnemonic (default derivation path `m/44'/501'/0'/0'`).
 - `list` – list all wallet filenames + public keys.
