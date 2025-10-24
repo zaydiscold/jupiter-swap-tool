@@ -35,6 +35,17 @@ function coercePublicKey(value) {
   if (value instanceof PublicKey) {
     return value;
   }
+  if (typeof value?.toBase58 === "function") {
+    const base58 = String(value.toBase58()).trim();
+    if (!base58) {
+      return ZERO_PUBKEY;
+    }
+    try {
+      return new PublicKey(base58);
+    } catch (err) {
+      throw new Error(`Failed to parse public key from base58: ${err.message}`);
+    }
+  }
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) {
@@ -75,11 +86,33 @@ function resolveWallet(options, fallbackWallet) {
       return providedWallet;
     }
     if (providedWallet.publicKey) {
-      return new ReadOnlyWallet(providedWallet.publicKey);
+      const coercedPublicKey = coercePublicKey(providedWallet.publicKey);
+      try {
+        providedWallet.publicKey = coercedPublicKey;
+        return providedWallet;
+      } catch (err) {
+        return new ReadOnlyWallet(coercedPublicKey);
+      }
     }
-    return new ReadOnlyWallet(providedWallet);
+
+    return new ReadOnlyWallet(normalizedPublicKey);
   }
-  if (fallbackWallet) return fallbackWallet;
+  if (fallbackWallet) {
+    if (fallbackWallet.publicKey && !(fallbackWallet.publicKey instanceof PublicKey)) {
+      const coercedPublicKey = coercePublicKey(fallbackWallet.publicKey);
+      try {
+        fallbackWallet.publicKey = coercedPublicKey;
+        return fallbackWallet;
+      } catch (err) {
+        const clone = Object.create(Object.getPrototypeOf(fallbackWallet) || Object.prototype);
+        return Object.assign(clone, fallbackWallet, { publicKey: coercedPublicKey });
+      }
+    }
+    if (typeof fallbackWallet === "string" || isBytesLike(fallbackWallet)) {
+      return new ReadOnlyWallet(fallbackWallet);
+    }
+    return fallbackWallet;
+  }
   if (options?.publicKey) {
     return new ReadOnlyWallet(options.publicKey);
   }
