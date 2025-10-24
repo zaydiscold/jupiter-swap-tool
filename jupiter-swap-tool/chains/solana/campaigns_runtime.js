@@ -305,26 +305,31 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
   const fallbackCycle =
     normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
 
-  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+  const resolvedHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+  const safeHopCount = Math.max(2, resolvedHopCount);
 
   const steps = [];
-  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
   let currentMint = WSOL_MINT;
+  let fallbackIndex = 0;
   for (let hop = 0; hop < safeHopCount; hop += 1) {
     const isFinalHop = hop === safeHopCount - 1;
-    if (isFinalHop && currentMint === WSOL_MINT) {
+
+    // When the rotation lands back on WSOL before the terminal hop we should not
+    // emit an extra self-swap. Exiting early keeps the hop counter in sync while
+    // ensuring the returned plan only contains actionable swaps.
+    if (isFinalHop && currentMint === WSOL_MINT && steps.length > 0) {
       break;
     }
 
-    let nextMint;
+    let nextMint = null;
     if (currentMint === WSOL_MINT) {
-      const candidateIdx = hop % fallbackCycle.length;
-      nextMint = fallbackCycle[candidateIdx] ?? WSOL_MINT;
-      if (!nextMint || nextMint === WSOL_MINT) {
-        nextMint = fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
-      }
-      if (!nextMint) {
-        nextMint = RANDOM_MINT_PLACEHOLDER;
+      const candidate = fallbackCycle[fallbackIndex % fallbackCycle.length];
+      fallbackIndex += 1;
+      if (candidate && candidate !== WSOL_MINT) {
+        nextMint = candidate;
+      } else {
+        nextMint =
+          fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? RANDOM_MINT_PLACEHOLDER;
       }
     } else {
       nextMint = WSOL_MINT;
@@ -350,7 +355,7 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
     currentMint = nextMint;
   }
 
-  const shouldAppendFinalHop = steps.length < hopCount && currentMint !== WSOL_MINT;
+  const shouldAppendFinalHop = steps.length < resolvedHopCount && currentMint !== WSOL_MINT;
 
   if (shouldAppendFinalHop) {
     steps.push({
@@ -470,6 +475,7 @@ export function buildTimedPlanForWallet({
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
   let basePath = [];
+  let logicalSteps = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
     if (!logicalSteps.length) {
