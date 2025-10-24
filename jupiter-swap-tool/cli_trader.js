@@ -5007,10 +5007,9 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
     );
   }
 
-  let rng = typeof options.rng === "function" ? options.rng : null;
-  if (!rng) {
-    rng = createDeterministicRng(`${normalizedKey}:scheduler`);
-  }
+  const rng = typeof options.rng === "function"
+    ? options.rng
+    : createDeterministicRng(`${normalizedKey}:scheduler`);
 
   const swapRange = definition.swapCountRange || {};
   const swapsPerCycle = Math.max(
