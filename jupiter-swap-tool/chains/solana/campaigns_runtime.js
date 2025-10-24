@@ -681,11 +681,18 @@ export function resolveRandomizedStep(logicalStep, rng, options = {}) {
       }
       return { kind: "spl", mint: existing.outMint };
     })();
-    return {
+    const resolvedRecord = {
       inMint: existing.outMint,
       outMint: logicalStep.outMint ?? WSOL_MINT,
       sourceBalance: splSourceBalance,
     };
+    if (sessionState && sessionKey) {
+      sessionState.set(sessionKey, {
+        ...existing,
+        ...resolvedRecord,
+      });
+    }
+    return resolvedRecord;
   }
 
   return null;
