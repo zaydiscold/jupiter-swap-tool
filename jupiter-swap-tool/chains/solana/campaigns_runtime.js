@@ -305,10 +305,13 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
   const fallbackCycle =
     normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
 
+  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
+
   const steps = [];
+  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
   let currentMint = WSOL_MINT;
-  for (let hop = 0; hop < hopCount; hop += 1) {
-    const isFinalHop = hop === hopCount - 1;
+  for (let hop = 0; hop < safeHopCount; hop += 1) {
+    const isFinalHop = hop === safeHopCount - 1;
     if (isFinalHop && currentMint === WSOL_MINT) {
       break;
     }
@@ -341,12 +344,15 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
           : { kind: "spl", mint: currentMint },
     };
 
+    // Record the hop so fallback chains produce the expected swaps.
     steps.push(step);
 
     currentMint = nextMint;
   }
 
-  if (steps.length < hopCount && currentMint !== WSOL_MINT) {
+  const shouldAppendFinalHop = steps.length < safeHopCount && currentMint !== WSOL_MINT;
+
+  if (shouldAppendFinalHop) {
     steps.push({
       inMint: currentMint,
       outMint: WSOL_MINT,
