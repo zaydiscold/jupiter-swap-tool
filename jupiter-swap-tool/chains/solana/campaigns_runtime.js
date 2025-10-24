@@ -302,27 +302,45 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
         .map((entry) => entry?.mint)
         .filter((mint) => mint && mint !== WSOL_MINT)
     : [];
-  const fallbackCycle =
-    normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [RANDOM_MINT_PLACEHOLDER];
+  if (!Number.isFinite(hopCount) || hopCount <= 0) {
+    return [];
+  }
+
+  const shuffled = normalizedPool.length > 0 ? shuffle(rng, normalizedPool) : [];
+  const cycle = [];
+  for (const mint of shuffled) {
+    if (mint && !cycle.includes(mint)) {
+      cycle.push(mint);
+    }
+  }
+  if (cycle.length === 0) {
+    cycle.push(RANDOM_MINT_PLACEHOLDER);
+  }
 
   const steps = [];
   let currentMint = WSOL_MINT;
-  for (let hop = 0; hop < hopCount; hop += 1) {
-    const isFinalHop = hop === hopCount - 1;
+  let cycleIdx = 0;
+  const safeHopCount = Math.max(1, Math.floor(hopCount));
+
+  for (let hop = 0; hop < safeHopCount; hop += 1) {
+    const isFinalHop = hop === safeHopCount - 1;
     if (isFinalHop && currentMint === WSOL_MINT) {
       break;
     }
 
-    let nextMint;
+    let nextMint = null;
     if (currentMint === WSOL_MINT) {
-      const candidateIdx = hop % fallbackCycle.length;
-      nextMint = fallbackCycle[candidateIdx] ?? WSOL_MINT;
-      if (!nextMint || nextMint === WSOL_MINT) {
-        nextMint = fallbackCycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
+      const candidate = cycle[cycleIdx % cycle.length];
+      if (candidate && candidate !== WSOL_MINT) {
+        nextMint = candidate;
+      }
+      if (!nextMint) {
+        nextMint = cycle.find((mint) => mint && mint !== WSOL_MINT) ?? null;
       }
       if (!nextMint) {
         nextMint = RANDOM_MINT_PLACEHOLDER;
       }
+      cycleIdx += 1;
     } else {
       nextMint = WSOL_MINT;
     }
@@ -331,7 +349,7 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
       continue;
     }
 
-    const step = {
+    steps.push({
       inMint: currentMint,
       outMint: nextMint,
       requiresAta: nextMint !== WSOL_MINT,
