@@ -103,6 +103,37 @@ const SCRIPT_FILE_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_COMPARABLE_PATH =
   toComparablePath(SCRIPT_FILE_PATH) ?? path.normalize(SCRIPT_FILE_PATH);
 
+const stripTrailingSlashes = (value) => {
+  if (typeof value !== "string") return "";
+  return value.replace(/\/+$/, "");
+};
+
+const normalizeApiBase = (raw, fallback) => {
+  const candidate =
+    typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : fallback;
+  if (!candidate) return "";
+  return stripTrailingSlashes(candidate);
+};
+
+const getEnvInteger = (name, fallback, { min, max } = {}) => {
+  const raw = process.env?.[name];
+  if (raw === undefined || raw === null || raw === "") {
+    return fallback;
+  }
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  let value = parsed;
+  if (typeof min === "number" && value < min) {
+    value = min;
+  }
+  if (typeof max === "number" && value > max) {
+    value = max;
+  }
+  return value;
+};
+
 const IS_MAIN_EXECUTION = (() => {
   const entry = process?.argv?.[1];
   if (!entry) return false;
@@ -117,49 +148,60 @@ const KEYPAIR_DIR = "./keypairs";
 const loadKeypairFromFile = sharedLoadKeypairFromFile;
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
 const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
-const PERPS_COMPUTE_UNIT_LIMIT = process.env.PERPS_COMPUTE_UNIT_LIMIT
-  ? Math.max(1, parseInt(process.env.PERPS_COMPUTE_UNIT_LIMIT, 10) || 0)
-  : 1_200_000;
-const PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS =
-  process.env.PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS
-    ? Math.max(
-        0,
-        parseInt(process.env.PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS, 10) || 0
-      )
-    : 10_000;
-const PERPS_MARKET_CACHE_PATH =
-  process.env.PERPS_MARKET_CACHE_PATH ||
-  path.resolve(SCRIPT_DIR, "perps/market_cache.json");
-const RPC_LIST_FILE =
-  process.env.RPC_LIST_FILE || path.resolve(SCRIPT_DIR, "rpc_endpoints.txt");
+const PERPS_COMPUTE_BUDGET = Object.freeze({
+  unitLimit: getEnvInteger("PERPS_COMPUTE_UNIT_LIMIT", 1_400_000, { min: 1 }),
+  priceMicrolamports: getEnvInteger(
+    "PERPS_COMPUTE_UNIT_PRICE_MICROLAMPORTS",
+    100_000,
+    { min: 0 }
+  ),
+});
+const PERPS_MARKET_CACHE_PATH = path.resolve(
+  SCRIPT_DIR,
+  process.env.PERPS_MARKET_CACHE_PATH || "perps/market_cache.json"
+);
+const RPC_LIST_FILE = path.resolve(
+  SCRIPT_DIR,
+  process.env.RPC_LIST_FILE || "rpc_endpoints.txt"
+);
 let RPC_ENDPOINTS_FILE_USED = null;
 const UNHEALTHY_RPC_ENDPOINTS = new Map(); // endpoint -> unhealthyUntil timestamp
 const DEFAULT_ULTRA_API_KEY = "91233f8d-d064-48c7-a97a-87b5d4d8a511";
-const JUPITER_ULTRA_API_KEY = process.env.JUPITER_ULTRA_API_KEY || DEFAULT_ULTRA_API_KEY;
 const JUPITER_SWAP_ENGINE = (process.env.JUPITER_SWAP_ENGINE || "ultra").toLowerCase();
-const JUPITER_SWAP_API_BASE =
-  process.env.JUPITER_SWAP_API_BASE || "https://lite-api.jup.ag";
-const JUPITER_SWAP_QUOTE_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/quote`;
-const JUPITER_SWAP_URL = `${JUPITER_SWAP_API_BASE.replace(/\/$/, "")}/swap/v1/swap`;
-const JUP_HTTP_TIMEOUT_MS = process.env.JUP_HTTP_TIMEOUT_MS
-  ? Math.max(1_000, parseInt(process.env.JUP_HTTP_TIMEOUT_MS, 10) || 15_000)
-  : 15_000;
-const JUPITER_ULTRA_DEFAULT_BASE = (() => {
-  if (JUPITER_ULTRA_API_KEY) {
-    return `https://api.jup.ag/ultra/${JUPITER_ULTRA_API_KEY}`;
-  }
-  return "https://api.jup.ag/ultra/v1";
+const JUPITER_SWAP_CONFIG = (() => {
+  const defaultBase = "https://lite-api.jup.ag";
+  const base =
+    normalizeApiBase(process.env.JUPITER_SWAP_API_BASE, defaultBase) ||
+    defaultBase;
+  return Object.freeze({
+    base,
+    quoteUrl: `${base}/swap/v1/quote`,
+    swapUrl: `${base}/swap/v1/swap`,
+  });
 })();
-const JUPITER_ULTRA_API_BASE_RAW =
-  process.env.JUPITER_ULTRA_API_BASE || JUPITER_ULTRA_DEFAULT_BASE;
-const JUPITER_ULTRA_API_BASE = JUPITER_ULTRA_API_BASE_RAW.replace(/\/$/, "");
-const SHOULD_SEND_ULTRA_HEADER = !!JUPITER_ULTRA_API_KEY;
-const JUPITER_ULTRA_ORDER_URL = `${JUPITER_ULTRA_API_BASE}/order`;
-const JUPITER_ULTRA_EXECUTE_URL = `${JUPITER_ULTRA_API_BASE}/execute`;
-const JUPITER_ULTRA_HOLDINGS_URL = `${JUPITER_ULTRA_API_BASE}/holdings`;
-const JUPITER_ULTRA_SHIELD_URL = `${JUPITER_ULTRA_API_BASE}/shield`;
-const JUPITER_ULTRA_SEARCH_URL = `${JUPITER_ULTRA_API_BASE}/search`;
-const JUPITER_ULTRA_ROUTERS_URL = `${JUPITER_ULTRA_API_BASE}/routers`;
+const JUPITER_SWAP_API_BASE = JUPITER_SWAP_CONFIG.base;
+const JUPITER_SWAP_QUOTE_URL = JUPITER_SWAP_CONFIG.quoteUrl;
+const JUPITER_SWAP_URL = JUPITER_SWAP_CONFIG.swapUrl;
+const JUP_HTTP_TIMEOUT_MS = getEnvInteger("JUP_HTTP_TIMEOUT_MS", 15_000, {
+  min: 1_000,
+});
+const JUPITER_ULTRA_CONFIG = (() => {
+  const apiKey = process.env.JUPITER_ULTRA_API_KEY || DEFAULT_ULTRA_API_KEY;
+  const defaultBase = apiKey
+    ? `https://api.jup.ag/ultra/${apiKey}`
+    : "https://api.jup.ag/ultra/v1";
+  const base =
+    normalizeApiBase(process.env.JUPITER_ULTRA_API_BASE, defaultBase) ||
+    defaultBase;
+  return Object.freeze({
+    apiKey,
+    base,
+    includeUltraKeyHeader: Boolean(apiKey),
+  });
+})();
+const JUPITER_ULTRA_API_KEY = JUPITER_ULTRA_CONFIG.apiKey;
+const JUPITER_ULTRA_API_BASE = JUPITER_ULTRA_CONFIG.base;
+const SHOULD_SEND_ULTRA_HEADER = JUPITER_ULTRA_CONFIG.includeUltraKeyHeader;
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const RAW_SWAP_AMOUNT_MODE = (process.env.SWAP_AMOUNT_MODE || "all").toLowerCase();
 const DEFAULT_SWAP_AMOUNT_MODE = RAW_SWAP_AMOUNT_MODE === "random" ? "random" : "all";
@@ -4974,7 +5016,16 @@ const resolveDurationTargets = (definition, options, loops, minPossible, maxPoss
   ]);
 
   let minTarget = Number.isFinite(minOverride) ? Math.max(1, minOverride) : baseDuration;
-  let maxTarget = Number.isFinite(maxOverride) ? Math.max(minTarget, maxOverride) : baseDuration;
+  let maxTarget = Number.isFinite(maxOverride) ? Math.max(1, maxOverride) : baseDuration;
+
+  if (!Number.isFinite(minOverride) && Number.isFinite(maxOverride)) {
+    minTarget = Math.min(baseDuration, maxTarget);
+  }
+
+  if (!Number.isFinite(maxOverride) && Number.isFinite(minOverride)) {
+    maxTarget = Math.max(baseDuration, minTarget);
+  }
+
   if (minTarget > maxTarget) {
     const tmp = minTarget;
     minTarget = maxTarget;
@@ -5045,7 +5096,7 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
   let sampledSwapTarget = hasOverride
     ? Math.max(swapRangeMin, Math.floor(normalizedOverride))
-    : pickIntInclusive(rng, swapRangeMin, swapRangeMax);
+    : pickIntInclusive(targetSampleRng, swapRangeMin, swapRangeMax);
 
   const minimumCycles = Math.max(
     1,
@@ -5092,22 +5143,28 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   }
 
   const sampledSegments = [];
-  for (let loopIndex = 0; loopIndex < loops; loopIndex += 1) {
-    definition.legs.forEach((leg, legIndex) => {
+  if (cycleLegSequence.length > 0) {
+    const cycleLength = cycleLegSequence.length;
+    const totalSegments = loops * cycleLength;
+    for (let segmentIndex = 0; segmentIndex < totalSegments; segmentIndex += 1) {
+      const loopIndex = Math.floor(segmentIndex / cycleLength);
+      const cycleIndex = segmentIndex % cycleLength;
+      const { legIndex, leg } = cycleLegSequence[cycleIndex] || {};
       const minMs = Math.max(0, Math.round(leg?.segmentWaitsMs?.minMs ?? 0));
       const maxMs = Math.max(minMs, Math.round(leg?.segmentWaitsMs?.maxMs ?? minMs));
       const waitMs = pickIntInclusive(rng, minMs, maxMs);
       sampledSegments.push({
         flowKey: normalizedKey,
         loopIndex,
+        cycleIndex,
         legIndex,
-        legKey: leg.key,
-        label: leg.label,
+        legKey: leg?.key,
+        label: leg?.label,
         minMs,
         maxMs,
         waitMs,
       });
-    });
+    }
   }
 
   if (sampledSegments.length === 0) {
@@ -8051,23 +8108,54 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       flow.minimumSwapCount ?? runtimeProfile?.minimumSwapCount ?? rangeMinBase
     )
   );
-  const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
-  const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
+    const minimumSwapCount = Math.max(rangeMinBase, perFlowMinimumSwaps);
+    const desiredSwapTarget = Math.max(sampledTarget, minimumSwapCount);
 
-  let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
-  let partialCycleHops = desiredSwapTarget % cycleLength;
-  let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
-  if (executedCycles < minimumCycles) {
-    fullCycles = minimumCycles;
-    partialCycleHops = 0;
-    executedCycles = minimumCycles;
-  }
-  const executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
+    const startCandidate = pickFirstDefined(
+      options.startMint,
+      flow.startMint,
+      SOL_MINT
+    );
+    const normalizedStartMint =
+      typeof startCandidate === "string"
+        ? normaliseSolMint(startCandidate)
+        : null;
+    const templateTerminalMint =
+      cycleTemplate.length > 0
+        ? cycleTemplate[cycleTemplate.length - 1]?.toMint
+        : null;
+    const normalizedTemplateTerminalMint =
+      typeof templateTerminalMint === "string"
+        ? normaliseSolMint(templateTerminalMint)
+        : null;
 
-  const combinedRandomOptions = combineRandomMintOptions(
-    flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
-    options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
-  );
+    let fullCycles = Math.floor(desiredSwapTarget / cycleLength);
+    let partialCycleHops = desiredSwapTarget % cycleLength;
+    let executedCycles = fullCycles + (partialCycleHops > 0 ? 1 : 0);
+    if (executedCycles < minimumCycles) {
+      fullCycles = minimumCycles;
+      partialCycleHops = 0;
+      executedCycles = minimumCycles;
+    }
+
+    let executedSwapTarget = fullCycles * cycleLength + partialCycleHops;
+    if (
+      partialCycleHops > 0 &&
+      !flow.requireTerminalSolHop &&
+      normalizedStartMint &&
+      normalizedTemplateTerminalMint &&
+      normalizedStartMint === normalizedTemplateTerminalMint
+    ) {
+      fullCycles += 1;
+      partialCycleHops = 0;
+      executedCycles = Math.max(executedCycles, fullCycles);
+      executedSwapTarget = fullCycles * cycleLength;
+    }
+
+    const combinedRandomOptions = combineRandomMintOptions(
+      flow.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS,
+      options.randomMintOptions || EMPTY_RANDOM_MINT_OPTIONS
+    );
   const logRandomResolutions = options.logRandomResolutions !== false;
   const resolutionHandler =
     typeof options.onRandomMintResolved === "function"
@@ -8076,16 +8164,11 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       ? logRandomMintResolution
       : null;
 
-  const startCandidate = pickFirstDefined(
-    options.startMint,
-    flow.startMint,
-    SOL_MINT
-  );
-  const startResult = resolveMintCandidate(startCandidate, {
-    fallbackMint: SOL_MINT,
-    rng: flowRng,
-    baseRandomOptions: combinedRandomOptions,
-    label: `${flow.label} start`,
+    const startResult = resolveMintCandidate(startCandidate, {
+      fallbackMint: SOL_MINT,
+      rng: flowRng,
+      baseRandomOptions: combinedRandomOptions,
+      label: `${flow.label} start`,
   });
   let currentMint = startResult.mint;
   if (startResult.resolution && resolutionHandler) {
@@ -12036,7 +12119,7 @@ async function perpsIncreaseCommand(rawArgs) {
     return;
   }
   const opts = {
-    computePrice: 100000,
+    computePrice: PERPS_COMPUTE_BUDGET.priceMicrolamports,
     simulate: true,
   };
   const positional = [];
@@ -12212,7 +12295,9 @@ async function perpsIncreaseCommand(rawArgs) {
     counter: counterValue,
     referral: referralPubkey,
   });
-  const computePrice = opts.computePrice || 100000;
+  const defaultComputePrice =
+    PERPS_COMPUTE_BUDGET.priceMicrolamports || 100000;
+  const computePrice = opts.computePrice || defaultComputePrice;
   let computeUnits = opts.computeUnits || null;
   const previewInstructions = [
     ...buildComputeBudgetInstructions({ microLamports: computePrice }),
@@ -12267,7 +12352,8 @@ async function perpsIncreaseCommand(rawArgs) {
   } else {
     console.log(paint("  simulation skipped (--skip-sim)", "warn"));
   }
-  const DEFAULT_COMPUTE_UNITS = 1_400_000;
+  const DEFAULT_COMPUTE_UNITS =
+    PERPS_COMPUTE_BUDGET.unitLimit || 1_400_000;
   if (!computeUnits) {
     if (simUnits) {
       computeUnits = Math.min(
@@ -12388,7 +12474,7 @@ async function perpsDecreaseCommand(rawArgs) {
     return;
   }
   const opts = {
-    computePrice: 100000,
+    computePrice: PERPS_COMPUTE_BUDGET.priceMicrolamports,
     simulate: true,
   };
   const positional = [];
@@ -12588,7 +12674,9 @@ async function perpsDecreaseCommand(rawArgs) {
     counter: counterValue,
     referral: referralPubkey,
   });
-  const computePrice = opts.computePrice || 100000;
+  const defaultComputePrice =
+    PERPS_COMPUTE_BUDGET.priceMicrolamports || 100000;
+  const computePrice = opts.computePrice || defaultComputePrice;
   let computeUnits = opts.computeUnits || null;
   const previewInstructions = [
     ...buildComputeBudgetInstructions({ microLamports: computePrice }),
@@ -12643,7 +12731,8 @@ async function perpsDecreaseCommand(rawArgs) {
   } else {
     console.log(paint("  simulation skipped (--skip-sim)", "warn"));
   }
-  const DEFAULT_COMPUTE_UNITS = 1_400_000;
+  const DEFAULT_COMPUTE_UNITS =
+    PERPS_COMPUTE_BUDGET.unitLimit || 1_400_000;
   if (!computeUnits) {
     if (simUnits) {
       computeUnits = Math.min(
