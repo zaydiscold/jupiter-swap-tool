@@ -72,7 +72,7 @@ import {
 // --------------------------------------------------
 
 const TOOL_VERSION = "1.2.1";
-const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
@@ -214,6 +214,21 @@ const HOTKEY_MAP = buildHotkeyMap([
           action: "unwrap-wsol",
           keys: ["7"],
           description: "Unwrap wSOL → SOL",
+        },
+        {
+          action: "wallet-fund",
+          keys: ["8"],
+          description: "Fund wallet (interactive)",
+        },
+        {
+          action: "wallet-redistribute",
+          keys: ["9"],
+          description: "Redistribute SOL across wallets",
+        },
+        {
+          action: "wallet-aggregate",
+          keys: ["0"],
+          description: "Aggregate SOL toward target wallet",
         },
         { action: "back", keys: ["b", "back"], description: "Back to launcher" },
       ],
@@ -12023,9 +12038,21 @@ async function handleWalletCommand(args) {
     await walletTransferCommand(rest);
     return;
   }
+  if (subcommand === "fund") {
+    await walletFundCommand(rest);
+    return;
+  }
+  if (subcommand === "redistribute") {
+    await walletRedistributeCommand(rest);
+    return;
+  }
+  if (subcommand === "aggregate") {
+    await walletAggregateCommand(rest);
+    return;
+  }
 
   throw new Error(
-    `Unknown wallet subcommand '${subcommandRaw}'. Expected 'wrap', 'unwrap', 'list', 'info', 'sync', 'groups', or 'transfer'.`
+    `Unknown wallet subcommand '${subcommandRaw}'. Expected 'wrap', 'unwrap', 'list', 'info', 'sync', 'groups', 'transfer', 'fund', 'redistribute', or 'aggregate'.`
   );
 }
 
@@ -12966,6 +12993,184 @@ async function transferBetweenWallets(fromIdentifier, toIdentifier, amount, toke
   } else {
     console.error(paint("Token transfers not yet implemented. Only SOL is supported.", "error"));
   }
+}
+
+async function walletFundCommand(args = []) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    return;
+  }
+
+  console.log(paint("\n=== Wallet Balances ===", "label"));
+  const connection = createRpcConnection("confirmed");
+  for (const wallet of wallets) {
+    try {
+      const solLamports = BigInt(await getSolBalance(connection, wallet.kp.publicKey));
+      const label = wallet.number ? `#${wallet.number}` : "-";
+      console.log(
+        paint(
+          `${label} ${wallet.name}: ${formatBaseUnits(solLamports, 9)} SOL`,
+          "muted"
+        )
+      );
+      const tokenBalances = await loadWalletTokenBalances(wallet);
+      for (const entry of tokenBalances) {
+        const amountRaw =
+          typeof entry.amountRaw === "bigint"
+            ? entry.amountRaw
+            : BigInt(entry.amountRaw ?? 0);
+        if (amountRaw <= 0n) continue;
+        const symbol =
+          entry.tokenRecord.symbol ||
+          symbolForMint(entry.tokenRecord.mint) ||
+          entry.tokenRecord.mint.slice(0, 4);
+        console.log(
+          paint(
+            `    • ${symbol}: ${entry.amountDecimal ?? formatBaseUnits(amountRaw, entry.decimals)}`,
+            "muted"
+          )
+        );
+      }
+    } catch (err) {
+      console.warn(
+        paint(
+          `  Unable to fetch balances for ${wallet.name}: ${err.message || err}`,
+          "warn"
+        )
+      );
+    }
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  const prompt = (question) =>
+    new Promise((resolve) => rl.question(question, resolve));
+  try {
+    const fromInput = (await prompt("\nFrom wallet (# or filename, blank to cancel): ")).trim();
+    if (!fromInput) {
+      console.log(paint("Cancelled.", "muted"));
+      return;
+    }
+    const toInput = (await prompt("To wallet (# or filename): ")).trim();
+    if (!toInput) {
+      console.log(paint("Destination is required.", "warn"));
+      return;
+    }
+    const amountInput = (await prompt("Amount (decimal or 'all', blank = all): ")).trim() || "all";
+
+    let fromWallet;
+    let toWallet;
+    try {
+      fromWallet = findWalletByName(fromInput);
+    } catch (err) {
+      console.error(paint(`Unknown source wallet '${fromInput}': ${err.message}`, "error"));
+      return;
+    }
+    try {
+      toWallet = findWalletByName(toInput);
+    } catch (err) {
+      console.error(paint(`Unknown destination wallet '${toInput}': ${err.message}`, "error"));
+      return;
+    }
+
+    await transferBetweenWallets(fromWallet.name, toWallet.name, amountInput || "all", "SOL");
+  } catch (err) {
+    console.error(paint(`Funding aborted: ${err.message || err}`, "error"));
+  } finally {
+    rl.close();
+  }
+}
+
+async function walletRedistributeCommand(args = []) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    return;
+  }
+
+  let anchorInput = args[0] || "";
+  if (!anchorInput) {
+    console.log(paint("\nRedistribute SOL from an anchor wallet across all wallets.", "label"));
+    console.log(
+      paint(
+        "Enter the anchor wallet (number or filename). Leave blank to use wallet #1.",
+        "muted"
+      )
+    );
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    anchorInput = (await new Promise((resolve) =>
+      rl.question("Anchor wallet (# or filename): ", resolve)
+    )).trim();
+    rl.close();
+  }
+
+  let anchorWallet;
+  try {
+    anchorWallet = anchorInput
+      ? findWalletByName(anchorInput)
+      : wallets[0];
+  } catch (err) {
+    console.error(paint(`Unknown wallet '${anchorInput}': ${err.message}`, "error"));
+    return;
+  }
+
+  console.log(
+    paint(
+      `\nRedistributing spendable SOL using anchor ${anchorWallet.name}...`,
+      "info"
+    )
+  );
+  await redistributeSol(anchorWallet.name);
+}
+
+async function walletAggregateCommand(args = []) {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    return;
+  }
+
+  let targetInput = args[0] || "";
+  if (!targetInput) {
+    console.log(
+      paint(
+        "\nAggregate SOL backwards toward a target wallet (defaults to #1).",
+        "label"
+      )
+    );
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    targetInput = (await new Promise((resolve) =>
+      rl.question("Target wallet (# or filename): ", resolve)
+    )).trim();
+    rl.close();
+  }
+
+  let targetWallet;
+  try {
+    targetWallet = targetInput
+      ? findWalletByName(targetInput)
+      : wallets[0];
+  } catch (err) {
+    console.error(paint(`Unknown wallet '${targetInput}': ${err.message}`, "error"));
+    return;
+  }
+
+  console.log(
+    paint(
+      `\nAggregating SOL toward ${targetWallet.name}...`,
+      "info"
+    )
+  );
+  await aggregateSol(targetWallet.name);
 }
 
 // airdrop single wallet (devnet)

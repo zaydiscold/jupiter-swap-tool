@@ -411,6 +411,45 @@ wallet_menu() {
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
+      7)
+        read -r -p "Wallet to unwrap (# or filename, blank = cancel): " WALLET_UNWRAP
+        if [[ -z "$WALLET_UNWRAP" ]]; then
+          echo "Cancelled."
+          continue
+        fi
+        read -r -p "Amount to unwrap (decimal or 'all', blank = all): " WALLET_UNWRAP_AMT
+        WALLET_UNWRAP_AMT=${WALLET_UNWRAP_AMT:-all}
+        run_cli_command "Unwrapping wSOL" node cli_trader.js wallet unwrap "$WALLET_UNWRAP" "$WALLET_UNWRAP_AMT"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      8)
+        JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+        JUPITER_SWAP_TOOL_NO_BANNER=1 \
+        run_cli_command "Fund wallet" node cli_trader.js wallet fund
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      9)
+        read -r -p "Anchor wallet for redistribution (# or filename, blank = #1): " WALLET_REDISTRIBUTE
+        cmd=(node cli_trader.js wallet redistribute)
+        if [[ -n "$WALLET_REDISTRIBUTE" ]]; then
+          cmd+=("$WALLET_REDISTRIBUTE")
+        fi
+        run_cli_command "Redistributing SOL" "${cmd[@]}"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      0)
+        read -r -p "Aggregate toward wallet (# or filename, blank = #1): " WALLET_AGGREGATE
+        cmd=(node cli_trader.js wallet aggregate)
+        if [[ -n "$WALLET_AGGREGATE" ]]; then
+          cmd+=("$WALLET_AGGREGATE")
+        fi
+        run_cli_command "Aggregating SOL" "${cmd[@]}"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
       *)
         echo "Unknown option: $WALLET_OPT"
         ;;
