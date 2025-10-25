@@ -16,7 +16,7 @@ test("long-chain campaigns fall back to alternating WSOL swaps when pool is spar
         mint: FALLBACK_MINT,
         symbol: "FALL",
         decimals: 6,
-        tags: ["long-circle"],
+        tags: ["swappable"],
       },
     ])
   );

@@ -4,18 +4,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Jupiter Swap Tool CLI (v1.2.0) is a Node.js command-line tool for automated Solana trading through Jupiter's swap infrastructure. The tool manages multiple wallets, executes swap strategies (buckshot, long-circle, prewritten flows), and integrates with Jupiter Perps and Lend APIs.
+Jupiter Swap Tool CLI (v1.2.1) is a Node.js command-line tool for automated Solana trading through Jupiter's swap infrastructure. The tool manages multiple wallets, executes swap strategies (buckshot, long-circle, prewritten flows), and integrates with Jupiter Perps and Lend APIs.
 
 ## Core Architecture
 
 ### Single-File Design
-The entire application lives in `cli_trader.js` (~15,000 lines). This is intentional - the codebase prioritizes deployment simplicity and inline visibility over module separation. All swap logic, wallet management, Jupiter API integration, RPC handling, and automation flows are co-located.
+The entire application lives in `cli_trader.js` (~15,000 lines). This is intentional—deployment simplicity and inline visibility take precedence over modularity. All swap logic, wallet management, Jupiter API integration, RPC handling, and automation flows are co-located.
+
+### Wallet Registry / Manifest
+- `shared/wallet_registry.js`: maintains `wallets_manifest.json` (auto-numbering, role, group).
+- `shared/wallet_helpers.js`: `listWallets()` syncs the manifest and decorates wallet objects with `number`, `role`, `master`, `group`.
+- Commands accept registry numbers (`aggregate 1`, `wallet info #3`, etc.) alongside filenames/public keys. New CLI verbs: `wallet list`, `wallet info`, `wallet groups`, `wallet transfer`, `aggregate-hierarchical`, `aggregate-masters`.
 
 ### Key Subsystems (within cli_trader.js)
 
 **Token Management System** (lines ~1700-2400)
 - `token_catalog.json`: Central registry of tradeable tokens with tags for flow selection
-- Tag system: `"swappable"` (all tradeable tokens), `"long-circle"` (core liquidity tokens), `"terminal"` (SOL), `"default-sweep"`, `"secondary-terminal"` (USDC/wBTC/cbBTC/wETH)
+- Tag system: non-SOL tokens carry just `"swappable"` (general flow eligibility) and `"default-sweep"`; SOL keeps `"terminal"`, and USDC/USDT/wBTC/cbBTC/wETH additionally keep `"secondary-terminal"` for terminal selection.
 - Dynamic token selection via `buildDynamicLongCircleSegments()` and tag-based filtering
 - Token catalog can be refreshed from Jupiter Tokens API v2 with `tokens --refresh`
 
@@ -36,14 +41,14 @@ The entire application lives in `cli_trader.js` (~15,000 lines). This is intenti
 - Slippage optimization: `restrictIntermediateTokens: "true"` forces high-liquidity routing
 
 **Jupiter API Integration** (lines ~10740-11500)
-- Dual engine support: Ultra API (paid tier, default) and Lite API (legacy fallback)
-- Ultra: `/ultra/v1/order` → `/ultra/v1/execute` (transaction handled by Jupiter)
-- Lite: `/swap/v1/quote` → `/swap/v1/swap` (local transaction signing)
-- Functions: `createUltraOrder()`, `fetchLegacyQuote()`, `executeUltraTransaction()`
-- Automatic fallback: 404/401/403 from Ultra → switch to Lite API
+- Dual engine support: Ultra (default) and Lite (legacy fallback).
+- Ultra order/execute failures now retry up to `MAX_ULTRA_FALLBACK_RETRIES` (default 3) with exponential backoff before falling back to Lite; the next successful swap automatically switches back to Ultra.
+- Lite path remains `/swap/v1/quote` → `/swap/v1/swap` with local signing.
+- Functions: `createUltraOrder()`, `executeUltraTransaction()`, `fetchLegacyQuote()`, `submitLegacySwap()`.
+- `markRpcEndpointUnhealthy()` tracks cooldowns (rate-limit vs general), ensuring rotation actually moves off failing endpoints.
 
 **Wallet Guard System** (lines ~2500-3000)
-- Tracks wallet SOL balances and disables wallets with <0.01 SOL from swap flows
+- Tracks wallet SOL balances and disables wallets with <0.005 SOL from swap flows
 - `balances` command refreshes guard state
 - `force-reset-wallets` clears guard without balance check
 - Prevents transaction failures due to insufficient gas
@@ -221,6 +226,12 @@ Always include:
 
 ## Testing
 
+### Unit suite
+```bash
+npm test
+```
+Runs Node’s built-in test runner for campaign planners, wallet registry helpers, ATA utilities, etc. Make sure it stays green before shipping behavioural changes.
+
 ### Syntax Check
 ```bash
 node --check cli_trader.js
@@ -276,10 +287,10 @@ node cli_trader.js swap SOL USDC 0.001
 - Implementation is in flow execution engine (lines ~9970-10010)
 
 ### Tag System Maintenance
-- When adding new tokens to `token_catalog.json`, include appropriate tags
-- Use `"swappable"` for general inclusion in random flows
-- Use `"long-circle"` only for deep-liquidity tokens (USDC, POPCAT, PUMP, etc.)
-- Avoid creating flow-specific tags - they create maintenance burden
+- `token_catalog.json` uses a simplified scheme:
+  - Every non-SOL trading asset carries `"swappable"` (for flows/random selection) and `"default-sweep"`.
+  - Terminal assets (USDC, USDT, wBTC, cbBTC, wETH) additionally carry `"secondary-terminal"`.
+- Avoid introducing flow-specific tags unless coordinated; randomness and sweep logic now key off the unified tags.
 
 ## Common Debugging Scenarios
 

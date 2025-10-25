@@ -20,12 +20,21 @@
 - Lend earn deposit/withdraw now auto-select eligible base assets or share tokens when you pass `*`, defaulting to the max spendable balance per wallet while leaving a SOL reserve for rent/gas (and wrapping SOL as needed).
 - Launcher lend prompts accept blank inputs to trigger the wildcard behaviour so operators can fan actions across every active wallet without typing paths or amounts.
 
+## [1.2.1] 2025-10-23
+- Ultra swaps now retry transient failures before falling back to Lite, RPC cooldowns differentiate rate limits vs other faults, and documentation/hotkeys were refreshed to emphasise numeric wallet selectors, registry helpers, and the new environment knobs.
+
 ## [1.2.0] 2025-10-22
 - Wallet discovery now syncs with a persistent `wallets_manifest.json`, giving every keypair a stable number, group, and role (master/master-master/slave) and keeping the CLI output ordered by creation time.
 - `shared/wallet_helpers.js` gained robust keypair parsers (array JSON, object JSON, base58), optional logger hooks, and automatic registry sync so downstream commands inherit metadata without extra plumbing.
 - Added deterministic Solana campaign utilities under `chains/solana/` (seeded RNG, plan truncation, tag filtering) and exposed them to tests for reproducible automation planning.
 - Rounded out test coverage for ATA creation + campaign randomisation via Node’s built-in runner; run `npm test` to confirm the helper layer before shipping.
 - Refreshed docs and launcher artefacts to advertise v1.2.0 and highlight the new registry architecture for future contributors.
+- Updated the Lend Earn flow to match the latest `/lend/v1/earn` parameters (including ATA pre-creation before withdrawals) and disabled borrow commands across the CLI/launcher/docs until Jupiter reopens the public borrow endpoints.
+- Trimmed inter-call delays (110 ms default, Ultra throttled to ≈ 45 ms per wallet with ≈ 35 ms order→execute spacing, lighter passive jitter), and lifted automation concurrency to 12 inflight wallets while simplifying the token catalog to just `swappable`/`default-sweep` (plus `secondary-terminal` for USDC/USDT/wBTC/cbBTC/wETH) so flows stay in sync without manual tag edits.
+- Wallet guard threshold now disables wallets below 0.005 SOL (down from 0.01 SOL) while keeping SOL reserve logic unchanged.
+- `reclaim-sol` batches up to eight close-account instructions per transaction before falling back to single closes, dramatically shortening cleanup runs.
+- Lend deposits accept JL share symbols (e.g. `jlUSDC`), map them to the underlying vault asset in the payload, and prioritise wallets’ highest-yielding base asset when no mint is supplied.
+- Ultra swaps now retry transient order/execute failures before falling back to Lite, RPC cooldowns differentiate rate limits vs other faults, and docs/hotkeys were refreshed to emphasise numeric wallet selectors, registry helpers, and the new environment knobs.
 
 ## [1.1.2] 2025-10-21
 - Added a dedicated `test` hotkey (and launcher sub-menu) grouping RPC diagnostics and an Ultra API swap check in one place.

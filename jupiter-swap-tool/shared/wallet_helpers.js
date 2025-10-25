@@ -10,6 +10,7 @@ import {
   createSyncNativeInstruction,
   NATIVE_MINT,
 } from "@solana/spl-token";
+import * as walletRegistry from "./wallet_registry.js";
 
 const DEFAULT_KEYPAIR_DIR = "./keypairs";
 
@@ -153,12 +154,10 @@ export function listWallets() {
 
   // Sync wallet registry and add hierarchy metadata
   try {
-    const walletRegistry = require('./wallet_registry.js');
     const manifest = walletRegistry.syncWalletsFromFilesystem(wallets);
 
-    // Enrich wallet objects with registry data
     wallets.forEach((wallet) => {
-      const entry = manifest.wallets.find(w => w.filename === wallet.name);
+      const entry = manifest.wallets.find((w) => w.filename === wallet.name);
       if (entry) {
         wallet.number = entry.number;
         wallet.role = entry.role;
@@ -167,7 +166,6 @@ export function listWallets() {
       }
     });
   } catch (err) {
-    // If registry fails, wallets still work without hierarchy metadata
     if (logger?.warn) {
       logger.warn(paint(`Wallet registry sync failed: ${err.message}`, "warn"));
     }

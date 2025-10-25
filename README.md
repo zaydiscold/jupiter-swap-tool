@@ -95,7 +95,7 @@ All knobs are optional; unset variables fall back to the defaults below. Grouped
 | `JUPITER_SWAP_TOOL_SKIP_INIT` | Skip initial RPC guard refresh during launcher startup. | `0` |
 | `JUPITER_SWAP_TOOL_NO_BANNER` / `JUPITER_NO_BANNER` | Suppress the ASCII art banner at startup. | `0` |
 
-## CLI quick reference (v1.2.0)
+## CLI quick reference (v1.2.1)
 Commands can be invoked directly via `node cli_trader.js <command …>` or through the interactive launcher hotkeys. Amount arguments accept decimals (auto-converted to base units) unless the `--raw` flag is present.
 
 ### Wallet & key management
@@ -140,8 +140,7 @@ Commands can be invoked directly via `node cli_trader.js <command …>` or throu
 - `lend earn positions` / `lend earn earnings` – inspect active deposits and cumulative rewards per wallet.
 - `lend earn deposit <wallet|*> <mint|*> <amount|*> [--no-send]` – deposit into Earn pools, auto-creating ATAs, wrapping SOL, and tapering amounts when SOL is scarce. Use `*` to fan across eligible wallets/mints and `--no-send` to dry run.
 - `lend earn withdraw|mint|redeem …` – mirror deposit behaviour for withdrawals, share minting, and share redemption.
-- `lend borrow open <wallet> <collateralMint> <borrowMint> <amount> [options]` – open a borrow position, printing health metrics before submission.
-- `lend borrow adjust|repay|close …` – manage borrow positions; passing `*` for the amount or IDs fans across detected exposures.
+- `lend borrow …` – currently disabled; the CLI prints “borrow coming soon” until Jupiter re-enables the public borrow endpoints.
 
 ### Jupiter Perps (beta)
 - `perps markets [--group <group>]` – list available markets for the requested group (defaults to `mainnet-beta`).

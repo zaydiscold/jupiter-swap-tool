@@ -19,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf 'Jupiter Swap Tool v1.2.0 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.2.1 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC
@@ -609,7 +609,7 @@ flows_menu() {
 lend_menu() {
   while true; do
     echo
-    echo "Jupiter Lend (beta):"
+    echo "Jupiter Lend (earn beta — borrow coming soon):"
     JUPITER_SWAP_TOOL_SKIP_INIT=1 \
     JUPITER_SWAP_TOOL_NO_BANNER=1 \
       node cli_trader.js hotkeys lend-menu --no-title --indent 2 || \
@@ -627,7 +627,7 @@ lend_menu() {
         ;;
       2)
         echo "Leave fields blank to target every active wallet/token and auto-max amount."
-        read -r -p "Wallet file (blank = all wallets): " LEND_WALLET
+        read -r -p "Wallet (# or filename, blank = all wallets): " LEND_WALLET
         read -r -p "Deposit mint or symbol (blank = eligible tokens): " LEND_MINT
         read -r -p "Amount (decimal, blank = max spendable): " LEND_AMOUNT
         if [[ -z "$LEND_WALLET" ]]; then LEND_WALLET="*"; fi
@@ -639,7 +639,7 @@ lend_menu() {
         ;;
       3)
         echo "Leave fields blank to auto-select share tokens and withdraw full balance."
-        read -r -p "Wallet file (blank = all wallets): " LEND_WALLET
+        read -r -p "Wallet (# or filename, blank = all wallets): " LEND_WALLET
         read -r -p "Withdraw mint or symbol (blank = share tokens): " LEND_MINT
         read -r -p "Amount (decimal, blank = max available): " LEND_AMOUNT
         if [[ -z "$LEND_WALLET" ]]; then LEND_WALLET="*"; fi
@@ -650,52 +650,7 @@ lend_menu() {
         update_launcher_state
         ;;
       4)
-        read -r -p "Wallet file (collateral owner): " LEND_WALLET
-        read -r -p "Collateral mint or symbol: " LEND_COLLATERAL
-        read -r -p "Borrow mint or symbol: " LEND_BORROW
-        read -r -p "Collateral amount (decimal): " LEND_COLLATERAL_AMT
-        read -r -p "Borrow amount (decimal): " LEND_BORROW_AMT
-        if [[ -z "$LEND_WALLET" || -z "$LEND_COLLATERAL" || -z "$LEND_BORROW" || -z "$LEND_COLLATERAL_AMT" || -z "$LEND_BORROW_AMT" ]]; then
-          echo "Missing inputs; aborting."
-          continue
-        fi
-        run_cli_command "Lend borrow open" node cli_trader.js lend borrow open "$LEND_WALLET" "$LEND_COLLATERAL" "$LEND_BORROW" "$LEND_COLLATERAL_AMT" "$LEND_BORROW_AMT"
-        read -p "Press Enter to continue..." _
-        update_launcher_state
-        ;;
-      5)
-        read -r -p "Wallet file: " LEND_WALLET
-        read -r -p "Borrow mint or symbol: " LEND_BORROW
-        read -r -p "Repay amount (decimal): " LEND_REPAY
-        read -r -p "Position ID (optional): " LEND_POSITION
-        if [[ -z "$LEND_WALLET" || -z "$LEND_BORROW" || -z "$LEND_REPAY" ]]; then
-          echo "Missing inputs; aborting."
-          continue
-        fi
-        if [[ -n "$LEND_POSITION" ]]; then
-          run_cli_command "Lend borrow repay" node cli_trader.js lend borrow repay "$LEND_WALLET" "$LEND_BORROW" "$LEND_REPAY" --position "$LEND_POSITION"
-        else
-          run_cli_command "Lend borrow repay" node cli_trader.js lend borrow repay "$LEND_WALLET" "$LEND_BORROW" "$LEND_REPAY"
-        fi
-        read -p "Press Enter to continue..." _
-        update_launcher_state
-        ;;
-      6)
-        read -r -p "Wallet file: " LEND_WALLET
-        read -r -p "Position ID to close (blank = all): " LEND_POSITION
-        if [[ -z "$LEND_WALLET" ]]; then
-          echo "Missing inputs; aborting."
-          continue
-        fi
-        if [[ -z "$LEND_POSITION" ]]; then
-          LEND_POSITION="*"
-        fi
-        run_cli_command "Lend borrow close" node cli_trader.js lend borrow close "$LEND_WALLET" "$LEND_POSITION"
-        read -p "Press Enter to continue..." _
-        update_launcher_state
-        ;;
-      7)
-        read -r -p "Wallet identifiers (blank = all wallets): " LEND_IDS
+        read -r -p "Wallet identifiers (#, filename, or pubkey; blank = all wallets): " LEND_IDS
         if [[ -z "$LEND_IDS" ]]; then
           LEND_IDS="*"
         fi
@@ -703,22 +658,22 @@ lend_menu() {
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
-      8)
-        read -r -p "Wallet identifiers (blank = all wallets): " LEND_IDS
+      5)
+        read -r -p "Wallet identifiers (#, filename, or pubkey; blank = all wallets): " LEND_IDS
         if [[ -z "$LEND_IDS" ]]; then
           LEND_IDS="*"
         fi
-        run_cli_command "Lend borrow positions" node cli_trader.js lend borrow positions "$LEND_IDS"
+        run_cli_command "Lend earn earnings" node cli_trader.js lend earn earnings "$LEND_IDS"
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
-      9)
-        run_cli_command "Lend overview (all wallets)" node cli_trader.js lend overview
+      6)
+        run_cli_command "Lend overview (earn)" node cli_trader.js lend overview
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       *)
-        echo "Unknown option: $LEND_OPT"
+        echo "Borrow tooling is coming soon — choose 1-6 or 'b' to exit."
         ;;
     esac
   done

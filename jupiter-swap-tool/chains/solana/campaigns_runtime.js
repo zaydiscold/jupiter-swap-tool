@@ -4,12 +4,12 @@ import { fileURLToPath } from "url";
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";
 export const RANDOM_MINT_PLACEHOLDER = "RANDOM";
-export const MAX_INFLIGHT = 4;
+export const MAX_INFLIGHT = 16;
 export const JITTER_FRACTION = 0.6;
 export const CHECKPOINT_SOL_EVERY_MIN = 5;
 export const CHECKPOINT_SOL_EVERY_MAX = 10;
 export const WALLET_MIN_REST_SOL = 0.005;
-export const WALLET_RETIRE_UNDER_SOL = 0.01;
+export const WALLET_RETIRE_UNDER_SOL = 0.005;
 export const GAS_BASE_RESERVE_SOL = 0.0015;
 export const ATA_RENT_EST_SOL = 0.002;
 
@@ -95,6 +95,33 @@ function readTokenCatalog() {
 function tokensByTags(tokens, tags) {
   return tokens.filter(
     (token) => Array.isArray(token.tags) && token.tags.some((tag) => tags.includes(tag))
+  );
+}
+
+function tokenHasTag(entry, tag) {
+  return Array.isArray(entry?.tags) && entry.tags.includes(tag);
+}
+
+function selectSwappableNonTerminalTokens(catalog) {
+  return catalog.filter(
+    (entry) =>
+      entry &&
+      typeof entry.mint === "string" &&
+      tokenHasTag(entry, "swappable") &&
+      !tokenHasTag(entry, "secondary-terminal") &&
+      !SOL_LIKE_MINTS.has(entry.mint)
+  );
+}
+
+const BTC_ETH_TARGET_MINTS = new Set([
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", // wBTC
+  "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",  // cbBTC
+  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",  // wETH
+]);
+
+function selectBtcEthTokens(catalog) {
+  return catalog.filter(
+    (entry) => entry && typeof entry.mint === "string" && BTC_ETH_TARGET_MINTS.has(entry.mint)
   );
 }
 
@@ -616,7 +643,7 @@ export function buildTimedPlanForWallet({
 export const CAMPAIGNS = {
   "meme-carousel": {
     kind: "meme-carousel",
-    tokenTags: ["long-circle", "fanout", "default-sweep"],
+    tokenSelector: selectSwappableNonTerminalTokens,
     durations: {
       "30m": [20, 60],
       "1h": [60, 120],
@@ -626,7 +653,7 @@ export const CAMPAIGNS = {
   },
   "scatter-then-converge": {
     kind: "scatter-then-converge",
-    tokenTags: ["fanout", "default-sweep"],
+    tokenSelector: selectSwappableNonTerminalTokens,
     durations: {
       "30m": [20, 60],
       "1h": [60, 120],
@@ -636,7 +663,7 @@ export const CAMPAIGNS = {
   },
   "btc-eth-circuit": {
     kind: "btc-eth-circuit",
-    tokenTags: ["btc-eth", "long-circle"],
+    tokenSelector: selectBtcEthTokens,
     durations: {
       "30m": [15, 45],
       "1h": [40, 100],
@@ -646,7 +673,7 @@ export const CAMPAIGNS = {
   },
   icarus: {
     kind: "icarus",
-    tokenTags: ["fanout", "default-sweep", "long-circle"],
+    tokenSelector: selectSwappableNonTerminalTokens,
     durations: {
       "30m": [24, 64],
       "1h": [60, 140],
@@ -656,7 +683,7 @@ export const CAMPAIGNS = {
   },
   zenith: {
     kind: "zenith",
-    tokenTags: ["default-sweep", "long-circle", "secondary-pool"],
+    tokenSelector: selectSwappableNonTerminalTokens,
     durations: {
       "30m": [18, 42],
       "1h": [48, 108],
@@ -666,7 +693,7 @@ export const CAMPAIGNS = {
   },
   aurora: {
     kind: "aurora",
-    tokenTags: ["fanout", "secondary-pool"],
+    tokenSelector: selectSwappableNonTerminalTokens,
     durations: {
       "30m": [12, 32],
       "1h": [36, 80],
@@ -705,7 +732,17 @@ export function instantiateCampaignForWallets({
       : 60 * 60 * 1000;
 
   const catalog = readTokenCatalog();
-  const pool = tokensByTags(catalog, preset.tokenTags).filter((token) => token.symbol !== "PFP");
+  let pool;
+  if (typeof preset.tokenSelector === "function") {
+    pool = preset.tokenSelector(catalog);
+  } else {
+    const tokenTags =
+      Array.isArray(preset.tokenTags) && preset.tokenTags.length > 0
+        ? preset.tokenTags
+        : ["swappable"];
+    pool = tokensByTags(catalog, tokenTags);
+  }
+  pool = pool.filter((token) => token.symbol !== "PFP");
   const poolMints = pool
     .map((token) => ({
       mint: token.mint,
@@ -1184,7 +1221,7 @@ async function doFanoutSwapStep(pubkeyBase58, logicalStep, rng, planStates) {
 }
 
 async function withBackoff(fn) {
-  const delays = [400, 900, 1800, 3600];
+  const delays = [250, 600, 1200, 2400];
   let lastError = null;
   for (const delayMs of delays) {
     try {
@@ -1238,7 +1275,7 @@ export async function executeTimedPlansAcrossWallets({ plansByWallet }) {
       await sleep(wait);
     }
     while (inflight.size >= MAX_INFLIGHT) {
-      await sleep(100);
+      await sleep(60);
     }
     inflight.add(current.pubkey);
     try {

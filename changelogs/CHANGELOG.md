@@ -1,11 +1,19 @@
 # Changelog
 
+## [1.2.1] - 2025-10-23
+- Bumped project version to v1.2.1 across `VERSION`, `package.json`, and documentation.
+- Refreshed docs (root operator guide, in-repo manual, command reference, CLAUDE brief) to highlight the numbered wallet registry, smarter Ultra retries, and current environment knobs.
+- Noted the smarter Ultra ↔ Lite fallbacks in patch notes and changelog for operator visibility.
+
 ## [1.2.0] - 2025-10-22
-- Added a filesystem-backed wallet registry manifest that auto-numbers keypairs, tags master/slave groupings, and surfaces hierarchy metadata to CLI consumers.
-- Hardened wallet helper utilities with multi-format keypair parsing, richer logging hooks, and automatic manifest sync when listing wallets.
-- Expanded campaign planning and randomisation helpers under `chains/solana/`, including deterministic RNG utilities, budget-aware truncation, and tag-based token selection.
-- Introduced focused unit test coverage for campaign budgeting, token randomisation, and ATA handling to keep the new shared modules verifiable via `npm test`.
-- Updated documentation (README, ARCHITECTURE_PLAN) and launcher assets to reflect the 1.2.0 release while keeping operator guidance current.
+- Added a filesystem-backed wallet registry manifest that auto-numbers keypairs, records master/master-master relationships, and exposes the hierarchy through new CLI commands (`wallet list|info|sync|groups|transfer`).
+- Implemented number-aware wallet resolution across the CLI (including Lend/Earn, aggregation, and transfers) plus dedicated commands for hierarchical aggregation (`aggregate-hierarchical`, `aggregate-masters`).
+- Converted shared wallet helpers to ESM, eliminating runtime `require` errors and ensuring registry sync happens automatically when wallets are listed.
+- Reduced default execution delays (60 ms base, 25 ms Ultra wallet spacing, 18 ms Ultra execute gap) and raised campaign concurrency to 16; token-account cleanup now closes 12 ATA accounts per transaction by default.
+- Ultra swaps now retry transient API failures a few times (configurable via `MAX_ULTRA_FALLBACK_RETRIES`) before falling back to Lite, and RPC rotation treats rate limits with shorter cooldowns so the CLI cycles endpoints instead of looping on `api.mainnet-beta.solana.com`.
+- Disabled Jupiter Lend borrow tooling with clear "coming soon" messaging while keeping the Earn implementation aligned with the `/lend/v1/earn` API (share-token mapping, ATA pre-creation, highest-yield auto-selection).
+- Simplified the token catalog to rely on the `swappable` tag (plus `default-sweep`/`secondary-terminal` where relevant) so every non-SOL asset participates in all flows without per-flow tag maintenance.
+- Added targeted unit tests for the wallet registry so numbering, group assignment, and identifier resolution stay covered by `npm test`.
 
 ## [1.1.2] - 2025-10-21
 - Added a dedicated diagnostics hotkey grouping RPC tests and Ultra order checks alongside the existing launcher.

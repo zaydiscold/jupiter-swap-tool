@@ -8,6 +8,7 @@ import bs58 from "bs58";
 import readline from "readline";
 import * as bip39 from "bip39";
 import { derivePath } from "ed25519-hd-key";
+import * as walletRegistry from "./shared/wallet_registry.js";
 import {
   Connection,
   Keypair,
@@ -67,11 +68,11 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.2.0
+// version 1.2.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.2.0";
-const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+const TOOL_VERSION = "1.2.1";
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
@@ -137,12 +138,12 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "redistribute",
           keys: ["d", "3", "redistribute"],
-          description: "Redistribute SOL from the crew wallet across all others",
+          description: "Redistribute SOL from the crew wallet across all others (supports wallet numbers)",
         },
         {
           action: "aggregate",
           keys: ["a", "4", "aggregate"],
-          description: "Aggregate SOL back into the crew wallet",
+          description: "Aggregate SOL back into the crew wallet (e.g. 'aggregate 1')",
         },
         {
           action: "reclaim-sol",
@@ -202,7 +203,7 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "list-wallets",
           keys: ["5"],
-          description: "List wallet addresses",
+          description: "List wallet addresses (includes registry numbers)",
         },
         {
           action: "force-reset-guard",
@@ -288,14 +289,14 @@ const HOTKEY_MAP = buildHotkeyMap([
           description: "Earn withdraw",
         },
         {
-          action: "borrow-open",
+          action: "earn-positions",
           keys: ["4"],
-          description: "Borrow (soon)",
+          description: "Earn positions",
         },
         {
-          action: "earn-positions",
+          action: "earn-earnings",
           keys: ["5"],
-          description: "Earn positions",
+          description: "Earn earnings",
         },
         {
           action: "overview",
@@ -383,7 +384,7 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "lend-menu",
           keys: ["7"],
-          description: "Jupiter Lend (earn / borrow beta)",
+          description: "Jupiter Lend (earn — borrow coming soon)",
         },
         {
           action: "flows-menu",
@@ -587,6 +588,14 @@ function renderHotkeyTable(contexts, { indent = "", includeTitle = true } = {}) 
       lines.push("");
     }
     lines.push(...block);
+    if (context === "wallet-menu") {
+      const ctx = findHotkeyContext(context);
+      const noteIndent = `${indent}${includeTitle && ctx?.label ? "  " : ""}`;
+      lines.push(`${noteIndent}Tip: wallet commands accept registry numbers, for example:`);
+      lines.push(`${noteIndent}  • aggregate 1 (or aggregate #1)`);
+      lines.push(`${noteIndent}  • fund --from 6 --to 2`);
+      lines.push(`${noteIndent}  • lend earn deposit #2 jlUSDC`);
+    }
     first = false;
   }
   return lines;
@@ -810,17 +819,23 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const RAW_SWAP_AMOUNT_MODE = (process.env.SWAP_AMOUNT_MODE || "all").toLowerCase();
 const DEFAULT_SWAP_AMOUNT_MODE = RAW_SWAP_AMOUNT_MODE === "random" ? "random" : "all";
 const SLIPPAGE_BPS = process.env.SLIPPAGE_BPS ? Math.max(1, parseInt(process.env.SLIPPAGE_BPS, 10) || 1) : 20;
-const DELAY_BETWEEN_CALLS_MS = 500;
+const DELAY_BETWEEN_CALLS_MS = 60;
+const ULTRA_WALLET_DELAY_MS = process.env.ULTRA_WALLET_DELAY_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_WALLET_DELAY_MS, 10) || 0)
+  : 25;
+const ULTRA_EXECUTE_DELAY_MS = process.env.ULTRA_EXECUTE_DELAY_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_EXECUTE_DELAY_MS, 10) || 0)
+  : 18;
 const BALANCE_RPC_DELAY_MS = process.env.BALANCE_RPC_DELAY_MS
   ? Math.max(0, parseInt(process.env.BALANCE_RPC_DELAY_MS, 10) || 0)
-  : 250;
+  : 150;
 const PRINT_SECRET_KEYS = process.env.PRINT_SECRET_KEYS === "1";
 const PASSIVE_STEP_DELAY_MS = process.env.PASSIVE_STEP_DELAY_MS
   ? Math.max(0, parseInt(process.env.PASSIVE_STEP_DELAY_MS, 10) || 0)
-  : 1500;
+  : 240;
 const PASSIVE_STEP_JITTER_MS = process.env.PASSIVE_STEP_DELAY_JITTER_MS
   ? Math.max(0, parseInt(process.env.PASSIVE_STEP_DELAY_JITTER_MS, 10) || 0)
-  : 800;
+  : 90;
 const GENERAL_SIMULATION_RETRY_LIMIT = process.env.GENERAL_SIMULATION_RETRY_LIMIT
   ? Math.max(0, parseInt(process.env.GENERAL_SIMULATION_RETRY_LIMIT, 10) || 0)
   : 3;
@@ -856,6 +871,18 @@ const JUPITER_SOL_RETRY_DELTA_LAMPORTS = process.env.JUPITER_SOL_RETRY_DELTA_LAM
 const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
   ? Math.max(0, parseInt(process.env.JUPITER_SOL_MAX_RETRIES, 10) || 0)
   : 3;
+const MAX_ULTRA_FALLBACK_RETRIES = process.env.MAX_ULTRA_FALLBACK_RETRIES
+  ? Math.max(0, parseInt(process.env.MAX_ULTRA_FALLBACK_RETRIES, 10) || 0)
+  : 3;
+const ULTRA_RETRY_BACKOFF_BASE_MS = process.env.ULTRA_RETRY_BACKOFF_BASE_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_RETRY_BACKOFF_BASE_MS, 10) || 0)
+  : 250;
+const RPC_RATE_LIMIT_COOLDOWN_MS = process.env.RPC_RATE_LIMIT_COOLDOWN_MS
+  ? Math.max(1000, parseInt(process.env.RPC_RATE_LIMIT_COOLDOWN_MS, 10) || 0)
+  : 20_000;
+const RPC_GENERAL_COOLDOWN_MS = process.env.RPC_GENERAL_COOLDOWN_MS
+  ? Math.max(1000, parseInt(process.env.RPC_GENERAL_COOLDOWN_MS, 10) || 0)
+  : 5 * 60 * 1000;
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -1501,7 +1528,9 @@ const MIN_TRANSFER_LAMPORTS = process.env.MIN_TRANSFER_LAMPORTS
   ? BigInt(process.env.MIN_TRANSFER_LAMPORTS)
   : BigInt(50_000); // default ~0.00005 SOL to avoid dust txs
 const ATA_CREATION_FEE_LAMPORTS = BigInt(5_000); // buffer for tx fee when creating ATA
-const WALLET_DISABLE_THRESHOLD_LAMPORTS = BigInt(10_000_000); // 0.01 SOL guardrail
+const WALLET_DISABLE_THRESHOLD_LAMPORTS = BigInt(5_000_000); // 0.005 SOL guardrail
+const WALLET_DISABLE_THRESHOLD_SOL = Number(WALLET_DISABLE_THRESHOLD_LAMPORTS) / 1e9;
+const WALLET_DISABLE_THRESHOLD_LABEL = WALLET_DISABLE_THRESHOLD_SOL.toFixed(3);
 const ESTIMATED_GAS_PER_SWAP_LAMPORTS = process.env.ESTIMATED_GAS_PER_SWAP_LAMPORTS
   ? BigInt(process.env.ESTIMATED_GAS_PER_SWAP_LAMPORTS)
   : BigInt(5_000); // estimated gas per swap transaction
@@ -1571,19 +1600,12 @@ const JUPITER_TOKENS_TAG_ENDPOINT = `${JUPITER_TOKENS_API_BASE}/tag`;
 const JUPITER_TOKENS_CATEGORY_ENDPOINT = `${JUPITER_TOKENS_API_BASE}/category`;
 const DEFAULT_LEND_EARN_BASE =
   process.env.JUPITER_LEND_API_BASE || "https://lite-api.jup.ag/lend/v1/earn";
-const DEFAULT_LEND_BORROW_BASE =
-  process.env.JUPITER_LEND_BORROW_API_BASE || "https://lite-api.jup.ag/lend/v1/borrow";
 const DEFAULT_PERPS_API_BASE =
   process.env.JUPITER_PERPS_API_BASE || "https://lite-api.jup.ag/perps/v1";
 const FALLBACK_LEND_EARN_BASES = [
   "https://api.jup.ag/lend/v1/earn",
   "https://api.jup.ag/lend/earn",
   "https://api.jup.ag/jup-integrators/earn",
-];
-const FALLBACK_LEND_BORROW_BASES = [
-  "https://api.jup.ag/lend/v1/borrow",
-  "https://api.jup.ag/lend/borrow",
-  "https://api.jup.ag/jup-integrators/borrow",
 ];
 const FALLBACK_PERPS_BASES = [
   "https://api.jup.ag/perps/v1",
@@ -1592,13 +1614,15 @@ const FALLBACK_PERPS_BASES = [
 const LEND_EARN_BASES = Array.from(
   new Set([DEFAULT_LEND_EARN_BASE, ...FALLBACK_LEND_EARN_BASES])
 );
-const LEND_BORROW_BASES = Array.from(
-  new Set([DEFAULT_LEND_BORROW_BASE, ...FALLBACK_LEND_BORROW_BASES])
-);
 const PERPS_API_BASES = Array.from(
   new Set([DEFAULT_PERPS_API_BASE, ...FALLBACK_PERPS_BASES])
 );
 const USE_ULTRA_ENGINE = JUPITER_SWAP_ENGINE !== "lite";
+const UNIVERSAL_TOKEN_TAGS = Object.freeze(["swappable", "default-sweep"]);
+const TERMINAL_TOKEN_TAGS = Object.freeze([
+  ...UNIVERSAL_TOKEN_TAGS,
+  "secondary-terminal",
+]);
 const FALLBACK_TOKEN_CATALOG = [
   {
     symbol: "SOL",
@@ -1612,77 +1636,77 @@ const FALLBACK_TOKEN_CATALOG = [
     mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "long-circle", "secondary-pool", "secondary-terminal", "crew-cycle"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "USDT",
     mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     decimals: 6,
     program: "spl",
-    tags: [],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "POPCAT",
     mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
     decimals: 9,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "PUMP",
     mint: "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
     decimals: 6,
     program: "token-2022",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "PENGU",
     mint: "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "FART",
     mint: "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "WIF",
     mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "URANUS",
     mint: "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "buckshot"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "wBTC",
     mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "cbBTC",
     mint: "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "wETH",
     mint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
 ];
 
@@ -2250,9 +2274,18 @@ let rpcEndpointCursor = 0;
 
 // Flag an endpoint as temporarily unusable. The RPC rotation logic will
 // skip it until the cooldown expires, preventing repeated 401/403 failures.
-function markRpcEndpointUnhealthy(url, reason = "") {
+function markRpcEndpointUnhealthy(url, reason = "", options = {}) {
   if (!url) return;
-  const cooldownMs = 5 * 60 * 1000; // 5 minutes cooldown
+  if (typeof reason === "object" && reason !== null && !Array.isArray(reason)) {
+    options = reason;
+    reason = options.reason || "";
+  }
+  const cooldownMs =
+    typeof options.cooldownMs === "number"
+      ? Math.max(1000, options.cooldownMs)
+      : /rate[-\s]?limit/i.test(reason)
+      ? RPC_RATE_LIMIT_COOLDOWN_MS
+      : RPC_GENERAL_COOLDOWN_MS;
   if (!UNHEALTHY_RPC_ENDPOINTS.has(url)) {
     const note = reason ? ` (${reason})` : "";
     console.warn(paint(`RPC endpoint ${url} marked unhealthy${note}`, "warn"));
@@ -2263,15 +2296,25 @@ function markRpcEndpointUnhealthy(url, reason = "") {
 function nextRpcEndpoint() {
   if (RPC_ENDPOINTS.length === 0) return DEFAULT_RPC_URL;
   const total = RPC_ENDPOINTS.length;
+  let fallbackUrl = null;
+  let fallbackExpiry = Number.POSITIVE_INFINITY;
   for (let i = 0; i < total; i += 1) {
     const url = RPC_ENDPOINTS[rpcEndpointCursor];
     rpcEndpointCursor = (rpcEndpointCursor + 1) % total;
     const unhealthyUntil = UNHEALTHY_RPC_ENDPOINTS.get(url);
     if (unhealthyUntil && unhealthyUntil > Date.now()) {
+      if (unhealthyUntil < fallbackExpiry) {
+        fallbackExpiry = unhealthyUntil;
+        fallbackUrl = url;
+      }
       continue;
     }
     UNHEALTHY_RPC_ENDPOINTS.delete(url);
     return url;
+  }
+  if (fallbackUrl) {
+    UNHEALTHY_RPC_ENDPOINTS.delete(fallbackUrl);
+    return fallbackUrl;
   }
   return DEFAULT_RPC_URL;
 }
@@ -2283,7 +2326,7 @@ function createRpcConnection(commitment = 'confirmed', forcedEndpoint = null) {
   const url = forcedEndpoint || nextRpcEndpoint();
   const connection = new Connection(url, commitment);
   connection.__rpcEndpoint = url;
-  connection.__markUnhealthy = (reason) => markRpcEndpointUnhealthy(url, reason);
+  connection.__markUnhealthy = (reason, options) => markRpcEndpointUnhealthy(url, reason, options);
   attachRpcRequestHook(connection);
   const ws = connection._rpcWebSocket;
   if (ws && typeof ws.on === 'function') {
@@ -2530,11 +2573,6 @@ const lendEarnClient = createNamespaceClient({
   bases: LEND_EARN_BASES,
 });
 
-const lendBorrowClient = createNamespaceClient({
-  name: "lend borrow",
-  bases: LEND_BORROW_BASES,
-});
-
 const perpsClient = createNamespaceClient({
   name: "perps",
   bases: PERPS_API_BASES,
@@ -2542,10 +2580,6 @@ const perpsClient = createNamespaceClient({
 
 async function lendEarnRequest(options) {
   return lendEarnClient.request(options);
-}
-
-async function lendBorrowRequest(options) {
-  return lendBorrowClient.request(options);
 }
 
 async function perpsApiRequest(options) {
@@ -2574,6 +2608,7 @@ async function refreshLendTokensCache() {
       for (const token of result.data) {
         if (token.address && token.assetAddress) {
           LEND_SHARE_TOKEN_MAP.set(token.address, token.assetAddress);
+          LEND_BASE_ASSET_MINTS.add(token.assetAddress);
         }
       }
 
@@ -2611,12 +2646,24 @@ function parseCliOptions(tokens = []) {
   return { options, rest };
 }
 
-function findWalletByName(name) {
-  const wallet = listWallets().find((w) => w.name === name);
-  if (!wallet) {
-    throw new Error(`Wallet ${name} not found in keypairs directory`);
+function findWalletByName(identifier) {
+  const wallets = listWallets();
+  const directMatch = wallets.find((w) => w.name === identifier);
+  if (directMatch) return directMatch;
+
+  const registryEntry = walletRegistry.resolveWalletIdentifier(identifier);
+  if (registryEntry) {
+    const byNumber = typeof registryEntry.number === "number"
+      ? wallets.find((w) => w.number === registryEntry.number)
+      : null;
+    const byFilename = registryEntry.filename
+      ? wallets.find((w) => w.name === registryEntry.filename)
+      : null;
+    const resolved = byNumber || byFilename;
+    if (resolved) return resolved;
   }
-  return wallet;
+
+  throw new Error(`Wallet ${identifier} not found in keypairs directory`);
 }
 
 async function resolveTokenRecord(input, { allowRefresh = true } = {}) {
@@ -2667,7 +2714,7 @@ function logLendApiResult(action, result) {
   if (!result.ok && result.status === 404) {
     console.log(
       paint(
-        "  Tip: the default Lend endpoint may be gated. Set JUPITER_LEND_API_BASE / JUPITER_LEND_BORROW_API_BASE to the correct integrator URL if you have one.",
+        "  Tip: the default Lend endpoint may be gated. Set JUPITER_LEND_API_BASE to the correct integrator URL if you have one.",
         "warn"
       )
     );
@@ -2839,26 +2886,52 @@ function resolveWalletIdentifiers(inputs) {
     throw new Error("At least one wallet identifier is required");
   }
   const existing = listWallets();
+  const walletsByName = new Map(existing.map((wallet) => [wallet.name, wallet]));
+  const walletsByNumber = new Map(
+    existing.filter((wallet) => typeof wallet.number === "number").map((wallet) => [wallet.number, wallet])
+  );
+
   return expanded.map((item) => {
     const trimmed = item.trim();
-    const match = existing.find((w) => w.name === trimmed);
-    if (match) {
-      return { name: match.name, pubkey: match.kp.publicKey.toBase58() };
+    if (!trimmed) {
+      throw new Error("Wallet identifier cannot be empty");
     }
+
+    // Direct filename match
+    const namedWallet = walletsByName.get(trimmed);
+    if (namedWallet) {
+      return { name: namedWallet.name, pubkey: namedWallet.kp.publicKey.toBase58() };
+    }
+
+    // Registry lookup (supports numeric identifiers)
+    const registryEntry = walletRegistry.resolveWalletIdentifier(trimmed);
+    if (registryEntry) {
+      const byNumber = typeof registryEntry.number === "number" ? walletsByNumber.get(registryEntry.number) : null;
+      const byFilename = registryEntry.filename ? walletsByName.get(registryEntry.filename) : null;
+      const resolvedWallet = byNumber || byFilename;
+      if (resolvedWallet) {
+        return {
+          name: resolvedWallet.name,
+          pubkey: resolvedWallet.kp.publicKey.toBase58(),
+        };
+      }
+    }
+
+    // Public key fallback
     try {
       const pk = new PublicKey(trimmed);
       return { name: trimmed, pubkey: pk.toBase58() };
     } catch (err) {
-    throw new Error(`Invalid wallet identifier ${trimmed}: ${err.message}`);
-  }
-});
+      throw new Error(`Invalid wallet identifier ${trimmed}: ${err.message}`);
+    }
+  });
 }
 
 async function handleLendCommand(args) {
   const categoryRaw = args[0];
   if (!categoryRaw) {
     console.log(
-      "lend usage: lend <earn|borrow> <action> [...options] | lend overview"
+      "lend usage: lend earn <action> [...options] | lend overview (borrow coming soon)"
     );
     return;
   }
@@ -2873,14 +2946,22 @@ async function handleLendCommand(args) {
     await lendOverviewAllWallets();
     return;
   }
-  const rest = args.slice(1);
-  if (category === "earn") {
-    await handleLendEarnCommand(rest);
-  } else if (category === "borrow") {
-    await handleLendBorrowCommand(rest);
-  } else {
-    throw new Error(`Unknown lend category '${categoryRaw}'. Expected 'earn' or 'borrow'.`);
+  if (category === "borrow") {
+    console.log(
+      paint(
+        "Borrow endpoints are temporarily unavailable (coming soon).",
+        "warn"
+      )
+    );
+    return;
   }
+  if (category !== "earn") {
+    throw new Error(
+      `Unknown lend category '${categoryRaw}'. Expected 'earn' or 'overview'.`
+    );
+  }
+  const rest = args.slice(1);
+  await handleLendEarnCommand(rest);
 }
 
 async function handlePerpsCommand(args) {
@@ -3327,9 +3408,13 @@ async function handleLendEarnCommand(args) {
     case "deposit-instructions":
     case "withdraw-instructions":
     case "mint-instructions":
-    case "redeem-instructions":
-      await lendEarnTransferLike(action, rest, { valueField: "amount" });
+    case "redeem-instructions": {
+      const baseAction = action.replace(/-instructions$/, "");
+      const defaultField =
+        baseAction === "mint" || baseAction === "redeem" ? "shares" : "amount";
+      await lendEarnTransferLike(action, rest, { valueField: defaultField });
       return;
+    }
     default:
       throw new Error(`Unknown lend earn action '${actionRaw}'.`);
   }
@@ -3417,10 +3502,11 @@ async function lendEarnPositions(args) {
     console.log(paint(`  Wallet scope: ${scopeNames.join(", ")}`, "muted"));
   }
   try {
+    const walletCsv = identifiers.map((entry) => entry.pubkey).join(",");
     const result = await lendEarnRequest({
       path: "positions",
       method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
+      query: { users: walletCsv, wallets: walletCsv },
     });
     logLendApiResult("earn positions", result);
     const entries = extractIterableFromLendData(result.data) || [];
@@ -3504,15 +3590,38 @@ async function lendEarnEarnings(args) {
   if (earningScope.length > 0 && earningScope.length <= 5) {
     console.log(paint(`  Wallet scope: ${earningScope.join(", ")}`, "muted"));
   }
-  try {
-    const result = await lendEarnRequest({
-      path: "earnings",
-      method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
-    });
-    logLendApiResult("earn earnings", result);
-  } catch (err) {
-    console.error(paint("Lend earn earnings request failed:", "error"), err.message);
+  const summaries = [];
+  for (const identifier of identifiers) {
+    const label = identifier.name || identifier.pubkey;
+    try {
+      const result = await lendEarnRequest({
+        path: "earnings",
+        method: "GET",
+        query: { user: identifier.pubkey, wallet: identifier.pubkey },
+      });
+      logLendApiResult(`earn earnings (${label})`, result);
+      const entries = extractIterableFromLendData(result.data) || [];
+      summaries.push({ label, count: entries.length });
+    } catch (err) {
+      console.error(
+        paint(
+          `Lend earn earnings request failed for ${label}:`,
+          "error"
+        ),
+        err.message || err
+      );
+    }
+  }
+  if (summaries.length > 1) {
+    console.log(paint("Earnings summary:", "muted"));
+    for (const item of summaries) {
+      console.log(
+        paint(
+          `  ${item.label}: ${item.count} entr${item.count === 1 ? "y" : "ies"}`,
+          "muted"
+        )
+      );
+    }
   }
 }
 
@@ -4062,53 +4171,66 @@ async function lendOverviewAllWallets() {
     );
   }
   const walletCsv = identifiers.map((entry) => entry.pubkey).join(",");
-  const sections = [
-    {
+
+  console.log(paint("\n=== earn positions ===", "label"));
+  try {
+    const positionsResult = await lendEarnRequest({
+      path: "positions",
+      method: "GET",
+      query: { users: walletCsv, wallets: walletCsv },
+    });
+    logLendApiResult("earn positions", positionsResult);
+    summariseLendEntries(positionsResult, walletNameMap, {
       label: "earn positions",
-      runner: () =>
-        lendEarnRequest({
-          path: "positions",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "earn positions",
-    },
-    {
-      label: "earn earnings",
-      runner: () =>
-        lendEarnRequest({
-          path: "earnings",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "earn earnings",
-    },
-    {
-      label: "borrow positions",
-      runner: () =>
-        lendBorrowRequest({
-          path: "positions",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "borrow positions",
-    },
-  ];
-  for (const section of sections) {
-    console.log(paint(`\n=== ${section.label} ===`, "label"));
+    });
+  } catch (err) {
+    console.error(
+      paint("earn positions request failed:", "error"),
+      err.message || err
+    );
+  }
+
+  console.log(paint("\n=== earn earnings ===", "label"));
+  const earningsSummaries = [];
+  for (const identifier of identifiers) {
+    const label = identifier.name || identifier.pubkey;
     try {
-      const result = await section.runner();
-      logLendApiResult(section.label, result);
-      summariseLendEntries(result, walletNameMap, {
-        label: section.summaryLabel,
+      const earningsResult = await lendEarnRequest({
+        path: "earnings",
+        method: "GET",
+        query: { user: identifier.pubkey, wallet: identifier.pubkey },
       });
+      logLendApiResult(`earn earnings (${label})`, earningsResult);
+      const entries = extractIterableFromLendData(earningsResult.data) || [];
+      earningsSummaries.push({ label, count: entries.length });
     } catch (err) {
       console.error(
-        paint(`${section.label} request failed:`, "error"),
+        paint(
+          `earn earnings request failed for ${label}:`,
+          "error"
+        ),
         err.message || err
       );
     }
   }
+  if (earningsSummaries.length > 1) {
+    console.log(paint("Earnings summary:", "muted"));
+    for (const item of earningsSummaries) {
+      console.log(
+        paint(
+          `  ${item.label}: ${item.count} entr${item.count === 1 ? "y" : "ies"}`,
+          "muted"
+        )
+      );
+    }
+  }
+
+  console.log(
+    paint(
+      "\nBorrow endpoints are temporarily unavailable (coming soon).",
+      "warn"
+    )
+  );
 }
 
 async function computeSpendableSolBalance(connection, ownerPubkey) {
@@ -4270,9 +4392,32 @@ async function lendEarnTransferLike(action, args, { valueField }) {
   const usesShareTokens =
     normalizedAction === "withdraw" || normalizedAction === "redeem";
 
-  // Refresh lend tokens cache to get share token → underlying asset mapping
-  if (usesShareTokens) {
-    await refreshLendTokensCache();
+  let lendTokens = [];
+  try {
+    lendTokens = await refreshLendTokensCache();
+  } catch (_) {
+    lendTokens = [];
+  }
+  const shareTokenIndex = new Map();
+  const baseAssetYieldBps = new Map();
+  for (const token of lendTokens) {
+    if (token && typeof token === "object") {
+      if (typeof token.symbol === "string") {
+        shareTokenIndex.set(token.symbol.toLowerCase(), token);
+      }
+      if (typeof token.address === "string") {
+        shareTokenIndex.set(token.address, token);
+      }
+      if (token.assetAddress) {
+        const totalRate = Number(token.totalRate ?? token.supplyRate ?? 0);
+        if (Number.isFinite(totalRate)) {
+          const existing = baseAssetYieldBps.get(token.assetAddress);
+          if (existing === undefined || totalRate > existing) {
+            baseAssetYieldBps.set(token.assetAddress, totalRate);
+          }
+        }
+      }
+    }
   }
 
   let wallets;
@@ -4305,30 +4450,82 @@ async function lendEarnTransferLike(action, args, { valueField }) {
     );
   }
   const tokenFilterRecord = mintArg !== "*" ? await resolveTokenRecord(mintArg) : null;
-  if (mintArg !== "*" && !tokenFilterRecord) {
+  if (mintArg !== "*" && !tokenFilterRecord && !shareTokenIndex.size) {
     throw new Error(`Token ${mintArg} not found in catalog (try running 'tokens --refresh')`);
   }
-  const tokenFilterLabel = (() => {
-    if (mintArg === "*") {
-      if (usesBaseAssets) {
-        const baseSymbols = Array.from(LEND_BASE_ASSET_MINTS).map((mint) =>
-          symbolForMint(mint)
-        );
-        const uniqueSymbols = [...new Set(baseSymbols.filter(Boolean))];
-        return uniqueSymbols.length
-          ? `eligible base assets (${uniqueSymbols.join("/")})`
-          : "eligible base assets";
-      }
-      if (usesShareTokens) {
-        return "all Jupiter lend share tokens (JL-*)";
-      }
-      return "all tokens with balances";
+
+  let targetMintForFilter = null;
+  let tokenFilterLabel;
+  let filterSymbolForLogs;
+
+  if (mintArg === "*") {
+    if (usesBaseAssets) {
+      const baseSymbols = Array.from(LEND_BASE_ASSET_MINTS)
+        .map((mint) => symbolForMint(mint))
+        .filter(Boolean);
+      const uniqueSymbols = [...new Set(baseSymbols)];
+      tokenFilterLabel = uniqueSymbols.length
+        ? `eligible base assets (${uniqueSymbols.join("/")})`
+        : "eligible base assets";
+    } else if (usesShareTokens) {
+      tokenFilterLabel = "all Jupiter lend share tokens (JL-*)";
+    } else {
+      tokenFilterLabel = "all tokens with balances";
     }
-    if (tokenFilterRecord?.symbol) {
-      return `${tokenFilterRecord.symbol}`;
+  } else if (usesBaseAssets) {
+    const directMint = tokenFilterRecord?.mint || mintArg;
+    const lowerSymbol = typeof mintArg === "string" ? mintArg.toLowerCase() : "";
+    const shareEntry =
+      shareTokenIndex.get(directMint) ||
+      shareTokenIndex.get(lowerSymbol);
+    let baseMint = null;
+    if (typeof directMint === "string") {
+      const mapped = getUnderlyingAssetForShareToken(directMint);
+      if (mapped) baseMint = mapped;
     }
-    return mintArg;
-  })();
+    if (!baseMint && shareEntry?.assetAddress) {
+      baseMint = shareEntry.assetAddress;
+    }
+    if (!baseMint && shareEntry?.asset?.address) {
+      baseMint = shareEntry.asset.address;
+    }
+    if (!baseMint && typeof directMint === "string" && LEND_BASE_ASSET_MINTS.has(directMint)) {
+      baseMint = directMint;
+    }
+    if (!baseMint && tokenFilterRecord?.mint && LEND_BASE_ASSET_MINTS.has(tokenFilterRecord.mint)) {
+      baseMint = tokenFilterRecord.mint;
+    }
+    if (!baseMint) {
+      const available = Array.from(LEND_BASE_ASSET_MINTS)
+        .map((mint) => symbolForMint(mint))
+        .filter(Boolean)
+        .join(", ");
+      throw new Error(
+        `Token ${mintArg} is not a supported Lend base asset. Eligible base assets: ${available}`
+      );
+    }
+    targetMintForFilter = baseMint;
+    const baseSymbol = symbolForMint(baseMint) || baseMint.slice(0, 4);
+    if (shareEntry?.symbol && shareEntry.symbol.toLowerCase() !== baseSymbol.toLowerCase()) {
+      tokenFilterLabel = `${shareEntry.symbol} (underlying ${shareEntry.asset?.symbol || baseSymbol})`;
+      filterSymbolForLogs = shareEntry.symbol;
+    } else if (tokenFilterRecord?.symbol) {
+      tokenFilterLabel = tokenFilterRecord.symbol;
+      filterSymbolForLogs = tokenFilterRecord.symbol;
+    } else {
+      tokenFilterLabel = baseSymbol;
+      filterSymbolForLogs = baseSymbol;
+    }
+  } else {
+    targetMintForFilter = tokenFilterRecord?.mint || mintArg;
+    tokenFilterLabel = tokenFilterRecord?.symbol || mintArg;
+    filterSymbolForLogs = tokenFilterRecord?.symbol || mintArg;
+  }
+
+  if (!filterSymbolForLogs) {
+    filterSymbolForLogs = tokenFilterLabel;
+  }
+
   console.log(paint(`  Token filter: ${tokenFilterLabel}`, "muted"));
   const amountLabel = (() => {
     if (amountArg === "*") {
@@ -4361,14 +4558,43 @@ async function lendEarnTransferLike(action, args, { valueField }) {
       }
     }
 
-    const filteredBalances = tokenFilterRecord
-      ? eligibleBalances.filter((entry) => entry.tokenRecord.mint === tokenFilterRecord.mint)
+    if (usesBaseAssets && mintArg === "*" && eligibleBalances.length > 1 && baseAssetYieldBps.size > 0) {
+      eligibleBalances = [...eligibleBalances].sort((a, b) => {
+        const yieldA = baseAssetYieldBps.get(a.tokenRecord.mint) ?? -Infinity;
+        const yieldB = baseAssetYieldBps.get(b.tokenRecord.mint) ?? -Infinity;
+        if (yieldA !== yieldB) {
+          return yieldB - yieldA;
+        }
+        const spendableA =
+          typeof a.spendableRaw === "bigint"
+            ? a.spendableRaw
+            : BigInt(a.spendableRaw ?? 0);
+        const spendableB =
+          typeof b.spendableRaw === "bigint"
+            ? b.spendableRaw
+            : BigInt(b.spendableRaw ?? 0);
+        if (spendableA !== spendableB) {
+          return spendableB > spendableA ? 1 : -1;
+        }
+        const symbolA = a.tokenRecord.symbol || a.tokenRecord.mint;
+        const symbolB = b.tokenRecord.symbol || b.tokenRecord.mint;
+        return symbolA.localeCompare(symbolB);
+      });
+    }
+
+    const effectiveFilterMint = mintArg === "*"
+      ? null
+      : targetMintForFilter || tokenFilterRecord?.mint || mintArg;
+
+    const filteredBalances = effectiveFilterMint
+      ? eligibleBalances.filter((entry) => entry.tokenRecord.mint === effectiveFilterMint)
       : eligibleBalances;
 
     if (!filteredBalances.length) {
+      const label = mintArg === "*" ? "selected tokens" : filterSymbolForLogs;
       console.log(
         paint(
-          `  Wallet ${wallet.name} has no balance for ${mintArg === "*" ? "selected tokens" : tokenFilterRecord.symbol}.`,
+          `  Wallet ${wallet.name} has no balance for ${label}.`,
           "muted"
         )
       );
@@ -4809,331 +5035,6 @@ async function lendEarnTransferLike(action, args, { valueField }) {
   }
 }
 
-async function handleLendBorrowCommand(args) {
-  const actionRaw = args[0];
-  if (!actionRaw) {
-    console.log(
-      "lend borrow usage: lend borrow <pairs|positions|open|repay|close> [...options]"
-    );
-    return;
-  }
-  const action = actionRaw.toLowerCase();
-  const rest = args.slice(1);
-  switch (action) {
-    case "pairs":
-      await lendBorrowPairs(rest);
-      return;
-    case "positions":
-      await lendBorrowPositions(rest);
-      return;
-    case "open":
-      await lendBorrowOpen(rest);
-      return;
-    case "repay":
-      await lendBorrowRepay(rest);
-      return;
-    case "close":
-      await lendBorrowClose(rest);
-      return;
-    default:
-      throw new Error(`Unknown lend borrow action '${actionRaw}'.`);
-  }
-}
-
-async function lendBorrowPairs(args) {
-  const { options } = parseCliOptions(args);
-  const query = {};
-  if (options.collateral) query.collateralMint = options.collateral;
-  if (options.borrow) query.borrowMint = options.borrow;
-  try {
-    const result = await lendBorrowRequest({
-      path: "pairs",
-      method: "GET",
-      query,
-    });
-    logLendApiResult("borrow pairs", result);
-  } catch (err) {
-    console.error(paint("Lend borrow pairs request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowPositions(args) {
-  const { options, rest } = parseCliOptions(args);
-  let input = rest.length > 0 ? rest : (options.wallets ? options.wallets.split(",") : []);
-  const needsAllWallets =
-    !input ||
-    input.length === 0 ||
-    input.some((item) => item.trim().length === 0 || item.trim() === "*");
-  if (needsAllWallets) {
-    input = listWallets().map((wallet) => wallet.name);
-  }
-  if (!input || input.length === 0) {
-    throw new Error("lend borrow positions usage: lend borrow positions <walletName|pubkey>[,...]");
-  }
-  const identifiers = resolveWalletIdentifiers(input);
-  if (needsAllWallets) {
-    console.log(
-      paint(
-        `  Targeting all ${identifiers.length} wallet(s) for borrow positions.`,
-        "muted"
-      )
-    );
-  } else if (identifiers.length > 1) {
-    console.log(
-      paint(
-        `  Targeting ${identifiers.length} wallet(s) for borrow positions.`,
-        "muted"
-      )
-    );
-  }
-  const borrowScope = identifiers
-    .map((entry) => entry.name || entry.pubkey)
-    .filter(Boolean);
-  if (borrowScope.length > 0 && borrowScope.length <= 5) {
-    console.log(paint(`  Wallet scope: ${borrowScope.join(", ")}`, "muted"));
-  }
-  try {
-    const result = await lendBorrowRequest({
-      path: "positions",
-      method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
-    });
-    logLendApiResult("borrow positions", result);
-  } catch (err) {
-    console.error(paint("Lend borrow positions request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowOpen(args) {
-  const walletName = args[0];
-  const collateralInput = args[1];
-  const borrowInput = args[2];
-  const collateralAmountInput = args[3];
-  const borrowAmountInput = args[4];
-  if (!walletName || !collateralInput || !borrowInput || !collateralAmountInput || !borrowAmountInput) {
-    throw new Error("lend borrow open usage: lend borrow open <walletFile> <collateralMint|symbol> <borrowMint|symbol> <collateralAmount> <borrowAmount> [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const collateralToken = await resolveTokenRecord(collateralInput);
-  const borrowToken = await resolveTokenRecord(borrowInput);
-  if (!collateralToken) {
-    throw new Error(`Collateral token ${collateralInput} not found`);
-  }
-  if (!borrowToken) {
-    throw new Error(`Borrow token ${borrowInput} not found`);
-  }
-  const tail = args.slice(5);
-  const { options } = parseCliOptions(tail);
-  const extra = parseJsonOption(options.extra, "--extra");
-  const rawCollateral = options.rawCollateral === "true" || options.rawCollateral === true;
-  const rawBorrow = options.rawBorrow === "true" || options.rawBorrow === true;
-  const collateralAmount = rawCollateral
-    ? collateralAmountInput
-    : decimalToBaseUnits(collateralAmountInput, collateralToken.decimals).toString();
-  const borrowAmount = rawBorrow
-    ? borrowAmountInput
-    : decimalToBaseUnits(borrowAmountInput, borrowToken.decimals).toString();
-  const body = {
-    wallet: wallet.kp.publicKey.toBase58(),
-    collateralMint: collateralToken.mint,
-    borrowMint: borrowToken.mint,
-    collateralInput,
-    borrowInput,
-    collateralDecimals: collateralToken.decimals,
-    borrowDecimals: borrowToken.decimals,
-    collateralAmount,
-    borrowAmount,
-    ...extra,
-  };
-  const ignore = new Set(["extra", "rawCollateral", "rawBorrow"]);
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    body[key] = value;
-  }
-  console.log(
-    paint("  request payload (borrow open)", "muted"),
-    JSON.stringify(body, null, 2)
-  );
-  try {
-    const result = await lendBorrowRequest({
-      path: "open",
-      method: "POST",
-      body,
-    });
-    logLendApiResult("borrow open", result);
-  } catch (err) {
-    console.error(paint("Lend borrow open request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowRepay(args) {
-  const walletName = args[0];
-  const borrowMintInput = args[1];
-  const repayAmountInput = args[2];
-  if (!walletName || !borrowMintInput || !repayAmountInput) {
-    throw new Error("lend borrow repay usage: lend borrow repay <walletFile> <borrowMint|symbol> <amount> [--position id] [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const borrowToken = await resolveTokenRecord(borrowMintInput);
-  if (!borrowToken) {
-    throw new Error(`Borrow token ${borrowMintInput} not found`);
-  }
-  const tail = args.slice(3);
-  const { options } = parseCliOptions(tail);
-  const extra = parseJsonOption(options.extra, "--extra");
-  const raw = options.raw === "true" || options.raw === true;
-  const repayAmount = raw
-    ? repayAmountInput
-    : decimalToBaseUnits(repayAmountInput, borrowToken.decimals).toString();
-  const body = {
-    wallet: wallet.kp.publicKey.toBase58(),
-    borrowMint: borrowToken.mint,
-    borrowDecimals: borrowToken.decimals,
-    borrowAmount: repayAmount,
-    amountInput: repayAmountInput,
-    ...extra,
-  };
-  if (options.position) body.positionId = options.position;
-  const ignore = new Set(["extra", "raw", "position"]);
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    body[key] = value;
-  }
-  console.log(
-    paint("  request payload (borrow repay)", "muted"),
-    JSON.stringify(body, null, 2)
-  );
-  try {
-    const result = await lendBorrowRequest({
-      path: "repay",
-      method: "POST",
-      body,
-    });
-    logLendApiResult("borrow repay", result);
-  } catch (err) {
-    console.error(paint("Lend borrow repay request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowClose(args) {
-  const walletName = args[0];
-  if (!walletName) {
-    throw new Error("lend borrow close usage: lend borrow close <walletFile> [positionId|*] [--all] [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const { options, rest } = parseCliOptions(args.slice(1));
-  const extra = parseJsonOption(options.extra, "--extra");
-  const explicitIds = rest
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0 && item !== "*");
-  const wildcardRequested =
-    rest.length === 0 ||
-    rest.some((item) => {
-      const trimmed = item.trim().toLowerCase();
-      return trimmed.length === 0 || trimmed === "*" || trimmed === "all";
-    }) ||
-    options.all === true ||
-    (typeof options.all === "string" &&
-      options.all.trim().toLowerCase() === "true");
-  if (!wildcardRequested && options.position && typeof options.position === "string") {
-    explicitIds.push(options.position.trim());
-  }
-  let positionIds = Array.from(new Set(explicitIds.filter(Boolean)));
-  const walletPubkey = wallet.kp.publicKey.toBase58();
-  if (wildcardRequested) {
-    console.log(
-      paint(
-        `  Fetching borrow positions for ${wallet.name} to close all.`,
-        "muted"
-      )
-    );
-    try {
-      const result = await lendBorrowRequest({
-        path: "positions",
-        method: "GET",
-        query: { wallets: walletPubkey },
-      });
-      if (!result.ok) {
-        console.error(
-          paint(
-            `Unable to enumerate borrow positions for ${wallet.name}:`,
-            "error"
-          ),
-          result.status,
-          result.data?.error || result.raw || ""
-        );
-        return;
-      }
-      const entries = extractIterableFromLendData(result.data) || [];
-      const ids = collectBorrowPositionIds(entries, walletPubkey);
-      positionIds = ids;
-      if (!ids.length) {
-        console.log(
-          paint(
-            `  No open borrow positions found for ${wallet.name}.`,
-            "muted"
-          )
-        );
-        return;
-      }
-      console.log(
-        paint(
-          `  Closing ${ids.length} borrow position(s) for ${wallet.name}.`,
-          "info"
-        )
-      );
-    } catch (err) {
-      console.error(
-        paint(
-          `Unable to enumerate borrow positions for ${wallet.name}:`,
-          "error"
-        ),
-        err.message || err
-      );
-      return;
-    }
-  }
-  if (!positionIds.length) {
-    throw new Error("lend borrow close usage: supply a position id or request --all/\"*\".");
-  }
-  const ignore = new Set(["extra", "all", "position"]);
-  const additionalFields = {};
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    additionalFields[key] = value;
-  }
-  for (const positionId of positionIds) {
-    const body = {
-      wallet: walletPubkey,
-      positionId,
-      ...extra,
-      ...additionalFields,
-    };
-    console.log(
-      paint(
-        `  request payload (borrow close) → ${wallet.name}`,
-        "muted"
-      ),
-      JSON.stringify(body, null, 2)
-    );
-    try {
-      const result = await lendBorrowRequest({
-        path: "close",
-        method: "POST",
-        body,
-      });
-      logLendApiResult("borrow close", result);
-    } catch (err) {
-      console.error(
-        paint(
-          `Lend borrow close request failed for ${wallet.name} (position ${positionId}):`,
-          "error"
-        ),
-        err.message || err
-      );
-    }
-  }
-}
 function describeMintLabel(mint, options = {}) {
   const showAddress =
     options.showAddress !== undefined ? options.showAddress : true;
@@ -7820,7 +7721,8 @@ function buildDynamicLongCircleSegments() {
     (entry) =>
       entry &&
       typeof entry.mint === "string" &&
-      tokenHasTag(entry, "long-circle") &&
+      tokenHasTag(entry, "swappable") &&
+      !tokenHasTag(entry, "secondary-terminal") &&
       !SOL_LIKE_MINTS.has(entry.mint)
   );
 
@@ -8036,7 +7938,8 @@ function buildSecondaryPathMints(randomMode, options = {}) {
         (entry) =>
           entry &&
           typeof entry.mint === "string" &&
-          tokenHasTag(entry, "secondary-pool") &&
+          tokenHasTag(entry, "swappable") &&
+          !tokenHasTag(entry, "secondary-terminal") &&
           !SOL_LIKE_MINTS.has(entry.mint)
       ).map((entry) => entry.mint)
     )
@@ -8060,9 +7963,10 @@ function buildSecondaryPathMints(randomMode, options = {}) {
 
     for (let i = 0; i < intermediateCount; i += 1) {
       const entry = sampleMintFromCatalog({
-        requireTags: ["secondary-pool"],
+        requireTags: ["swappable"],
         exclude: resolutionState.used,
         skipSolLike: true,
+        filter: (candidate) => !tokenHasTag(candidate, "secondary-terminal"),
       });
       if (!entry) break;
       path.push(entry.mint);
@@ -8084,10 +7988,11 @@ function buildSecondaryPathMints(randomMode, options = {}) {
         terminalMint = SOL_MINT;
       } else {
         const fallbackTerminal = sampleMintFromCatalog({
-          requireTags: ["secondary-pool"],
+          requireTags: ["swappable"],
           exclude: resolutionState.used,
           skipSolLike: true,
           avoidRecent: false,
+          filter: (candidate) => !tokenHasTag(candidate, "secondary-terminal"),
         });
         terminalMint = fallbackTerminal?.mint || DEFAULT_USDC_MINT;
       }
@@ -8118,7 +8023,8 @@ function buildSecondaryPathMints(randomMode, options = {}) {
   const seenFallback = new Set([SOL_MINT]);
   for (const entry of TOKEN_CATALOG) {
     if (!entry || typeof entry.mint !== "string") continue;
-    if (!tokenHasTag(entry, "secondary-pool")) continue;
+    if (!tokenHasTag(entry, "swappable")) continue;
+    if (tokenHasTag(entry, "secondary-terminal")) continue;
     if (SOL_LIKE_MINTS.has(entry.mint)) continue;
     if (seenFallback.has(entry.mint)) continue;
     seenFallback.add(entry.mint);
@@ -8134,7 +8040,7 @@ async function executeSwapPlanForWallet(wallet, steps, label, options = {}) {
   if (isWalletDisabledByGuard(wallet.name)) {
     console.log(
       paint(
-        `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+        `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
         "muted"
       )
     );
@@ -8499,7 +8405,7 @@ async function runBuckshot() {
       if (isWalletDisabledByGuard(wallet.name)) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -8658,7 +8564,7 @@ async function runBuckshot() {
       if (isWalletDisabledByGuard(wallet.name)) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -10283,11 +10189,13 @@ async function closeEmptyTokenAccounts() {
     return;
   }
 
+  const MAX_CLOSE_ACCOUNTS_PER_TX = 12;
+
   for (const w of wallets) {
     const lookupConnection = createRpcConnection("confirmed");
     const parsed = await getAllParsedTokenAccounts(lookupConnection, w.kp.publicKey);
 
-    let closedCount = 0;
+    const closable = [];
     for (const { pubkey, account } of parsed) {
       const info = account.data.parsed.info;
       const amount = BigInt(info.tokenAmount.amount);
@@ -10337,43 +10245,111 @@ async function closeEmptyTokenAccounts() {
         }
       }
 
-      try {
-        const closeConnection = createRpcConnection("confirmed");
-        const sig = await closeAccount(
-          closeConnection,
-          w.kp,
-          pubkey,
-          w.kp.publicKey,
-          w.kp,
-          [],
-          undefined,
-          programId
+      const symbol = symbolForMint(info.mint);
+      closable.push({
+        accountPubkey: pubkey,
+        programId,
+        mint: info.mint,
+        symbol,
+      });
+    }
+
+    if (closable.length === 0) {
+      console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
+      continue;
+    }
+
+    const closeConnection = createRpcConnection("confirmed");
+    let closedCount = 0;
+
+    const chunkLabels = (chunk) =>
+      chunk
+        .map((entry) => {
+          const base = entry.symbol || symbolForMint(entry.mint) || entry.mint.slice(0, 4);
+          const suffix = entry.accountPubkey.toBase58().slice(-6);
+          return `${base}:${suffix}`;
+        })
+        .join(", ");
+
+    for (let i = 0; i < closable.length; i += MAX_CLOSE_ACCOUNTS_PER_TX) {
+      const chunk = closable.slice(i, i + MAX_CLOSE_ACCOUNTS_PER_TX);
+      const tx = new Transaction();
+      for (const entry of chunk) {
+        tx.add(
+          createCloseAccountInstruction(
+            entry.accountPubkey,
+            w.kp.publicKey,
+            w.kp.publicKey,
+            [],
+            entry.programId
+          )
         );
+      }
+      tx.feePayer = w.kp.publicKey;
+
+      try {
+        const { blockhash, lastValidBlockHeight } = await closeConnection.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+        tx.sign(w.kp);
+        const raw = tx.serialize();
+        const signature = await closeConnection.sendRawTransaction(raw);
+        await closeConnection.confirmTransaction(
+          { signature, blockhash, lastValidBlockHeight },
+          "confirmed"
+        );
+        closedCount += chunk.length;
         console.log(
           paint(
-            `Closed token account ${pubkey.toBase58()} — tx ${sig}`,
+            `Closed ${chunk.length} account(s) for ${w.name}: ${chunkLabels(chunk)} — tx ${signature}`,
             "success"
           )
         );
-        closedCount += 1;
-      } catch (err) {
-        logDetailedError(`  close ${pubkey.toBase58()} failed`, err);
+      } catch (bundleErr) {
+        console.warn(
+          paint(
+            `  bundle close failed (${bundleErr.message || bundleErr}); retrying individually.`,
+            "warn"
+          )
+        );
+        for (const entry of chunk) {
+          try {
+            const signature = await closeAccount(
+              closeConnection,
+              w.kp,
+              entry.accountPubkey,
+              w.kp.publicKey,
+              w.kp,
+              [],
+              undefined,
+              entry.programId
+            );
+            closedCount += 1;
+            console.log(
+              paint(
+                `  Closed token account ${entry.accountPubkey.toBase58()} (${entry.symbol || symbolForMint(entry.mint)}) — tx ${signature}`,
+                "success"
+              )
+            );
+          } catch (err) {
+            logDetailedError(`  close ${entry.accountPubkey.toBase58()} failed`, err);
+          }
+        }
       }
     }
 
     if (closedCount === 0) {
       console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
+      continue;
     }
-    if (closedCount > 0) {
-      const balanceConnection = createRpcConnection("confirmed");
-      const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
-      console.log(
-        paint(
-          `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
-          "muted"
-        )
-      );
-    }
+
+    const balanceConnection = createRpcConnection("confirmed");
+    const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
+    console.log(
+      paint(
+        `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
+        "muted"
+      )
+    );
   }
 }
 
@@ -11352,7 +11328,7 @@ async function testJupiterUltraOrder({
   if (isWalletDisabledByGuard(wallet.name)) {
     console.warn(
       paint(
-        `  Warning: wallet guard disabled ${wallet.name}. Ensure it has at least 0.01 SOL before submitting.`,
+        `  Warning: wallet guard disabled ${wallet.name}. Ensure it has at least ${WALLET_DISABLE_THRESHOLD_LABEL} SOL before submitting.`,
         "warn"
       )
     );
@@ -11759,7 +11735,7 @@ async function listWalletAddresses() {
 async function handleWalletWrap(args) {
   const walletName = args[0];
   const usage =
-    "wallet wrap usage: wallet wrap <walletName> [amount|all] [--raw]";
+    "wallet wrap usage: wallet wrap <wallet #|filename> [amount|all] [--raw]";
   if (!walletName) {
     console.log(usage);
     return;
@@ -11853,7 +11829,7 @@ async function handleWalletWrap(args) {
 async function handleWalletUnwrap(args) {
   const walletName = args[0];
   const usage =
-    "wallet unwrap usage: wallet unwrap <walletName> [amount|all] [--raw]";
+    "wallet unwrap usage: wallet unwrap <wallet #|filename> [amount|all] [--raw]";
   if (!walletName) {
     console.log(usage);
     return;
@@ -12143,7 +12119,6 @@ async function handleUnwrapWsolMenu() {
 /* --- Wallet Registry Command Implementations --- */
 
 async function walletListCommand() {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   if (wallets.length === 0) {
@@ -12203,7 +12178,6 @@ async function walletListCommand() {
 }
 
 async function walletInfoCommand(args) {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   if (args.length === 0) {
@@ -12261,7 +12235,6 @@ async function walletInfoCommand(args) {
 }
 
 async function walletSyncCommand() {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   console.log(paint("Syncing wallet registry from filesystem...", "info"));
@@ -12272,7 +12245,6 @@ async function walletSyncCommand() {
 }
 
 async function walletGroupsCommand() {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   if (wallets.length === 0) {
@@ -12281,6 +12253,7 @@ async function walletGroupsCommand() {
   }
 
   const hierarchy = walletRegistry.getHierarchySummary();
+  const balanceConnection = createRpcConnection("confirmed");
 
   console.log(paint("\n=== Wallet Groups ===", "label"));
   console.log(paint(`Total: ${hierarchy.totalWallets} wallets in ${hierarchy.totalGroups} groups\n`, "info"));
@@ -12293,7 +12266,7 @@ async function walletGroupsCommand() {
 
     const masterWallet = wallets.find(w => w.number === group.master.number);
     const masterBalance = masterWallet
-      ? formatBaseUnits(BigInt(await getSolBalance(createRpcConnection("confirmed"), masterWallet.kp.publicKey)), 9)
+      ? formatBaseUnits(BigInt(await getSolBalance(balanceConnection, masterWallet.kp.publicKey)), 9)
       : "?";
 
     console.log(
@@ -12312,7 +12285,7 @@ async function walletGroupsCommand() {
       for (const slave of group.slaves) {
         const slaveWallet = wallets.find(w => w.number === slave.number);
         const slaveBalance = slaveWallet
-          ? formatBaseUnits(BigInt(await getSolBalance(createRpcConnection("confirmed"), slaveWallet.kp.publicKey)), 9)
+          ? formatBaseUnits(BigInt(await getSolBalance(balanceConnection, slaveWallet.kp.publicKey)), 9)
           : "?";
 
         console.log(
@@ -12617,8 +12590,12 @@ async function aggregateSol(targetWalletName) {
     console.error(paint("No wallets found in keypairs folder.", "error"));
     return;
   }
-  const targetIndex = wallets.findIndex((w) => w.name === targetWalletName);
-  if (targetIndex === -1) {
+
+  let targetIndex = -1;
+  try {
+    const targetWallet = findWalletByName(targetWalletName);
+    targetIndex = wallets.findIndex((w) => w.kp.publicKey.equals(targetWallet.kp.publicKey));
+  } catch (err) {
     console.error(paint("Target wallet not found:", "error"), targetWalletName);
     return;
   }
@@ -12698,7 +12675,6 @@ async function aggregateSol(targetWalletName) {
 
 // aggregate SOL hierarchically: slaves send to their masters
 async function aggregateHierarchical() {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   if (wallets.length === 0) {
@@ -12806,7 +12782,6 @@ async function aggregateHierarchical() {
 
 // aggregate masters to master-master (#1)
 async function aggregateMasters() {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   if (wallets.length === 0) {
@@ -12911,7 +12886,6 @@ async function aggregateMasters() {
 
 // direct transfer between wallets by number
 async function transferBetweenWallets(fromIdentifier, toIdentifier, amount, token = 'SOL') {
-  const walletRegistry = require('./shared/wallet_registry.js');
   const wallets = listWallets();
 
   // Resolve from wallet
@@ -13162,7 +13136,7 @@ async function showBalances(tokenArgs = []) {
     if (isWalletDisabledByGuard(w.name)) {
       console.log(
         paint(
-          "  status: disabled for swaps (<0.01 SOL). Fund and run balances or use force reset to re-enable.",
+          `  status: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL). Fund and run balances or use force reset to re-enable.`,
           "warn"
         )
       );
@@ -13331,7 +13305,7 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       for (const disabledWallet of disabledWithinScope) {
         console.log(
           paint(
-            `Skipping ${disabledWallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${disabledWallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -13350,7 +13324,12 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       return;
     }
   }
-  const walletDelayMs = options.walletDelayMs ?? DELAY_BETWEEN_CALLS_MS;
+  const explicitWalletDelayMs =
+    options.walletDelayMs !== undefined
+      ? Math.max(0, Number(options.walletDelayMs) || 0)
+      : null;
+  const resolveWalletDelayMs = (mode) =>
+    explicitWalletDelayMs ?? (mode === "ultra" ? ULTRA_WALLET_DELAY_MS : DELAY_BETWEEN_CALLS_MS);
   const suppressMetadataLog = options.suppressMetadata === true;
   const walletSkipRegistryMap = options.walletSkipRegistryMap instanceof Map ? options.walletSkipRegistryMap : null;
   const sharedSkipRegistry = options.walletSkipRegistry instanceof Set ? options.walletSkipRegistry : null;
@@ -13435,18 +13414,25 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
     let connection = createRpcConnection("confirmed", forcedRpcEndpoint);
     const getCurrentRpcEndpoint = () =>
       connection.__rpcEndpoint || connection._rpcEndpoint || "unknown";
-    const markEndpoint = (reason) => {
+    const markEndpoint = (reason, options = {}) => {
       const delegate = connection.__markUnhealthy;
       if (typeof delegate === "function") {
-        delegate(reason);
+        delegate(reason, options);
       }
     };
     const rotateConnection = (reason, label) => {
       const previous = getCurrentRpcEndpoint();
-      markEndpoint(reason);
+      const isRateLimit = /rate[-\s]?limit/i.test(reason);
+      markEndpoint(reason, {
+        cooldownMs: isRateLimit ? RPC_RATE_LIMIT_COOLDOWN_MS : RPC_GENERAL_COOLDOWN_MS,
+      });
       connection = createRpcConnection("confirmed", forcedRpcEndpoint);
       const next = getCurrentRpcEndpoint();
-      const message = `RPC ${previous} rate-limited during ${label}; switched to ${next}`;
+      const reasonLabel = reason || "rotation";
+      const sameEndpoint = next === previous;
+      const message = sameEndpoint
+        ? `RPC ${previous} (${reasonLabel}) during ${label}; no healthy alternatives, retrying same endpoint`
+        : `RPC ${previous} (${reasonLabel}) during ${label}; switched to ${next}`;
       if (quietSkips) {
         console.warn(paint(message, "warn"));
       } else {
@@ -13477,6 +13463,8 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       ensureHeader();
       console.warn(paint(message, "warn"));
     };
+    let ultraFallbackCount = 0;
+    let liteFallbackActive = false;
     const logInfo = (message) => {
       ensureHeader();
       console.log(paint(message, "info"));
@@ -13742,18 +13730,33 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
                   );
 
                 if (shouldFallbackToLite) {
+                  const fallbackReason = (() => {
+                    if (status === 404) return "order endpoint returned 404";
+                    if (status === 401 || status === 403) return "order endpoint returned 401/403";
+                    if (/missing swap transaction payload/i.test(errorMessage)) return "incomplete response";
+                    if (/failed to get quotes/i.test(errorMessage)) return "failed to get quotes";
+                    if (/no routes found/i.test(errorMessage)) return "no routes found";
+                    return errorMessage.substring(0, 60) || "unknown Ultra error";
+                  })();
+
+                  if (ultraFallbackCount < MAX_ULTRA_FALLBACK_RETRIES) {
+                    ultraFallbackCount += 1;
+                    const backoffMs = Math.min(
+                      2000,
+                      ULTRA_RETRY_BACKOFF_BASE_MS * Math.pow(2, ultraFallbackCount - 1)
+                    );
+                    logWarn(
+                      `  Ultra issue (${fallbackReason}); retrying Ultra ${ultraFallbackCount}/${MAX_ULTRA_FALLBACK_RETRIES} before falling back.`
+                    );
+                    await delay(backoffMs);
+                    continue;
+                  }
+
                   if (!ultraUnavailableLogged) {
-                    if (status === 404) {
-                      logWarn("  Ultra order endpoint returned 404; falling back to legacy Lite API.");
-                    } else if (status === 401 || status === 403) {
-                      logWarn("  Ultra order endpoint returned 401/403; falling back to legacy Lite API.");
-                    } else if (/missing swap transaction payload/i.test(errorMessage)) {
-                      logWarn("  Ultra API returned incomplete response; falling back to legacy Lite API.");
-                    } else {
-                      logWarn(`  Ultra API unavailable (${errorMessage.substring(0, 60)}); falling back to legacy Lite API.`);
-                    }
+                    logWarn(`  Ultra issue (${fallbackReason}); falling back to legacy Lite API.`);
                     ultraUnavailableLogged = true;
                   }
+                  liteFallbackActive = true;
                   engine = "lite";
                   swapEngineMode = "lite";
                   orderInfo = null;
@@ -13766,6 +13769,9 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
               continue;
             }
 
+            if (engine === "ultra") {
+              ultraFallbackCount = 0;
+            }
             if (orderInfo.outAmount) {
               logMuted("  expected outAmount:", orderInfo.outAmount);
             }
@@ -13787,7 +13793,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             const signedBase64 = Buffer.from(rawSigned).toString("base64");
             const derivedSignature = bs58.encode(vtx.signatures[0]);
 
-            await delay(DELAY_BETWEEN_CALLS_MS);
+            const executeDelayMs = explicitWalletDelayMs ?? ULTRA_EXECUTE_DELAY_MS;
+            if (executeDelayMs > 0) {
+              await delay(executeDelayMs);
+            }
             const executeResult = await executeUltraSwap({
               signedTransaction: signedBase64,
               clientOrderId: orderInfo.clientOrderId,
@@ -13832,7 +13841,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
               logMuted("  expected outAmount:", quote.outAmount);
             }
 
-            await delay(DELAY_BETWEEN_CALLS_MS);
+            const liteSubmitDelayMs = explicitWalletDelayMs ?? DELAY_BETWEEN_CALLS_MS;
+            if (liteSubmitDelayMs > 0) {
+              await delay(liteSubmitDelayMs);
+            }
             const swapResp = await fetchLegacySwap(
               quote,
               w.kp.publicKey.toBase58(),
@@ -13930,6 +13942,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             tokenBalanceBefore = tokenBalanceAfter;
           }
           swapComplete = true;
+          if (liteFallbackActive && USE_ULTRA_ENGINE) {
+            swapEngineMode = "ultra";
+            liteFallbackActive = false;
+          }
         } catch (innerErr) {
           const errorInfo = classifySwapError(innerErr);
 
@@ -13937,14 +13953,27 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             const status = innerErr?.status ?? null;
             const message = innerErr?.message || "";
             if (status === 404 || status === 401 || status === 403) {
+              const fallbackReason =
+                status === 404
+                  ? "execute endpoint returned 404"
+                  : "execute endpoint returned 401/403";
+              if (ultraFallbackCount < MAX_ULTRA_FALLBACK_RETRIES) {
+                ultraFallbackCount += 1;
+                const backoffMs = Math.min(
+                  2000,
+                  ULTRA_RETRY_BACKOFF_BASE_MS * Math.pow(2, ultraFallbackCount - 1)
+                );
+                logWarn(
+                  `  Ultra issue (${fallbackReason}); retrying Ultra ${ultraFallbackCount}/${MAX_ULTRA_FALLBACK_RETRIES} before falling back.`
+                );
+                await delay(backoffMs);
+                continue;
+              }
               if (!ultraUnavailableLogged) {
-                if (status === 404) {
-                  logWarn("  Ultra execute endpoint returned 404; falling back to legacy Lite API.");
-                } else {
-                  logWarn("  Ultra execute returned 401/403; falling back to legacy Lite API (check JUPITER_ULTRA_API_KEY / JUPITER_ULTRA_API_BASE).");
-                }
+                logWarn(`  Ultra issue (${fallbackReason}); falling back to legacy Lite API.`);
                 ultraUnavailableLogged = true;
               }
+              liteFallbackActive = true;
               engine = "lite";
               swapEngineMode = "lite";
               continue;
@@ -14115,7 +14144,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       // Mark token as problematic if it's not SOL
       if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
     }
-    await delay(walletDelayMs);
+    const postWalletDelay = resolveWalletDelayMs(engine);
+    if (postWalletDelay > 0) {
+      await delay(postWalletDelay);
+    }
   }
 }
 
@@ -15443,7 +15475,7 @@ async function main() {
       await sendSolBetween(fromName, toName, lam);
     } else if (cmd === "aggregate") {
       const targetName = args[1];
-      if (!targetName) throw new Error("aggregate usage: aggregate <targetWalletFile>");
+      if (!targetName) throw new Error("aggregate usage: aggregate <wallet #|filename>");
       await aggregateSol(targetName);
     } else if (cmd === "aggregate-hierarchical") {
       await aggregateHierarchical();

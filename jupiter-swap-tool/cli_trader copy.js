@@ -8,6 +8,7 @@ import bs58 from "bs58";
 import readline from "readline";
 import * as bip39 from "bip39";
 import { derivePath } from "ed25519-hd-key";
+import * as walletRegistry from "./shared/wallet_registry.js";
 import {
   Connection,
   Keypair,
@@ -28,6 +29,8 @@ import {
   MintLayout,
   createSyncNativeInstruction,
   closeAccount,
+  createCloseAccountInstruction,
+  createBurnInstruction,
   NATIVE_MINT,
 } from "@solana/spl-token";
 import {
@@ -65,11 +68,11 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.2.0
+// version 1.2.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.2.0";
-const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend <earn|borrow> ... | lend overview | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap> <wallet> [amount|all] [--raw] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | crew1-cycle | arpeggio | icarus | zenith | aurora | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+const TOOL_VERSION = "1.2.1";
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
@@ -135,12 +138,12 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "redistribute",
           keys: ["d", "3", "redistribute"],
-          description: "Redistribute SOL from the crew wallet across all others",
+          description: "Redistribute SOL from the crew wallet across all others (supports wallet numbers)",
         },
         {
           action: "aggregate",
           keys: ["a", "4", "aggregate"],
-          description: "Aggregate SOL back into the crew wallet",
+          description: "Aggregate SOL back into the crew wallet (e.g. 'aggregate 1')",
         },
         {
           action: "reclaim-sol",
@@ -200,12 +203,17 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "list-wallets",
           keys: ["5"],
-          description: "List wallet addresses",
+          description: "List wallet addresses (includes registry numbers)",
         },
         {
           action: "force-reset-guard",
           keys: ["6"],
           description: "Force reset wallet guard",
+        },
+        {
+          action: "unwrap-wsol",
+          keys: ["7"],
+          description: "Unwrap wSOL → SOL",
         },
         { action: "back", keys: ["b", "back"], description: "Back to launcher" },
       ],
@@ -281,34 +289,58 @@ const HOTKEY_MAP = buildHotkeyMap([
           description: "Earn withdraw",
         },
         {
-          action: "borrow-open",
-          keys: ["4"],
-          description: "Borrow open position",
-        },
-        {
-          action: "borrow-repay",
-          keys: ["5"],
-          description: "Borrow repay",
-        },
-        {
-          action: "borrow-close",
-          keys: ["6"],
-          description: "Borrow close",
-        },
-        {
           action: "earn-positions",
-          keys: ["7"],
+          keys: ["4"],
           description: "Earn positions",
         },
         {
-          action: "borrow-positions",
-          keys: ["8"],
-          description: "Borrow positions",
+          action: "earn-earnings",
+          keys: ["5"],
+          description: "Earn earnings",
         },
         {
           action: "overview",
-          keys: ["9"],
-          description: "Overview (earn + borrow all wallets)",
+          keys: ["6"],
+          description: "Overview (earn all wallets)",
+        },
+        { action: "back", keys: ["b", "back"], description: "Back to advanced tools" },
+      ],
+    },
+  ],
+  [
+    "flows-menu",
+    {
+      label: "Trading flows menu",
+      entries: [
+        {
+          action: "arpeggio-flow",
+          keys: ["1"],
+          description: "Arpeggio (15min fast rotation)",
+        },
+        {
+          action: "horizon-flow",
+          keys: ["2"],
+          description: "Horizon (60min mid-duration)",
+        },
+        {
+          action: "echo-flow",
+          keys: ["3"],
+          description: "Echo (6hr extended loop)",
+        },
+        {
+          action: "icarus-flow",
+          keys: ["4"],
+          description: "Icarus (high-tempo random meme)",
+        },
+        {
+          action: "zenith-flow",
+          keys: ["5"],
+          description: "Zenith (mid-tempo random pools)",
+        },
+        {
+          action: "aurora-flow",
+          keys: ["6"],
+          description: "Aurora (slow steady random)",
         },
         { action: "back", keys: ["b", "back"], description: "Back to advanced tools" },
       ],
@@ -337,7 +369,7 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "crew-cycle",
           keys: ["4"],
-          description: "crew_1 interval cycle",
+          description: "Interval cycle (all wallets)",
         },
         {
           action: "btc-eth-sweep",
@@ -352,7 +384,12 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "lend-menu",
           keys: ["7"],
-          description: "Jupiter Lend (earn / borrow beta)",
+          description: "Jupiter Lend (earn — borrow coming soon)",
+        },
+        {
+          action: "flows-menu",
+          keys: ["8", "flows"],
+          description: "Trading flows (Arpeggio, Horizon, Echo, Icarus, Zenith, Aurora)",
         },
         { action: "back", keys: ["b", "back"], description: "Back to launcher" },
       ],
@@ -419,6 +456,7 @@ const DEFAULT_HOTKEY_CONTEXTS = Object.freeze([
   "test-menu",
   "rpc-tests-menu",
   "lend-menu",
+  "flows-menu",
   "target-loop",
   "buckshot-rotation",
 ]);
@@ -550,6 +588,14 @@ function renderHotkeyTable(contexts, { indent = "", includeTitle = true } = {}) 
       lines.push("");
     }
     lines.push(...block);
+    if (context === "wallet-menu") {
+      const ctx = findHotkeyContext(context);
+      const noteIndent = `${indent}${includeTitle && ctx?.label ? "  " : ""}`;
+      lines.push(`${noteIndent}Tip: wallet commands accept registry numbers, for example:`);
+      lines.push(`${noteIndent}  • aggregate 1 (or aggregate #1)`);
+      lines.push(`${noteIndent}  • fund --from 6 --to 2`);
+      lines.push(`${noteIndent}  • lend earn deposit #2 jlUSDC`);
+    }
     first = false;
   }
   return lines;
@@ -697,7 +743,6 @@ const IS_MAIN_EXECUTION = (() => {
 const KEYPAIR_DIR = "./keypairs";
 const loadKeypairFromFile = sharedLoadKeypairFromFile;
 const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
-const SCRIPT_DIR = path.dirname(SCRIPT_FILE_PATH);
 const PERPS_COMPUTE_BUDGET = Object.freeze({
   unitLimit: getEnvInteger("PERPS_COMPUTE_UNIT_LIMIT", 1_400_000, { min: 1 }),
   priceMicrolamports: getEnvInteger(
@@ -737,9 +782,10 @@ const JUP_HTTP_TIMEOUT_MS = getEnvInteger("JUP_HTTP_TIMEOUT_MS", 15_000, {
 });
 const JUPITER_ULTRA_CONFIG = (() => {
   const apiKey = process.env.JUPITER_ULTRA_API_KEY || DEFAULT_ULTRA_API_KEY;
+  // Official Ultra API: send key as header, NOT in URL path
   const defaultBase = apiKey
-    ? `https://api.jup.ag/ultra/${apiKey}`
-    : "https://api.jup.ag/ultra/v1";
+    ? "https://api.jup.ag/ultra/v1"  // Paid tier with x-api-key header
+    : "https://lite-api.jup.ag/ultra/v1";  // Free tier
   const base =
     normalizeApiBase(process.env.JUPITER_ULTRA_API_BASE, defaultBase) ||
     defaultBase;
@@ -752,21 +798,44 @@ const JUPITER_ULTRA_CONFIG = (() => {
 const JUPITER_ULTRA_API_KEY = JUPITER_ULTRA_CONFIG.apiKey;
 const JUPITER_ULTRA_API_BASE = JUPITER_ULTRA_CONFIG.base;
 const SHOULD_SEND_ULTRA_HEADER = JUPITER_ULTRA_CONFIG.includeUltraKeyHeader;
+
+function normalizeSwapEngineMode(mode) {
+  return mode === "ultra" ? "ultra" : "lite";
+}
+
+function formatSwapEngineLabel(mode) {
+  const normalized = normalizeSwapEngineMode(mode);
+  const tag = normalized === "ultra" ? "[ULTRA]" : "[LITE]";
+  if (normalized === "ultra") {
+    const detail = JUPITER_ULTRA_API_KEY
+      ? "Ultra API (authenticated)"
+      : "Ultra API (no key)";
+    return `${detail} ${tag}`.trim();
+  }
+  return `Legacy Lite API ${tag}`.trim();
+}
+
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 const RAW_SWAP_AMOUNT_MODE = (process.env.SWAP_AMOUNT_MODE || "all").toLowerCase();
 const DEFAULT_SWAP_AMOUNT_MODE = RAW_SWAP_AMOUNT_MODE === "random" ? "random" : "all";
 const SLIPPAGE_BPS = process.env.SLIPPAGE_BPS ? Math.max(1, parseInt(process.env.SLIPPAGE_BPS, 10) || 1) : 20;
-const DELAY_BETWEEN_CALLS_MS = 500;
+const DELAY_BETWEEN_CALLS_MS = 60;
+const ULTRA_WALLET_DELAY_MS = process.env.ULTRA_WALLET_DELAY_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_WALLET_DELAY_MS, 10) || 0)
+  : 25;
+const ULTRA_EXECUTE_DELAY_MS = process.env.ULTRA_EXECUTE_DELAY_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_EXECUTE_DELAY_MS, 10) || 0)
+  : 18;
 const BALANCE_RPC_DELAY_MS = process.env.BALANCE_RPC_DELAY_MS
   ? Math.max(0, parseInt(process.env.BALANCE_RPC_DELAY_MS, 10) || 0)
-  : 250;
+  : 150;
 const PRINT_SECRET_KEYS = process.env.PRINT_SECRET_KEYS === "1";
 const PASSIVE_STEP_DELAY_MS = process.env.PASSIVE_STEP_DELAY_MS
   ? Math.max(0, parseInt(process.env.PASSIVE_STEP_DELAY_MS, 10) || 0)
-  : 1500;
+  : 240;
 const PASSIVE_STEP_JITTER_MS = process.env.PASSIVE_STEP_DELAY_JITTER_MS
   ? Math.max(0, parseInt(process.env.PASSIVE_STEP_DELAY_JITTER_MS, 10) || 0)
-  : 800;
+  : 90;
 const GENERAL_SIMULATION_RETRY_LIMIT = process.env.GENERAL_SIMULATION_RETRY_LIMIT
   ? Math.max(0, parseInt(process.env.GENERAL_SIMULATION_RETRY_LIMIT, 10) || 0)
   : 3;
@@ -782,6 +851,14 @@ const MIN_LEND_SOL_DEPOSIT_LAMPORTS = process.env.MIN_LEND_SOL_DEPOSIT_LAMPORTS
 const LEND_SOL_WRAP_BUFFER_LAMPORTS = process.env.LEND_SOL_WRAP_BUFFER_LAMPORTS
   ? BigInt(process.env.LEND_SOL_WRAP_BUFFER_LAMPORTS)
   : BigInt(2_200_000); // ~0.0022 SOL to cover wrap + ATA rent/fees
+// Minimum token balance to attempt swap (in USD equivalent) - skip dust
+const MIN_SWAP_VALUE_USD = process.env.MIN_SWAP_VALUE_USD
+  ? parseFloat(process.env.MIN_SWAP_VALUE_USD)
+  : 0.01; // $0.01 minimum to avoid wasting gas on dust
+// Dust rescue threshold - only attempt to rescue dust worth more than this
+const DUST_RESCUE_THRESHOLD_USD = process.env.DUST_RESCUE_THRESHOLD_USD
+  ? parseFloat(process.env.DUST_RESCUE_THRESHOLD_USD)
+  : 0.05; // $0.05 minimum - below this, just burn and close
 const GAS_RESERVE_LAMPORTS = process.env.GAS_RESERVE_LAMPORTS
   ? BigInt(process.env.GAS_RESERVE_LAMPORTS)
   : BigInt(1_000_000); // default reserve ~0.001 SOL
@@ -794,6 +871,18 @@ const JUPITER_SOL_RETRY_DELTA_LAMPORTS = process.env.JUPITER_SOL_RETRY_DELTA_LAM
 const JUPITER_SOL_MAX_RETRIES = process.env.JUPITER_SOL_MAX_RETRIES
   ? Math.max(0, parseInt(process.env.JUPITER_SOL_MAX_RETRIES, 10) || 0)
   : 3;
+const MAX_ULTRA_FALLBACK_RETRIES = process.env.MAX_ULTRA_FALLBACK_RETRIES
+  ? Math.max(0, parseInt(process.env.MAX_ULTRA_FALLBACK_RETRIES, 10) || 0)
+  : 3;
+const ULTRA_RETRY_BACKOFF_BASE_MS = process.env.ULTRA_RETRY_BACKOFF_BASE_MS
+  ? Math.max(0, parseInt(process.env.ULTRA_RETRY_BACKOFF_BASE_MS, 10) || 0)
+  : 250;
+const RPC_RATE_LIMIT_COOLDOWN_MS = process.env.RPC_RATE_LIMIT_COOLDOWN_MS
+  ? Math.max(1000, parseInt(process.env.RPC_RATE_LIMIT_COOLDOWN_MS, 10) || 0)
+  : 20_000;
+const RPC_GENERAL_COOLDOWN_MS = process.env.RPC_GENERAL_COOLDOWN_MS
+  ? Math.max(1000, parseInt(process.env.RPC_GENERAL_COOLDOWN_MS, 10) || 0)
+  : 5 * 60 * 1000;
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -1293,6 +1382,114 @@ export const PREWRITTEN_FLOW_DEFINITIONS = Object.freeze({
       },
     ]),
   }),
+  "titan": Object.freeze({
+    key: "titan",
+    label: "Titan",
+    description:
+      "High-value flow with $5 minimum swaps and 30s-10min delays for powerful whale-sized positions.",
+    defaultLoops: 1,
+    defaultDurationMs: 30 * MINUTE_MS,
+    minSwapValueUSD: 5.0,
+    legs: freezeLegs([
+      {
+        key: "ignite",
+        label: "Ignition cadence",
+        segmentWaitsMs: segmentWindow(30, 120), // 30s to 2min
+      },
+      {
+        key: "soar",
+        label: "Ascent shuffle",
+        segmentWaitsMs: segmentWindow(60, 180), // 1min to 3min
+      },
+      {
+        key: "apex",
+        label: "Apex recycle",
+        segmentWaitsMs: segmentWindow(120, 300), // 2min to 5min
+      },
+      {
+        key: "glide",
+        label: "Glide cooldown",
+        segmentWaitsMs: segmentWindow(180, 600), // 3min to 10min
+      },
+    ]),
+  }),
+  "odyssey": Object.freeze({
+    key: "odyssey",
+    label: "Odyssey",
+    description:
+      "High-value flow with $5 minimum swaps and 30s-10min delays for epic trading journeys.",
+    defaultLoops: 1,
+    defaultDurationMs: 90 * MINUTE_MS,
+    minSwapValueUSD: 5.0,
+    legs: freezeLegs([
+      {
+        key: "glow",
+        label: "Glow block",
+        segmentWaitsMs: segmentWindow(60, 180), // 1min to 3min
+      },
+      {
+        key: "rise",
+        label: "Rise push",
+        segmentWaitsMs: segmentWindow(120, 300), // 2min to 5min
+      },
+      {
+        key: "halo",
+        label: "Halo sustain",
+        segmentWaitsMs: segmentWindow(180, 420), // 3min to 7min
+      },
+      {
+        key: "rebalance",
+        label: "Rebalance sweep",
+        segmentWaitsMs: segmentWindow(240, 480), // 4min to 8min
+      },
+      {
+        key: "anchor",
+        label: "Anchor wrap",
+        segmentWaitsMs: segmentWindow(300, 600), // 5min to 10min
+      },
+    ]),
+  }),
+  "sovereign": Object.freeze({
+    key: "sovereign",
+    label: "Sovereign",
+    description:
+      "High-value flow with $5 minimum swaps and 30s-10min delays for commanding long-term positions.",
+    defaultLoops: 1,
+    defaultDurationMs: 8 * HOUR_MS,
+    minSwapValueUSD: 5.0,
+    legs: freezeLegs([
+      {
+        key: "spark",
+        label: "Spark accumulation",
+        segmentWaitsMs: segmentWindow(120, 360), // 2min to 6min
+      },
+      {
+        key: "arc",
+        label: "Arc climb",
+        segmentWaitsMs: segmentWindow(180, 480), // 3min to 8min
+      },
+      {
+        key: "zenith",
+        label: "Zenith crest",
+        segmentWaitsMs: segmentWindow(240, 600), // 4min to 10min
+      },
+      {
+        key: "drift",
+        label: "Drift glide",
+        segmentWaitsMs: segmentWindow(180, 540), // 3min to 9min
+      },
+      {
+        key: "veil",
+        label: "Veil fade",
+        segmentWaitsMs: segmentWindow(120, 420), // 2min to 7min
+      },
+      {
+        key: "reset",
+        label: "Reset twilight",
+        segmentWaitsMs: segmentWindow(60, 300), // 1min to 5min
+      },
+    ]),
+  }),
 });
 const LEND_SOL_BASE_PERCENT = BigInt(
   process.env.LEND_SOL_BASE_PERCENT
@@ -1331,7 +1528,9 @@ const MIN_TRANSFER_LAMPORTS = process.env.MIN_TRANSFER_LAMPORTS
   ? BigInt(process.env.MIN_TRANSFER_LAMPORTS)
   : BigInt(50_000); // default ~0.00005 SOL to avoid dust txs
 const ATA_CREATION_FEE_LAMPORTS = BigInt(5_000); // buffer for tx fee when creating ATA
-const WALLET_DISABLE_THRESHOLD_LAMPORTS = BigInt(10_000_000); // 0.01 SOL guardrail
+const WALLET_DISABLE_THRESHOLD_LAMPORTS = BigInt(5_000_000); // 0.005 SOL guardrail
+const WALLET_DISABLE_THRESHOLD_SOL = Number(WALLET_DISABLE_THRESHOLD_LAMPORTS) / 1e9;
+const WALLET_DISABLE_THRESHOLD_LABEL = WALLET_DISABLE_THRESHOLD_SOL.toFixed(3);
 const ESTIMATED_GAS_PER_SWAP_LAMPORTS = process.env.ESTIMATED_GAS_PER_SWAP_LAMPORTS
   ? BigInt(process.env.ESTIMATED_GAS_PER_SWAP_LAMPORTS)
   : BigInt(5_000); // estimated gas per swap transaction
@@ -1393,26 +1592,20 @@ const TOKEN_CATALOG_FILE = path.resolve(SCRIPT_DIR, "token_catalog.json");
 const JUPITER_PRICE_API_BASE =
   process.env.JUPITER_PRICE_API_BASE || "https://api.jup.ag/price/v3";
 const JUPITER_PRICE_ENDPOINT = `${JUPITER_PRICE_API_BASE}/price`;
+// Using FREE TIER to avoid 401 Unauthorized errors
 const JUPITER_TOKENS_API_BASE =
-  process.env.JUPITER_TOKENS_API_BASE || "https://api.jup.ag/tokens/v2";
+  process.env.JUPITER_TOKENS_API_BASE || "https://lite-api.jup.ag/tokens/v2";
 const JUPITER_TOKENS_SEARCH_ENDPOINT = `${JUPITER_TOKENS_API_BASE}/search`;
 const JUPITER_TOKENS_TAG_ENDPOINT = `${JUPITER_TOKENS_API_BASE}/tag`;
 const JUPITER_TOKENS_CATEGORY_ENDPOINT = `${JUPITER_TOKENS_API_BASE}/category`;
 const DEFAULT_LEND_EARN_BASE =
   process.env.JUPITER_LEND_API_BASE || "https://lite-api.jup.ag/lend/v1/earn";
-const DEFAULT_LEND_BORROW_BASE =
-  process.env.JUPITER_LEND_BORROW_API_BASE || "https://lite-api.jup.ag/lend/v1/borrow";
 const DEFAULT_PERPS_API_BASE =
   process.env.JUPITER_PERPS_API_BASE || "https://lite-api.jup.ag/perps/v1";
 const FALLBACK_LEND_EARN_BASES = [
   "https://api.jup.ag/lend/v1/earn",
   "https://api.jup.ag/lend/earn",
   "https://api.jup.ag/jup-integrators/earn",
-];
-const FALLBACK_LEND_BORROW_BASES = [
-  "https://api.jup.ag/lend/v1/borrow",
-  "https://api.jup.ag/lend/borrow",
-  "https://api.jup.ag/jup-integrators/borrow",
 ];
 const FALLBACK_PERPS_BASES = [
   "https://api.jup.ag/perps/v1",
@@ -1421,13 +1614,15 @@ const FALLBACK_PERPS_BASES = [
 const LEND_EARN_BASES = Array.from(
   new Set([DEFAULT_LEND_EARN_BASE, ...FALLBACK_LEND_EARN_BASES])
 );
-const LEND_BORROW_BASES = Array.from(
-  new Set([DEFAULT_LEND_BORROW_BASE, ...FALLBACK_LEND_BORROW_BASES])
-);
 const PERPS_API_BASES = Array.from(
   new Set([DEFAULT_PERPS_API_BASE, ...FALLBACK_PERPS_BASES])
 );
 const USE_ULTRA_ENGINE = JUPITER_SWAP_ENGINE !== "lite";
+const UNIVERSAL_TOKEN_TAGS = Object.freeze(["swappable", "default-sweep"]);
+const TERMINAL_TOKEN_TAGS = Object.freeze([
+  ...UNIVERSAL_TOKEN_TAGS,
+  "secondary-terminal",
+]);
 const FALLBACK_TOKEN_CATALOG = [
   {
     symbol: "SOL",
@@ -1441,84 +1636,77 @@ const FALLBACK_TOKEN_CATALOG = [
     mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "long-circle", "secondary-pool", "secondary-terminal", "crew-cycle"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "USDT",
     mint: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     decimals: 6,
     program: "spl",
-    tags: [],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "POPCAT",
     mint: "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
     decimals: 9,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "PUMP",
     mint: "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
     decimals: 6,
     program: "token-2022",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "PENGU",
     mint: "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "FART",
     mint: "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
-  },
-  {
-    symbol: "USELESS",
-    mint: "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk",
-    decimals: 6,
-    program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "WIF",
     mint: "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
-    symbol: "PFP",
-    mint: "5TfqNKZbn9AnNtzq8bbkyhKgcPGTfNDc9wNzFrTBpump",
+    symbol: "URANUS",
+    mint: "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     decimals: 6,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool"],
+    tags: UNIVERSAL_TOKEN_TAGS,
   },
   {
     symbol: "wBTC",
     mint: "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "cbBTC",
     mint: "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
   {
     symbol: "wETH",
     mint: "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
     decimals: 8,
     program: "spl",
-    tags: ["default-sweep", "crew-cycle", "long-circle", "secondary-pool", "secondary-terminal"],
+    tags: TERMINAL_TOKEN_TAGS,
   },
 ];
 
@@ -1984,17 +2172,13 @@ const FARTCOIN_MINT = mintBySymbol(
   "FART",
   "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump"
 );
-const USELESS_MINT = mintBySymbol(
-  "USELESS",
-  "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk"
-);
 const WIF_MINT = mintBySymbol(
   "WIF",
   "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm"
 );
-const PFP_MINT = mintBySymbol(
-  "PFP",
-  "5TfqNKZbn9AnNtzq8bbkyhKgcPGTfNDc9wNzFrTBpump"
+const URANUS_MINT = mintBySymbol(
+  "URANUS",
+  "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups"
 );
 const WBTC_MINT = mintBySymbol(
   "wBTC",
@@ -2090,9 +2274,18 @@ let rpcEndpointCursor = 0;
 
 // Flag an endpoint as temporarily unusable. The RPC rotation logic will
 // skip it until the cooldown expires, preventing repeated 401/403 failures.
-function markRpcEndpointUnhealthy(url, reason = "") {
+function markRpcEndpointUnhealthy(url, reason = "", options = {}) {
   if (!url) return;
-  const cooldownMs = 5 * 60 * 1000; // 5 minutes cooldown
+  if (typeof reason === "object" && reason !== null && !Array.isArray(reason)) {
+    options = reason;
+    reason = options.reason || "";
+  }
+  const cooldownMs =
+    typeof options.cooldownMs === "number"
+      ? Math.max(1000, options.cooldownMs)
+      : /rate[-\s]?limit/i.test(reason)
+      ? RPC_RATE_LIMIT_COOLDOWN_MS
+      : RPC_GENERAL_COOLDOWN_MS;
   if (!UNHEALTHY_RPC_ENDPOINTS.has(url)) {
     const note = reason ? ` (${reason})` : "";
     console.warn(paint(`RPC endpoint ${url} marked unhealthy${note}`, "warn"));
@@ -2103,15 +2296,25 @@ function markRpcEndpointUnhealthy(url, reason = "") {
 function nextRpcEndpoint() {
   if (RPC_ENDPOINTS.length === 0) return DEFAULT_RPC_URL;
   const total = RPC_ENDPOINTS.length;
+  let fallbackUrl = null;
+  let fallbackExpiry = Number.POSITIVE_INFINITY;
   for (let i = 0; i < total; i += 1) {
     const url = RPC_ENDPOINTS[rpcEndpointCursor];
     rpcEndpointCursor = (rpcEndpointCursor + 1) % total;
     const unhealthyUntil = UNHEALTHY_RPC_ENDPOINTS.get(url);
     if (unhealthyUntil && unhealthyUntil > Date.now()) {
+      if (unhealthyUntil < fallbackExpiry) {
+        fallbackExpiry = unhealthyUntil;
+        fallbackUrl = url;
+      }
       continue;
     }
     UNHEALTHY_RPC_ENDPOINTS.delete(url);
     return url;
+  }
+  if (fallbackUrl) {
+    UNHEALTHY_RPC_ENDPOINTS.delete(fallbackUrl);
+    return fallbackUrl;
   }
   return DEFAULT_RPC_URL;
 }
@@ -2123,7 +2326,7 @@ function createRpcConnection(commitment = 'confirmed', forcedEndpoint = null) {
   const url = forcedEndpoint || nextRpcEndpoint();
   const connection = new Connection(url, commitment);
   connection.__rpcEndpoint = url;
-  connection.__markUnhealthy = (reason) => markRpcEndpointUnhealthy(url, reason);
+  connection.__markUnhealthy = (reason, options) => markRpcEndpointUnhealthy(url, reason, options);
   attachRpcRequestHook(connection);
   const ws = connection._rpcWebSocket;
   if (ws && typeof ws.on === 'function') {
@@ -2171,6 +2374,12 @@ const MINT_SYMBOL_OVERRIDES = new Map(
     entry.symbol,
   ])
 );
+// Cache for share token → underlying asset mapping
+const LEND_SHARE_TOKEN_MAP = new Map(); // shareTokenMint → underlyingAssetMint
+let LEND_TOKENS_CACHE = null;
+let LEND_TOKENS_CACHE_TIME = 0;
+const LEND_TOKENS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
 const LEND_BASE_ASSET_MINTS = new Set([
   SOL_MINT,
   DEFAULT_USDC_MINT,
@@ -2179,9 +2388,16 @@ const LEND_BASE_ASSET_MINTS = new Set([
   CBBTC_MINT,
   WETH_MINT,
 ]);
+const ADDITIONAL_LEND_SHARE_TOKENS = new Set([
+  "2uQsyo1fXXQkDtcpXnLofWy88PxcvnfH2L8FPSE62FVU", // Additional lend share token to withdraw
+]);
 function isLendShareToken(tokenRecord) {
   const symbol = tokenRecord?.symbol || "";
-  return typeof symbol === "string" && symbol.toUpperCase().startsWith("JL");
+  const mint = tokenRecord?.mint || "";
+  return (
+    (typeof symbol === "string" && symbol.toUpperCase().startsWith("JL")) ||
+    ADDITIONAL_LEND_SHARE_TOKENS.has(mint)
+  );
 }
 
 function symbolForMint(mint) {
@@ -2257,6 +2473,7 @@ async function namespaceApiRequest({
   body,
   query,
   headers,
+  includeUltraKey = false,
 } = {}) {
   if (!base) throw new Error("Namespace API base is not defined");
   if (!path) throw new Error("Namespace API path is required");
@@ -2271,7 +2488,7 @@ async function namespaceApiRequest({
       url.searchParams.set(key, String(value));
     }
   }
-  const baseHeaders = buildJsonApiHeaders(headers, { includeUltraKey: true });
+  const baseHeaders = buildJsonApiHeaders(headers, { includeUltraKey });
   const init = {
     method,
     headers: baseHeaders,
@@ -2356,11 +2573,6 @@ const lendEarnClient = createNamespaceClient({
   bases: LEND_EARN_BASES,
 });
 
-const lendBorrowClient = createNamespaceClient({
-  name: "lend borrow",
-  bases: LEND_BORROW_BASES,
-});
-
 const perpsClient = createNamespaceClient({
   name: "perps",
   bases: PERPS_API_BASES,
@@ -2370,12 +2582,47 @@ async function lendEarnRequest(options) {
   return lendEarnClient.request(options);
 }
 
-async function lendBorrowRequest(options) {
-  return lendBorrowClient.request(options);
-}
-
 async function perpsApiRequest(options) {
   return perpsClient.request(options);
+}
+
+// Fetch Jupiter Lend tokens and populate share token mapping
+async function refreshLendTokensCache() {
+  try {
+    const now = Date.now();
+    if (LEND_TOKENS_CACHE && (now - LEND_TOKENS_CACHE_TIME) < LEND_TOKENS_CACHE_TTL) {
+      return LEND_TOKENS_CACHE;
+    }
+
+    const result = await lendEarnRequest({
+      path: "tokens",
+      method: "GET",
+    });
+
+    if (result.ok && Array.isArray(result.data)) {
+      LEND_TOKENS_CACHE = result.data;
+      LEND_TOKENS_CACHE_TIME = now;
+
+      // Update share token → underlying asset mapping
+      LEND_SHARE_TOKEN_MAP.clear();
+      for (const token of result.data) {
+        if (token.address && token.assetAddress) {
+          LEND_SHARE_TOKEN_MAP.set(token.address, token.assetAddress);
+          LEND_BASE_ASSET_MINTS.add(token.assetAddress);
+        }
+      }
+
+      return LEND_TOKENS_CACHE;
+    }
+  } catch (err) {
+    console.warn(paint("  Warning: Failed to refresh Lend tokens cache:", "warn"), err.message);
+  }
+  return LEND_TOKENS_CACHE || [];
+}
+
+// Get underlying asset mint from share token mint
+function getUnderlyingAssetForShareToken(shareTokenMint) {
+  return LEND_SHARE_TOKEN_MAP.get(shareTokenMint) || null;
 }
 
 function parseCliOptions(tokens = []) {
@@ -2399,12 +2646,24 @@ function parseCliOptions(tokens = []) {
   return { options, rest };
 }
 
-function findWalletByName(name) {
-  const wallet = listWallets().find((w) => w.name === name);
-  if (!wallet) {
-    throw new Error(`Wallet ${name} not found in keypairs directory`);
+function findWalletByName(identifier) {
+  const wallets = listWallets();
+  const directMatch = wallets.find((w) => w.name === identifier);
+  if (directMatch) return directMatch;
+
+  const registryEntry = walletRegistry.resolveWalletIdentifier(identifier);
+  if (registryEntry) {
+    const byNumber = typeof registryEntry.number === "number"
+      ? wallets.find((w) => w.number === registryEntry.number)
+      : null;
+    const byFilename = registryEntry.filename
+      ? wallets.find((w) => w.name === registryEntry.filename)
+      : null;
+    const resolved = byNumber || byFilename;
+    if (resolved) return resolved;
   }
-  return wallet;
+
+  throw new Error(`Wallet ${identifier} not found in keypairs directory`);
 }
 
 async function resolveTokenRecord(input, { allowRefresh = true } = {}) {
@@ -2455,7 +2714,7 @@ function logLendApiResult(action, result) {
   if (!result.ok && result.status === 404) {
     console.log(
       paint(
-        "  Tip: the default Lend endpoint may be gated. Set JUPITER_LEND_API_BASE / JUPITER_LEND_BORROW_API_BASE to the correct integrator URL if you have one.",
+        "  Tip: the default Lend endpoint may be gated. Set JUPITER_LEND_API_BASE to the correct integrator URL if you have one.",
         "warn"
       )
     );
@@ -2627,26 +2886,52 @@ function resolveWalletIdentifiers(inputs) {
     throw new Error("At least one wallet identifier is required");
   }
   const existing = listWallets();
+  const walletsByName = new Map(existing.map((wallet) => [wallet.name, wallet]));
+  const walletsByNumber = new Map(
+    existing.filter((wallet) => typeof wallet.number === "number").map((wallet) => [wallet.number, wallet])
+  );
+
   return expanded.map((item) => {
     const trimmed = item.trim();
-    const match = existing.find((w) => w.name === trimmed);
-    if (match) {
-      return { name: match.name, pubkey: match.kp.publicKey.toBase58() };
+    if (!trimmed) {
+      throw new Error("Wallet identifier cannot be empty");
     }
+
+    // Direct filename match
+    const namedWallet = walletsByName.get(trimmed);
+    if (namedWallet) {
+      return { name: namedWallet.name, pubkey: namedWallet.kp.publicKey.toBase58() };
+    }
+
+    // Registry lookup (supports numeric identifiers)
+    const registryEntry = walletRegistry.resolveWalletIdentifier(trimmed);
+    if (registryEntry) {
+      const byNumber = typeof registryEntry.number === "number" ? walletsByNumber.get(registryEntry.number) : null;
+      const byFilename = registryEntry.filename ? walletsByName.get(registryEntry.filename) : null;
+      const resolvedWallet = byNumber || byFilename;
+      if (resolvedWallet) {
+        return {
+          name: resolvedWallet.name,
+          pubkey: resolvedWallet.kp.publicKey.toBase58(),
+        };
+      }
+    }
+
+    // Public key fallback
     try {
       const pk = new PublicKey(trimmed);
       return { name: trimmed, pubkey: pk.toBase58() };
     } catch (err) {
-    throw new Error(`Invalid wallet identifier ${trimmed}: ${err.message}`);
-  }
-});
+      throw new Error(`Invalid wallet identifier ${trimmed}: ${err.message}`);
+    }
+  });
 }
 
 async function handleLendCommand(args) {
   const categoryRaw = args[0];
   if (!categoryRaw) {
     console.log(
-      "lend usage: lend <earn|borrow> <action> [...options] | lend overview"
+      "lend usage: lend earn <action> [...options] | lend overview (borrow coming soon)"
     );
     return;
   }
@@ -2661,14 +2946,22 @@ async function handleLendCommand(args) {
     await lendOverviewAllWallets();
     return;
   }
-  const rest = args.slice(1);
-  if (category === "earn") {
-    await handleLendEarnCommand(rest);
-  } else if (category === "borrow") {
-    await handleLendBorrowCommand(rest);
-  } else {
-    throw new Error(`Unknown lend category '${categoryRaw}'. Expected 'earn' or 'borrow'.`);
+  if (category === "borrow") {
+    console.log(
+      paint(
+        "Borrow endpoints are temporarily unavailable (coming soon).",
+        "warn"
+      )
+    );
+    return;
   }
+  if (category !== "earn") {
+    throw new Error(
+      `Unknown lend category '${categoryRaw}'. Expected 'earn' or 'overview'.`
+    );
+  }
+  const rest = args.slice(1);
+  await handleLendEarnCommand(rest);
 }
 
 async function handlePerpsCommand(args) {
@@ -3115,9 +3408,13 @@ async function handleLendEarnCommand(args) {
     case "deposit-instructions":
     case "withdraw-instructions":
     case "mint-instructions":
-    case "redeem-instructions":
-      await lendEarnTransferLike(action, rest, { valueField: "amount" });
+    case "redeem-instructions": {
+      const baseAction = action.replace(/-instructions$/, "");
+      const defaultField =
+        baseAction === "mint" || baseAction === "redeem" ? "shares" : "amount";
+      await lendEarnTransferLike(action, rest, { valueField: defaultField });
       return;
+    }
     default:
       throw new Error(`Unknown lend earn action '${actionRaw}'.`);
   }
@@ -3205,10 +3502,11 @@ async function lendEarnPositions(args) {
     console.log(paint(`  Wallet scope: ${scopeNames.join(", ")}`, "muted"));
   }
   try {
+    const walletCsv = identifiers.map((entry) => entry.pubkey).join(",");
     const result = await lendEarnRequest({
       path: "positions",
       method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
+      query: { users: walletCsv, wallets: walletCsv },
     });
     logLendApiResult("earn positions", result);
     const entries = extractIterableFromLendData(result.data) || [];
@@ -3292,15 +3590,38 @@ async function lendEarnEarnings(args) {
   if (earningScope.length > 0 && earningScope.length <= 5) {
     console.log(paint(`  Wallet scope: ${earningScope.join(", ")}`, "muted"));
   }
-  try {
-    const result = await lendEarnRequest({
-      path: "earnings",
-      method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
-    });
-    logLendApiResult("earn earnings", result);
-  } catch (err) {
-    console.error(paint("Lend earn earnings request failed:", "error"), err.message);
+  const summaries = [];
+  for (const identifier of identifiers) {
+    const label = identifier.name || identifier.pubkey;
+    try {
+      const result = await lendEarnRequest({
+        path: "earnings",
+        method: "GET",
+        query: { user: identifier.pubkey, wallet: identifier.pubkey },
+      });
+      logLendApiResult(`earn earnings (${label})`, result);
+      const entries = extractIterableFromLendData(result.data) || [];
+      summaries.push({ label, count: entries.length });
+    } catch (err) {
+      console.error(
+        paint(
+          `Lend earn earnings request failed for ${label}:`,
+          "error"
+        ),
+        err.message || err
+      );
+    }
+  }
+  if (summaries.length > 1) {
+    console.log(paint("Earnings summary:", "muted"));
+    for (const item of summaries) {
+      console.log(
+        paint(
+          `  ${item.label}: ${item.count} entr${item.count === 1 ? "y" : "ies"}`,
+          "muted"
+        )
+      );
+    }
   }
 }
 
@@ -3850,53 +4171,66 @@ async function lendOverviewAllWallets() {
     );
   }
   const walletCsv = identifiers.map((entry) => entry.pubkey).join(",");
-  const sections = [
-    {
+
+  console.log(paint("\n=== earn positions ===", "label"));
+  try {
+    const positionsResult = await lendEarnRequest({
+      path: "positions",
+      method: "GET",
+      query: { users: walletCsv, wallets: walletCsv },
+    });
+    logLendApiResult("earn positions", positionsResult);
+    summariseLendEntries(positionsResult, walletNameMap, {
       label: "earn positions",
-      runner: () =>
-        lendEarnRequest({
-          path: "positions",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "earn positions",
-    },
-    {
-      label: "earn earnings",
-      runner: () =>
-        lendEarnRequest({
-          path: "earnings",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "earn earnings",
-    },
-    {
-      label: "borrow positions",
-      runner: () =>
-        lendBorrowRequest({
-          path: "positions",
-          method: "GET",
-          query: { wallets: walletCsv },
-        }),
-      summaryLabel: "borrow positions",
-    },
-  ];
-  for (const section of sections) {
-    console.log(paint(`\n=== ${section.label} ===`, "label"));
+    });
+  } catch (err) {
+    console.error(
+      paint("earn positions request failed:", "error"),
+      err.message || err
+    );
+  }
+
+  console.log(paint("\n=== earn earnings ===", "label"));
+  const earningsSummaries = [];
+  for (const identifier of identifiers) {
+    const label = identifier.name || identifier.pubkey;
     try {
-      const result = await section.runner();
-      logLendApiResult(section.label, result);
-      summariseLendEntries(result, walletNameMap, {
-        label: section.summaryLabel,
+      const earningsResult = await lendEarnRequest({
+        path: "earnings",
+        method: "GET",
+        query: { user: identifier.pubkey, wallet: identifier.pubkey },
       });
+      logLendApiResult(`earn earnings (${label})`, earningsResult);
+      const entries = extractIterableFromLendData(earningsResult.data) || [];
+      earningsSummaries.push({ label, count: entries.length });
     } catch (err) {
       console.error(
-        paint(`${section.label} request failed:`, "error"),
+        paint(
+          `earn earnings request failed for ${label}:`,
+          "error"
+        ),
         err.message || err
       );
     }
   }
+  if (earningsSummaries.length > 1) {
+    console.log(paint("Earnings summary:", "muted"));
+    for (const item of earningsSummaries) {
+      console.log(
+        paint(
+          `  ${item.label}: ${item.count} entr${item.count === 1 ? "y" : "ies"}`,
+          "muted"
+        )
+      );
+    }
+  }
+
+  console.log(
+    paint(
+      "\nBorrow endpoints are temporarily unavailable (coming soon).",
+      "warn"
+    )
+  );
 }
 
 async function computeSpendableSolBalance(connection, ownerPubkey) {
@@ -4058,6 +4392,34 @@ async function lendEarnTransferLike(action, args, { valueField }) {
   const usesShareTokens =
     normalizedAction === "withdraw" || normalizedAction === "redeem";
 
+  let lendTokens = [];
+  try {
+    lendTokens = await refreshLendTokensCache();
+  } catch (_) {
+    lendTokens = [];
+  }
+  const shareTokenIndex = new Map();
+  const baseAssetYieldBps = new Map();
+  for (const token of lendTokens) {
+    if (token && typeof token === "object") {
+      if (typeof token.symbol === "string") {
+        shareTokenIndex.set(token.symbol.toLowerCase(), token);
+      }
+      if (typeof token.address === "string") {
+        shareTokenIndex.set(token.address, token);
+      }
+      if (token.assetAddress) {
+        const totalRate = Number(token.totalRate ?? token.supplyRate ?? 0);
+        if (Number.isFinite(totalRate)) {
+          const existing = baseAssetYieldBps.get(token.assetAddress);
+          if (existing === undefined || totalRate > existing) {
+            baseAssetYieldBps.set(token.assetAddress, totalRate);
+          }
+        }
+      }
+    }
+  }
+
   let wallets;
   if (walletArg === "*") {
     wallets = listWallets();
@@ -4088,30 +4450,82 @@ async function lendEarnTransferLike(action, args, { valueField }) {
     );
   }
   const tokenFilterRecord = mintArg !== "*" ? await resolveTokenRecord(mintArg) : null;
-  if (mintArg !== "*" && !tokenFilterRecord) {
+  if (mintArg !== "*" && !tokenFilterRecord && !shareTokenIndex.size) {
     throw new Error(`Token ${mintArg} not found in catalog (try running 'tokens --refresh')`);
   }
-  const tokenFilterLabel = (() => {
-    if (mintArg === "*") {
-      if (usesBaseAssets) {
-        const baseSymbols = Array.from(LEND_BASE_ASSET_MINTS).map((mint) =>
-          symbolForMint(mint)
-        );
-        const uniqueSymbols = [...new Set(baseSymbols.filter(Boolean))];
-        return uniqueSymbols.length
-          ? `eligible base assets (${uniqueSymbols.join("/")})`
-          : "eligible base assets";
-      }
-      if (usesShareTokens) {
-        return "all Jupiter lend share tokens (JL-*)";
-      }
-      return "all tokens with balances";
+
+  let targetMintForFilter = null;
+  let tokenFilterLabel;
+  let filterSymbolForLogs;
+
+  if (mintArg === "*") {
+    if (usesBaseAssets) {
+      const baseSymbols = Array.from(LEND_BASE_ASSET_MINTS)
+        .map((mint) => symbolForMint(mint))
+        .filter(Boolean);
+      const uniqueSymbols = [...new Set(baseSymbols)];
+      tokenFilterLabel = uniqueSymbols.length
+        ? `eligible base assets (${uniqueSymbols.join("/")})`
+        : "eligible base assets";
+    } else if (usesShareTokens) {
+      tokenFilterLabel = "all Jupiter lend share tokens (JL-*)";
+    } else {
+      tokenFilterLabel = "all tokens with balances";
     }
-    if (tokenFilterRecord?.symbol) {
-      return `${tokenFilterRecord.symbol}`;
+  } else if (usesBaseAssets) {
+    const directMint = tokenFilterRecord?.mint || mintArg;
+    const lowerSymbol = typeof mintArg === "string" ? mintArg.toLowerCase() : "";
+    const shareEntry =
+      shareTokenIndex.get(directMint) ||
+      shareTokenIndex.get(lowerSymbol);
+    let baseMint = null;
+    if (typeof directMint === "string") {
+      const mapped = getUnderlyingAssetForShareToken(directMint);
+      if (mapped) baseMint = mapped;
     }
-    return mintArg;
-  })();
+    if (!baseMint && shareEntry?.assetAddress) {
+      baseMint = shareEntry.assetAddress;
+    }
+    if (!baseMint && shareEntry?.asset?.address) {
+      baseMint = shareEntry.asset.address;
+    }
+    if (!baseMint && typeof directMint === "string" && LEND_BASE_ASSET_MINTS.has(directMint)) {
+      baseMint = directMint;
+    }
+    if (!baseMint && tokenFilterRecord?.mint && LEND_BASE_ASSET_MINTS.has(tokenFilterRecord.mint)) {
+      baseMint = tokenFilterRecord.mint;
+    }
+    if (!baseMint) {
+      const available = Array.from(LEND_BASE_ASSET_MINTS)
+        .map((mint) => symbolForMint(mint))
+        .filter(Boolean)
+        .join(", ");
+      throw new Error(
+        `Token ${mintArg} is not a supported Lend base asset. Eligible base assets: ${available}`
+      );
+    }
+    targetMintForFilter = baseMint;
+    const baseSymbol = symbolForMint(baseMint) || baseMint.slice(0, 4);
+    if (shareEntry?.symbol && shareEntry.symbol.toLowerCase() !== baseSymbol.toLowerCase()) {
+      tokenFilterLabel = `${shareEntry.symbol} (underlying ${shareEntry.asset?.symbol || baseSymbol})`;
+      filterSymbolForLogs = shareEntry.symbol;
+    } else if (tokenFilterRecord?.symbol) {
+      tokenFilterLabel = tokenFilterRecord.symbol;
+      filterSymbolForLogs = tokenFilterRecord.symbol;
+    } else {
+      tokenFilterLabel = baseSymbol;
+      filterSymbolForLogs = baseSymbol;
+    }
+  } else {
+    targetMintForFilter = tokenFilterRecord?.mint || mintArg;
+    tokenFilterLabel = tokenFilterRecord?.symbol || mintArg;
+    filterSymbolForLogs = tokenFilterRecord?.symbol || mintArg;
+  }
+
+  if (!filterSymbolForLogs) {
+    filterSymbolForLogs = tokenFilterLabel;
+  }
+
   console.log(paint(`  Token filter: ${tokenFilterLabel}`, "muted"));
   const amountLabel = (() => {
     if (amountArg === "*") {
@@ -4144,14 +4558,43 @@ async function lendEarnTransferLike(action, args, { valueField }) {
       }
     }
 
-    const filteredBalances = tokenFilterRecord
-      ? eligibleBalances.filter((entry) => entry.tokenRecord.mint === tokenFilterRecord.mint)
+    if (usesBaseAssets && mintArg === "*" && eligibleBalances.length > 1 && baseAssetYieldBps.size > 0) {
+      eligibleBalances = [...eligibleBalances].sort((a, b) => {
+        const yieldA = baseAssetYieldBps.get(a.tokenRecord.mint) ?? -Infinity;
+        const yieldB = baseAssetYieldBps.get(b.tokenRecord.mint) ?? -Infinity;
+        if (yieldA !== yieldB) {
+          return yieldB - yieldA;
+        }
+        const spendableA =
+          typeof a.spendableRaw === "bigint"
+            ? a.spendableRaw
+            : BigInt(a.spendableRaw ?? 0);
+        const spendableB =
+          typeof b.spendableRaw === "bigint"
+            ? b.spendableRaw
+            : BigInt(b.spendableRaw ?? 0);
+        if (spendableA !== spendableB) {
+          return spendableB > spendableA ? 1 : -1;
+        }
+        const symbolA = a.tokenRecord.symbol || a.tokenRecord.mint;
+        const symbolB = b.tokenRecord.symbol || b.tokenRecord.mint;
+        return symbolA.localeCompare(symbolB);
+      });
+    }
+
+    const effectiveFilterMint = mintArg === "*"
+      ? null
+      : targetMintForFilter || tokenFilterRecord?.mint || mintArg;
+
+    const filteredBalances = effectiveFilterMint
+      ? eligibleBalances.filter((entry) => entry.tokenRecord.mint === effectiveFilterMint)
       : eligibleBalances;
 
     if (!filteredBalances.length) {
+      const label = mintArg === "*" ? "selected tokens" : filterSymbolForLogs;
       console.log(
         paint(
-          `  Wallet ${wallet.name} has no balance for ${mintArg === "*" ? "selected tokens" : tokenFilterRecord.symbol}.`,
+          `  Wallet ${wallet.name} has no balance for ${label}.`,
           "muted"
         )
       );
@@ -4280,28 +4723,41 @@ async function lendEarnTransferLike(action, args, { valueField }) {
           }
         }
 
-        const body = {
-          wallet: wallet.kp.publicKey.toBase58(),
-          tokenMint: currentBalance.tokenRecord.mint,
-          tokenSymbol: currentBalance.tokenRecord.symbol,
-          amountInput: displayAmount,
-          amountDecimals: currentBalance.decimals,
-          [field]: baseAmount,
-          ...extra,
-        };
-        for (const [key, value] of Object.entries(options)) {
-          if (ignoreKeys.has(key)) continue;
-          body[key] = value;
+        // Official Jupiter Lend API request body
+        // deposit/withdraw use "amount", mint/redeem use "shares"
+        // For withdraw/redeem, asset must be the UNDERLYING asset, not the share token
+        let assetMint = currentBalance.tokenRecord.mint;
+
+        if (usesShareTokens) {
+          // Get underlying asset from share token
+          const underlyingAsset = getUnderlyingAssetForShareToken(assetMint);
+          if (underlyingAsset) {
+            assetMint = underlyingAsset;
+          } else {
+            console.warn(
+              paint(
+                `  Warning: Could not map share token ${currentBalance.tokenRecord.symbol || assetMint} to underlying asset`,
+                "warn"
+              )
+            );
+          }
         }
 
-        if (body.asset === undefined) {
-          body.asset = currentBalance.tokenRecord.mint;
+        const body = {
+          asset: assetMint,
+          signer: wallet.kp.publicKey.toBase58(),
+        };
+
+        // Use correct field name based on endpoint type
+        if (field === "shares") {
+          body.shares = baseAmount;
+        } else {
+          body.amount = baseAmount;
         }
-        if (body.assetSymbol === undefined && currentBalance.tokenRecord.symbol) {
-          body.assetSymbol = currentBalance.tokenRecord.symbol;
-        }
-        if (body.signer === undefined) {
-          body.signer = wallet.kp.publicKey.toBase58();
+
+        // Add any extra fields from --extra option if provided
+        if (extra && typeof extra === 'object') {
+          Object.assign(body, extra);
         }
 
         if (amountArg === "*") {
@@ -4340,6 +4796,44 @@ async function lendEarnTransferLike(action, args, { valueField }) {
           JSON.stringify(body, null, 2)
         );
 
+        // For withdrawals/redeems, pre-create the destination token account (underlying asset)
+        // The lend API expects this account to exist before withdrawal
+        if (usesShareTokens && !skipSendFlag && !isInstructionRequest) {
+          try {
+            const connection = createRpcConnection("confirmed");
+            // The asset field contains the underlying asset mint (not the share token)
+            // For jlSOL → wSOL, for jlUSDC → USDC, etc.
+            const destinationMint = new PublicKey(body.asset);
+            const tokenSymbol = currentBalance.tokenRecord.symbol || symbolForMint(body.asset);
+            const destinationAta = await getAssociatedTokenAddress(
+              destinationMint,
+              wallet.kp.publicKey,
+              false,
+              TOKEN_PROGRAM_ID,
+              ASSOCIATED_TOKEN_PROGRAM_ID
+            );
+            // Check if ATA exists
+            const ataInfo = await connection.getAccountInfo(destinationAta);
+            if (!ataInfo) {
+              console.log(
+                paint(
+                  `  Creating destination ${tokenSymbol} account for ${wallet.name} before ${normalizedAction}...`,
+                  "muted"
+                )
+              );
+              await ensureAtaForMint(connection, wallet, destinationMint, TOKEN_PROGRAM_ID);
+              await delay(500); // Give time for ATA creation to settle
+            }
+          } catch (ataErr) {
+            console.warn(
+              paint(
+                `  Warning: Could not pre-create destination account for ${wallet.name}: ${ataErr.message || ataErr}`,
+                "warn"
+              )
+            );
+          }
+        }
+
         let ataRetryNeeded = false;
         try {
           const result = await lendEarnRequest({
@@ -4347,47 +4841,75 @@ async function lendEarnTransferLike(action, args, { valueField }) {
             method: "POST",
             body,
           });
+
+          // Enhanced error handling
+          if (!result.ok) {
+            const errorMsg = result.data?.message || result.data?.error || result.raw || `HTTP ${result.status}`;
+            console.error(
+              paint(
+                `  ${normalizedAction} failed for ${wallet.name}: ${errorMsg}`,
+                "error"
+              )
+            );
+            console.log(paint(`  API URL: ${result.url}`, "muted"));
+            if (result.data) {
+              console.log(paint(`  Response:`, "muted"), JSON.stringify(result.data, null, 2));
+            }
+            throw new Error(`Lend API ${normalizedAction} failed: ${errorMsg}`);
+          }
+
           logLendApiResult(`earn ${action}`, result);
+
           if (!skipSendFlag && !isInstructionRequest) {
             const transactions = extractTransactionsFromLendResponse(result.data);
-            if (transactions.length > 0) {
-              console.log(
+
+            if (transactions.length === 0) {
+              console.warn(
                 paint(
-                  `  Submitting ${transactions.length} transaction(s) for ${wallet.name}.`,
-                  "info"
+                  `  Warning: No transaction returned from ${normalizedAction} API for ${wallet.name}`,
+                  "warn"
                 )
               );
-              const connection = createRpcConnection("confirmed");
-              for (let i = 0; i < transactions.length; i += 1) {
-                const txBase64 = transactions[i];
-                const createdCount = await ensureAtasForTransaction({
-                  connection,
-                  wallet,
-                  txBase64,
-                  label: normalizedAction,
-                });
-                if (createdCount > 0) {
-                  ataRetryNeeded = true;
-                  break;
-                }
-                try {
-                  await submitSignedSolanaTransaction(connection, wallet, txBase64, {
-                    label: normalizedAction,
-                    index: i,
-                    total: transactions.length,
-                  });
-                } catch (sendErr) {
-                  console.error(
-                    paint(
-                      `  Failed to submit transaction ${i + 1}/${transactions.length} for ${wallet.name}:`,
-                      "error"
-                    ),
-                    sendErr.message || sendErr
-                  );
-                  throw sendErr;
-                }
-                await delay(DELAY_BETWEEN_CALLS_MS);
+              console.log(paint(`  Response data:`, "muted"), JSON.stringify(result.data, null, 2));
+              break;
+            }
+
+            console.log(
+              paint(
+                `  Submitting ${transactions.length} transaction(s) for ${wallet.name}.`,
+                "info"
+              )
+            );
+            const connection = createRpcConnection("confirmed");
+            for (let i = 0; i < transactions.length; i += 1) {
+              const txBase64 = transactions[i];
+              const createdCount = await ensureAtasForTransaction({
+                connection,
+                wallet,
+                txBase64,
+                label: normalizedAction,
+              });
+              if (createdCount > 0) {
+                ataRetryNeeded = true;
+                break;
               }
+              try {
+                await submitSignedSolanaTransaction(connection, wallet, txBase64, {
+                  label: normalizedAction,
+                  index: i,
+                  total: transactions.length,
+                });
+              } catch (sendErr) {
+                console.error(
+                  paint(
+                    `  Failed to submit transaction ${i + 1}/${transactions.length} for ${wallet.name}:`,
+                    "error"
+                  ),
+                  sendErr.message || sendErr
+                );
+                throw sendErr;
+              }
+              await delay(DELAY_BETWEEN_CALLS_MS);
             }
           }
 
@@ -4513,331 +5035,6 @@ async function lendEarnTransferLike(action, args, { valueField }) {
   }
 }
 
-async function handleLendBorrowCommand(args) {
-  const actionRaw = args[0];
-  if (!actionRaw) {
-    console.log(
-      "lend borrow usage: lend borrow <pairs|positions|open|repay|close> [...options]"
-    );
-    return;
-  }
-  const action = actionRaw.toLowerCase();
-  const rest = args.slice(1);
-  switch (action) {
-    case "pairs":
-      await lendBorrowPairs(rest);
-      return;
-    case "positions":
-      await lendBorrowPositions(rest);
-      return;
-    case "open":
-      await lendBorrowOpen(rest);
-      return;
-    case "repay":
-      await lendBorrowRepay(rest);
-      return;
-    case "close":
-      await lendBorrowClose(rest);
-      return;
-    default:
-      throw new Error(`Unknown lend borrow action '${actionRaw}'.`);
-  }
-}
-
-async function lendBorrowPairs(args) {
-  const { options } = parseCliOptions(args);
-  const query = {};
-  if (options.collateral) query.collateralMint = options.collateral;
-  if (options.borrow) query.borrowMint = options.borrow;
-  try {
-    const result = await lendBorrowRequest({
-      path: "pairs",
-      method: "GET",
-      query,
-    });
-    logLendApiResult("borrow pairs", result);
-  } catch (err) {
-    console.error(paint("Lend borrow pairs request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowPositions(args) {
-  const { options, rest } = parseCliOptions(args);
-  let input = rest.length > 0 ? rest : (options.wallets ? options.wallets.split(",") : []);
-  const needsAllWallets =
-    !input ||
-    input.length === 0 ||
-    input.some((item) => item.trim().length === 0 || item.trim() === "*");
-  if (needsAllWallets) {
-    input = listWallets().map((wallet) => wallet.name);
-  }
-  if (!input || input.length === 0) {
-    throw new Error("lend borrow positions usage: lend borrow positions <walletName|pubkey>[,...]");
-  }
-  const identifiers = resolveWalletIdentifiers(input);
-  if (needsAllWallets) {
-    console.log(
-      paint(
-        `  Targeting all ${identifiers.length} wallet(s) for borrow positions.`,
-        "muted"
-      )
-    );
-  } else if (identifiers.length > 1) {
-    console.log(
-      paint(
-        `  Targeting ${identifiers.length} wallet(s) for borrow positions.`,
-        "muted"
-      )
-    );
-  }
-  const borrowScope = identifiers
-    .map((entry) => entry.name || entry.pubkey)
-    .filter(Boolean);
-  if (borrowScope.length > 0 && borrowScope.length <= 5) {
-    console.log(paint(`  Wallet scope: ${borrowScope.join(", ")}`, "muted"));
-  }
-  try {
-    const result = await lendBorrowRequest({
-      path: "positions",
-      method: "GET",
-      query: { wallets: identifiers.map((entry) => entry.pubkey).join(",") },
-    });
-    logLendApiResult("borrow positions", result);
-  } catch (err) {
-    console.error(paint("Lend borrow positions request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowOpen(args) {
-  const walletName = args[0];
-  const collateralInput = args[1];
-  const borrowInput = args[2];
-  const collateralAmountInput = args[3];
-  const borrowAmountInput = args[4];
-  if (!walletName || !collateralInput || !borrowInput || !collateralAmountInput || !borrowAmountInput) {
-    throw new Error("lend borrow open usage: lend borrow open <walletFile> <collateralMint|symbol> <borrowMint|symbol> <collateralAmount> <borrowAmount> [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const collateralToken = await resolveTokenRecord(collateralInput);
-  const borrowToken = await resolveTokenRecord(borrowInput);
-  if (!collateralToken) {
-    throw new Error(`Collateral token ${collateralInput} not found`);
-  }
-  if (!borrowToken) {
-    throw new Error(`Borrow token ${borrowInput} not found`);
-  }
-  const tail = args.slice(5);
-  const { options } = parseCliOptions(tail);
-  const extra = parseJsonOption(options.extra, "--extra");
-  const rawCollateral = options.rawCollateral === "true" || options.rawCollateral === true;
-  const rawBorrow = options.rawBorrow === "true" || options.rawBorrow === true;
-  const collateralAmount = rawCollateral
-    ? collateralAmountInput
-    : decimalToBaseUnits(collateralAmountInput, collateralToken.decimals).toString();
-  const borrowAmount = rawBorrow
-    ? borrowAmountInput
-    : decimalToBaseUnits(borrowAmountInput, borrowToken.decimals).toString();
-  const body = {
-    wallet: wallet.kp.publicKey.toBase58(),
-    collateralMint: collateralToken.mint,
-    borrowMint: borrowToken.mint,
-    collateralInput,
-    borrowInput,
-    collateralDecimals: collateralToken.decimals,
-    borrowDecimals: borrowToken.decimals,
-    collateralAmount,
-    borrowAmount,
-    ...extra,
-  };
-  const ignore = new Set(["extra", "rawCollateral", "rawBorrow"]);
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    body[key] = value;
-  }
-  console.log(
-    paint("  request payload (borrow open)", "muted"),
-    JSON.stringify(body, null, 2)
-  );
-  try {
-    const result = await lendBorrowRequest({
-      path: "open",
-      method: "POST",
-      body,
-    });
-    logLendApiResult("borrow open", result);
-  } catch (err) {
-    console.error(paint("Lend borrow open request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowRepay(args) {
-  const walletName = args[0];
-  const borrowMintInput = args[1];
-  const repayAmountInput = args[2];
-  if (!walletName || !borrowMintInput || !repayAmountInput) {
-    throw new Error("lend borrow repay usage: lend borrow repay <walletFile> <borrowMint|symbol> <amount> [--position id] [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const borrowToken = await resolveTokenRecord(borrowMintInput);
-  if (!borrowToken) {
-    throw new Error(`Borrow token ${borrowMintInput} not found`);
-  }
-  const tail = args.slice(3);
-  const { options } = parseCliOptions(tail);
-  const extra = parseJsonOption(options.extra, "--extra");
-  const raw = options.raw === "true" || options.raw === true;
-  const repayAmount = raw
-    ? repayAmountInput
-    : decimalToBaseUnits(repayAmountInput, borrowToken.decimals).toString();
-  const body = {
-    wallet: wallet.kp.publicKey.toBase58(),
-    borrowMint: borrowToken.mint,
-    borrowDecimals: borrowToken.decimals,
-    borrowAmount: repayAmount,
-    amountInput: repayAmountInput,
-    ...extra,
-  };
-  if (options.position) body.positionId = options.position;
-  const ignore = new Set(["extra", "raw", "position"]);
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    body[key] = value;
-  }
-  console.log(
-    paint("  request payload (borrow repay)", "muted"),
-    JSON.stringify(body, null, 2)
-  );
-  try {
-    const result = await lendBorrowRequest({
-      path: "repay",
-      method: "POST",
-      body,
-    });
-    logLendApiResult("borrow repay", result);
-  } catch (err) {
-    console.error(paint("Lend borrow repay request failed:", "error"), err.message);
-  }
-}
-
-async function lendBorrowClose(args) {
-  const walletName = args[0];
-  if (!walletName) {
-    throw new Error("lend borrow close usage: lend borrow close <walletFile> [positionId|*] [--all] [--extra '{...}']");
-  }
-  const wallet = findWalletByName(walletName);
-  const { options, rest } = parseCliOptions(args.slice(1));
-  const extra = parseJsonOption(options.extra, "--extra");
-  const explicitIds = rest
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0 && item !== "*");
-  const wildcardRequested =
-    rest.length === 0 ||
-    rest.some((item) => {
-      const trimmed = item.trim().toLowerCase();
-      return trimmed.length === 0 || trimmed === "*" || trimmed === "all";
-    }) ||
-    options.all === true ||
-    (typeof options.all === "string" &&
-      options.all.trim().toLowerCase() === "true");
-  if (!wildcardRequested && options.position && typeof options.position === "string") {
-    explicitIds.push(options.position.trim());
-  }
-  let positionIds = Array.from(new Set(explicitIds.filter(Boolean)));
-  const walletPubkey = wallet.kp.publicKey.toBase58();
-  if (wildcardRequested) {
-    console.log(
-      paint(
-        `  Fetching borrow positions for ${wallet.name} to close all.`,
-        "muted"
-      )
-    );
-    try {
-      const result = await lendBorrowRequest({
-        path: "positions",
-        method: "GET",
-        query: { wallets: walletPubkey },
-      });
-      if (!result.ok) {
-        console.error(
-          paint(
-            `Unable to enumerate borrow positions for ${wallet.name}:`,
-            "error"
-          ),
-          result.status,
-          result.data?.error || result.raw || ""
-        );
-        return;
-      }
-      const entries = extractIterableFromLendData(result.data) || [];
-      const ids = collectBorrowPositionIds(entries, walletPubkey);
-      positionIds = ids;
-      if (!ids.length) {
-        console.log(
-          paint(
-            `  No open borrow positions found for ${wallet.name}.`,
-            "muted"
-          )
-        );
-        return;
-      }
-      console.log(
-        paint(
-          `  Closing ${ids.length} borrow position(s) for ${wallet.name}.`,
-          "info"
-        )
-      );
-    } catch (err) {
-      console.error(
-        paint(
-          `Unable to enumerate borrow positions for ${wallet.name}:`,
-          "error"
-        ),
-        err.message || err
-      );
-      return;
-    }
-  }
-  if (!positionIds.length) {
-    throw new Error("lend borrow close usage: supply a position id or request --all/\"*\".");
-  }
-  const ignore = new Set(["extra", "all", "position"]);
-  const additionalFields = {};
-  for (const [key, value] of Object.entries(options)) {
-    if (ignore.has(key)) continue;
-    additionalFields[key] = value;
-  }
-  for (const positionId of positionIds) {
-    const body = {
-      wallet: walletPubkey,
-      positionId,
-      ...extra,
-      ...additionalFields,
-    };
-    console.log(
-      paint(
-        `  request payload (borrow close) → ${wallet.name}`,
-        "muted"
-      ),
-      JSON.stringify(body, null, 2)
-    );
-    try {
-      const result = await lendBorrowRequest({
-        path: "close",
-        method: "POST",
-        body,
-      });
-      logLendApiResult("borrow close", result);
-    } catch (err) {
-      console.error(
-        paint(
-          `Lend borrow close request failed for ${wallet.name} (position ${positionId}):`,
-          "error"
-        ),
-        err.message || err
-      );
-    }
-  }
-}
 function describeMintLabel(mint, options = {}) {
   const showAddress =
     options.showAddress !== undefined ? options.showAddress : true;
@@ -5356,14 +5553,16 @@ function printStartupBanner() {
       "muted"
     )
   );
-  if (USE_ULTRA_ENGINE) {
-    const engineLabel = JUPITER_ULTRA_API_KEY ? "Ultra API (authenticated)" : "Ultra API (no key)";
-    console.log(paint(`Swap engine: ${engineLabel}`, JUPITER_ULTRA_API_KEY ? "info" : "warn"));
+  const activeEngineMode = USE_ULTRA_ENGINE ? "ultra" : "lite";
+  const engineLabel = formatSwapEngineLabel(activeEngineMode);
+  if (activeEngineMode === "ultra") {
+    const tone = JUPITER_ULTRA_API_KEY ? "info" : "warn";
+    console.log(paint(`Swap engine: ${engineLabel}`, tone));
     if (!JUPITER_ULTRA_API_KEY) {
       console.log(paint("  Tip: set JUPITER_ULTRA_API_KEY for higher limits.", "warn"));
     }
   } else {
-    console.log(paint("Swap engine: Legacy Lite API", "muted"));
+    console.log(paint(`Swap engine: ${engineLabel}`, "muted"));
   }
   console.log(
     paint(
@@ -5661,7 +5860,7 @@ export async function runPrewrittenFlow(flowKey, options = {}) {
   const hasOverride = Number.isFinite(normalizedOverride) && normalizedOverride > 0;
   let sampledSwapTarget = hasOverride
     ? Math.max(swapRangeMin, Math.floor(normalizedOverride))
-    : pickIntInclusive(targetSampleRng, swapRangeMin, swapRangeMax);
+    : pickIntInclusive(rng, swapRangeMin, swapRangeMax);
 
   const minimumCycles = Math.max(
     1,
@@ -6879,18 +7078,193 @@ async function sweepTokensToSol(mints, label = "") {
     return;
   }
 
+  // Filter out Jupiter Lend share tokens
+  const mintSet = new Set();
+  const skippedShareTokens = [];
+
+  for (const mint of uniqueMints) {
+    const tokenRecord = await resolveTokenRecord(mint);
+    if (tokenRecord && isLendShareToken(tokenRecord)) {
+      skippedShareTokens.push(tokenRecord.symbol || mint);
+    } else {
+      mintSet.add(mint);
+    }
+  }
+
+  if (skippedShareTokens.length > 0) {
+    console.log(
+      paint(
+        `  Skipped ${skippedShareTokens.length} Jupiter Lend share token(s): ${skippedShareTokens.join(", ")}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  Tip: Use 'lend earn withdraw' to redeem share tokens.`,
+        "muted"
+      )
+    );
+  }
+
+  if (mintSet.size === 0) {
+    console.log(
+      paint(
+        `No swappable tokens to sweep${label ? ` (${label})` : ""}.`,
+        "muted"
+      )
+    );
+    return;
+  }
+
   console.log(
     paint(
-      `Sweeping ${uniqueMints.length} token(s) back to SOL${label ? ` (${label})` : ""}...`,
+      `Sweeping tokens back to SOL${label ? ` (${label})` : ""}...`,
       "label"
     )
   );
 
-  for (const mint of uniqueMints) {
+  // Per-wallet sweep: only swap tokens each wallet actually holds
+  const wallets = listWallets();
+  const connection = createRpcConnection("confirmed");
+
+  for (const wallet of wallets) {
     try {
-      await doSwapAcross(mint, SOL_MINT, "all");
+      const parsedAccounts = await getAllParsedTokenAccounts(connection, wallet.kp.publicKey);
+      const walletMints = [];
+
+      for (const { account, pubkey } of parsedAccounts) {
+        const info = account.data.parsed.info;
+        const mint = info.mint;
+        const amount = BigInt(info.tokenAmount.amount);
+
+        // Only include mints that are in our sweep list and have balance
+        if (amount > 0n && mintSet.has(mint)) {
+          walletMints.push({ mint, amount, accountPubkey: pubkey });
+        }
+      }
+
+      // Swap each token this wallet holds
+      for (const { mint, amount, accountPubkey } of walletMints) {
+        try {
+          await doSwapAcross(mint, SOL_MINT, "all", {
+            wallets: [wallet],
+            quietSkips: false,
+          });
+        } catch (err) {
+          // If swap failed (likely due to dust amount), try to close the token account to reclaim rent
+          const tokenSymbol = symbolForMint(mint) || mint.substring(0, 8);
+          logDetailedError(`  ${wallet.name}: sweep ${tokenSymbol} failed`, err);
+
+          // Check if it's a dust amount issue - burn the dust and close account
+          if (/too small|simulation error|failed to get quotes|amount became too small/i.test(err.message)) {
+            try {
+              console.log(
+                paint(
+                  `  ${wallet.name}: swap failed for ${tokenSymbol}, burning dust and closing account...`,
+                  "muted"
+                )
+              );
+
+              // Get current token account balance
+              const parsedData = await connection.getParsedAccountInfo(accountPubkey);
+              const tokenAmount = parsedData?.value?.data?.parsed?.info?.tokenAmount?.amount;
+              const remainingAmount = tokenAmount ? BigInt(tokenAmount) : 0n;
+
+              if (remainingAmount > 0n) {
+                // Burn remaining dust tokens first (required before closing)
+                const burnIx = createBurnInstruction(
+                  accountPubkey,
+                  new PublicKey(mint),
+                  wallet.kp.publicKey,
+                  remainingAmount,
+                  [],
+                  TOKEN_PROGRAM_ID
+                );
+
+                // Close account to reclaim rent (~0.00203 SOL)
+                const closeIx = createCloseAccountInstruction(
+                  accountPubkey,
+                  wallet.kp.publicKey, // destination for rent
+                  wallet.kp.publicKey, // authority
+                  [],
+                  TOKEN_PROGRAM_ID
+                );
+
+                // Build and send transaction
+                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+                const tx = new Transaction({
+                  feePayer: wallet.kp.publicKey,
+                  blockhash,
+                  lastValidBlockHeight,
+                }).add(burnIx, closeIx);
+
+                tx.sign(wallet.kp);
+                const sig = await connection.sendRawTransaction(tx.serialize(), {
+                  skipPreflight: false,
+                  maxRetries: 2,
+                });
+
+                await connection.confirmTransaction({
+                  signature: sig,
+                  blockhash,
+                  lastValidBlockHeight,
+                }, "confirmed");
+
+                console.log(
+                  paint(
+                    `  ${wallet.name}: burned ${formatBaseUnits(remainingAmount, parsedData.value.data.parsed.info.tokenAmount.decimals)} ${tokenSymbol} dust and closed account (tx: ${sig.substring(0, 8)}...)`,
+                    "success"
+                  )
+                );
+              } else {
+                // Already zero balance, just close
+                const closeIx = createCloseAccountInstruction(
+                  accountPubkey,
+                  wallet.kp.publicKey,
+                  wallet.kp.publicKey,
+                  [],
+                  TOKEN_PROGRAM_ID
+                );
+
+                const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+                const tx = new Transaction({
+                  feePayer: wallet.kp.publicKey,
+                  blockhash,
+                  lastValidBlockHeight,
+                }).add(closeIx);
+
+                tx.sign(wallet.kp);
+                const sig = await connection.sendRawTransaction(tx.serialize(), {
+                  skipPreflight: false,
+                  maxRetries: 2,
+                });
+
+                await connection.confirmTransaction({
+                  signature: sig,
+                  blockhash,
+                  lastValidBlockHeight,
+                }, "confirmed");
+
+                console.log(
+                  paint(
+                    `  ${wallet.name}: closed ${tokenSymbol} account (tx: ${sig.substring(0, 8)}...)`,
+                    "success"
+                  )
+                );
+              }
+            } catch (closeErr) {
+              console.warn(
+                paint(
+                  `  ${wallet.name}: failed to burn/close ${tokenSymbol} account: ${closeErr.message}`,
+                  "warn"
+                )
+              );
+            }
+          }
+        }
+      }
     } catch (err) {
-      logDetailedError(`  sweep ${mint} failed`, err);
+      console.error(paint(`  ${wallet.name}: failed to scan token accounts:`, "error"), err.message);
     }
     await balanceRpcDelay();
   }
@@ -6904,6 +7278,7 @@ async function sweepAllTokensToSol() {
   }
 
   const mintSet = new Set();
+  const skippedShareTokens = new Set();
 
   for (const w of wallets) {
     const connection = createRpcConnection("confirmed");
@@ -6913,9 +7288,30 @@ async function sweepAllTokensToSol() {
       const mint = info.mint;
       const amount = BigInt(info.tokenAmount.amount);
       if (amount > 0n && !SOL_LIKE_MINTS.has(mint)) {
+        // Skip Jupiter Lend share tokens (JL-* tokens) - they can't be swapped
+        const tokenRecord = await resolveTokenRecord(mint);
+        if (tokenRecord && isLendShareToken(tokenRecord)) {
+          skippedShareTokens.add(tokenRecord.symbol || mint);
+          continue;
+        }
         mintSet.add(mint);
       }
     }
+  }
+
+  if (skippedShareTokens.size > 0) {
+    console.log(
+      paint(
+        `  Skipped ${skippedShareTokens.size} Jupiter Lend share token(s): ${[...skippedShareTokens].join(", ")}`,
+        "muted"
+      )
+    );
+    console.log(
+      paint(
+        `  Tip: Use 'lend earn withdraw' to redeem share tokens.`,
+        "muted"
+      )
+    );
   }
 
   await sweepTokensToSol([...mintSet], "all tokens");
@@ -7299,47 +7695,68 @@ const CREW1_CYCLE_TOKENS = [
   { mint: PUMP_MINT, symbol: 'PUMP' },
   { mint: PENGU_MINT, symbol: 'PENGU' },
   { mint: FARTCOIN_MINT, symbol: 'FART' },
-  { mint: USELESS_MINT, symbol: 'USELESS' },
   { mint: WIF_MINT, symbol: 'WIF' },
-  { mint: PFP_MINT, symbol: 'PFP' },
+  { mint: URANUS_MINT, symbol: 'URANUS' },
   { mint: WBTC_MINT, symbol: 'wBTC' },
   { mint: CBBTC_MINT, symbol: 'cbBTC' },
   { mint: WETH_MINT, symbol: 'wETH' },
 ];
 
-const LONG_CHAIN_SEGMENTS_BASE = [
-  { name: 'sol-usdc-popcat', mints: [SOL_MINT, DEFAULT_USDC_MINT, POPCAT_MINT, SOL_MINT] },
+// Legacy hardcoded segments - replaced by dynamic token selection from "long-circle" tag
+// Kept for reference but buildDynamicLongCircleSegments() is now used instead
+const LONG_CHAIN_SEGMENTS_BASE_LEGACY = [
+  { name: 'sol-usdc-uranus', mints: [SOL_MINT, DEFAULT_USDC_MINT, URANUS_MINT, SOL_MINT] },
   { name: 'sol-pump', mints: [SOL_MINT, PUMP_MINT, SOL_MINT] },
   { name: 'sol-pengu-fart', mints: [SOL_MINT, PENGU_MINT, FARTCOIN_MINT, SOL_MINT] },
-  { name: 'sol-usdc-useless', mints: [SOL_MINT, DEFAULT_USDC_MINT, USELESS_MINT, SOL_MINT] },
   { name: 'sol-wif', mints: [SOL_MINT, WIF_MINT, SOL_MINT] },
-  { name: 'sol-pfp-loop', mints: [SOL_MINT, DEFAULT_USDC_MINT, PFP_MINT, POPCAT_MINT, PENGU_MINT, DEFAULT_USDC_MINT, SOL_MINT] },
+  { name: 'sol-uranus-loop', mints: [SOL_MINT, DEFAULT_USDC_MINT, URANUS_MINT, POPCAT_MINT, PENGU_MINT, DEFAULT_USDC_MINT, SOL_MINT] },
   { name: 'sol-wbtc', mints: [SOL_MINT, WBTC_MINT, SOL_MINT] },
   { name: 'sol-cbbtc', mints: [SOL_MINT, CBBTC_MINT, SOL_MINT] },
   { name: 'sol-weth', mints: [SOL_MINT, WETH_MINT, SOL_MINT] },
 ];
 
-const SECONDARY_RANDOM_POOL = [
-  DEFAULT_USDC_MINT,
-  POPCAT_MINT,
-  PUMP_MINT,
-  PENGU_MINT,
-  FARTCOIN_MINT,
-  USELESS_MINT,
-  WIF_MINT,
-  PFP_MINT,
-  WBTC_MINT,
-  CBBTC_MINT,
-  WETH_MINT,
-];
+// Build dynamic long-circle segments from tokens tagged "long-circle"
+function buildDynamicLongCircleSegments() {
+  const longCircleTokens = TOKEN_CATALOG.filter(
+    (entry) =>
+      entry &&
+      typeof entry.mint === "string" &&
+      tokenHasTag(entry, "swappable") &&
+      !tokenHasTag(entry, "secondary-terminal") &&
+      !SOL_LIKE_MINTS.has(entry.mint)
+  );
 
-const SECONDARY_TERMINALS = [
-  DEFAULT_USDC_MINT,
-  WBTC_MINT,
-  CBBTC_MINT,
-  WETH_MINT,
-  SOL_MINT,
-];
+  if (longCircleTokens.length === 0) {
+    // Fallback to legacy segments if no tokens tagged
+    return LONG_CHAIN_SEGMENTS_BASE_LEGACY;
+  }
+
+  const segments = [];
+
+  // Generate simple SOL->Token->SOL segments for each token
+  for (const token of longCircleTokens) {
+    segments.push({
+      name: `sol-${token.symbol.toLowerCase()}`,
+      mints: [SOL_MINT, token.mint, SOL_MINT]
+    });
+  }
+
+  // Generate a few multi-hop segments using 2-3 random tokens
+  const minMultiHop = Math.min(3, longCircleTokens.length);
+  for (let i = 0; i < minMultiHop; i++) {
+    const shuffled = shuffleArray([...longCircleTokens], Math.random);
+    const hopCount = Math.min(2 + Math.floor(Math.random() * 2), shuffled.length); // 2-3 hops
+    const mints = [SOL_MINT, ...shuffled.slice(0, hopCount).map(t => t.mint), SOL_MINT];
+    segments.push({
+      name: `sol-multi-${i + 1}`,
+      mints
+    });
+  }
+
+  return segments;
+}
+
+const LONG_CHAIN_SEGMENTS_BASE = buildDynamicLongCircleSegments();
 
 const BUCKSHOT_TOKEN_MINTS = Array.from(
   new Set(
@@ -7521,7 +7938,8 @@ function buildSecondaryPathMints(randomMode, options = {}) {
         (entry) =>
           entry &&
           typeof entry.mint === "string" &&
-          tokenHasTag(entry, "secondary-pool") &&
+          tokenHasTag(entry, "swappable") &&
+          !tokenHasTag(entry, "secondary-terminal") &&
           !SOL_LIKE_MINTS.has(entry.mint)
       ).map((entry) => entry.mint)
     )
@@ -7545,9 +7963,10 @@ function buildSecondaryPathMints(randomMode, options = {}) {
 
     for (let i = 0; i < intermediateCount; i += 1) {
       const entry = sampleMintFromCatalog({
-        requireTags: ["secondary-pool"],
+        requireTags: ["swappable"],
         exclude: resolutionState.used,
         skipSolLike: true,
+        filter: (candidate) => !tokenHasTag(candidate, "secondary-terminal"),
       });
       if (!entry) break;
       path.push(entry.mint);
@@ -7569,10 +7988,11 @@ function buildSecondaryPathMints(randomMode, options = {}) {
         terminalMint = SOL_MINT;
       } else {
         const fallbackTerminal = sampleMintFromCatalog({
-          requireTags: ["secondary-pool"],
+          requireTags: ["swappable"],
           exclude: resolutionState.used,
           skipSolLike: true,
           avoidRecent: false,
+          filter: (candidate) => !tokenHasTag(candidate, "secondary-terminal"),
         });
         terminalMint = fallbackTerminal?.mint || DEFAULT_USDC_MINT;
       }
@@ -7603,7 +8023,8 @@ function buildSecondaryPathMints(randomMode, options = {}) {
   const seenFallback = new Set([SOL_MINT]);
   for (const entry of TOKEN_CATALOG) {
     if (!entry || typeof entry.mint !== "string") continue;
-    if (!tokenHasTag(entry, "secondary-pool")) continue;
+    if (!tokenHasTag(entry, "swappable")) continue;
+    if (tokenHasTag(entry, "secondary-terminal")) continue;
     if (SOL_LIKE_MINTS.has(entry.mint)) continue;
     if (seenFallback.has(entry.mint)) continue;
     seenFallback.add(entry.mint);
@@ -7619,7 +8040,7 @@ async function executeSwapPlanForWallet(wallet, steps, label, options = {}) {
   if (isWalletDisabledByGuard(wallet.name)) {
     console.log(
       paint(
-        `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+        `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
         "muted"
       )
     );
@@ -7730,29 +8151,31 @@ async function executeSwapPlanForWallet(wallet, steps, label, options = {}) {
 // ---- Long circle orchestration (multi-hop randomised swap chains) ----
 // Builds per-wallet plans from the configured segments, honours random mode,
 // and triggers the optional secondary sweep when requested.
-async function runCrew1Cycle() {
-  const wallet = listWallets().find((w) => w.name === 'crew_1.json');
-  if (!wallet) {
-    console.log(paint('crew_1.json not found; cannot run crew1-cycle.', 'warn'));
+async function runWalletIntervalCycle() {
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint('No wallets found; cannot run interval cycle.', 'warn'));
     return;
   }
 
   const SWAP_DELAY_MS = 60_000;
   const LAP_RESTS_MS = [120_000, 180_000];
   const laps = 3;
-  const options = {
-    wallets: [wallet],
-    quietSkips: true,
-    suppressMetadata: false,
-    walletDelayMs: 0,
-  };
 
-  const address = wallet.kp.publicKey.toBase58();
-  console.log(paint(`Crew1 cycle starting for ${wallet.name} (${address})`, 'label'));
+  const walletCount = wallets.length;
+  console.log(paint(`Interval cycle starting for ${walletCount} wallet${walletCount === 1 ? '' : 's'}`, 'label'));
 
   for (let lap = 0; lap < laps; lap += 1) {
     console.log(paint(`
--- crew1 cycle lap ${lap + 1}/${laps} --`, 'label'));
+-- interval cycle lap ${lap + 1}/${laps} --`, 'label'));
+
+    const options = {
+      wallets: wallets,
+      quietSkips: true,
+      suppressMetadata: false,
+      walletDelayMs: 0,
+    };
+
     try {
       await doSwapAcross(SOL_MINT, DEFAULT_USDC_MINT, 'all', options);
     } catch (err) {
@@ -7782,7 +8205,12 @@ async function runCrew1Cycle() {
     }
   }
 
-  console.log(paint('Crew1 cycle completed.', 'success'));
+  console.log(paint('Interval cycle completed.', 'success'));
+}
+
+// Legacy alias for backward compatibility
+async function runCrew1Cycle() {
+  return runWalletIntervalCycle();
 }
 
 async function runLongCircle(options = {}) {
@@ -7832,7 +8260,7 @@ async function runLongCircle(options = {}) {
       }
 
       const finalSteps = flattenSegmentsToSteps(segments, {
-        rng: createDeterministicRng(`${walletSeed}:long-circle:steps-final`),
+        rng: createDeterministicRng(`${wallet.name}:long-circle:steps-final`),
       });
       return {
         wallet,
@@ -7905,7 +8333,7 @@ function buildBuckshotTargets(maxTargets = 12) {
     (entry) =>
       entry &&
       typeof entry.mint === "string" &&
-      tokenHasTag(entry, "crew-cycle") &&
+      tokenHasTag(entry, "swappable") &&
       !SOL_LIKE_MINTS.has(entry.mint)
   );
   const uniqueMints = Array.from(new Set(eligibleEntries.map((entry) => entry.mint)));
@@ -7920,7 +8348,7 @@ function buildBuckshotTargets(maxTargets = 12) {
   while (targets.length < targetCount && attempts < maxAttempts) {
     attempts += 1;
     const entry = sampleMintFromCatalog({
-      requireTags: ["crew-cycle"],
+      requireTags: ["swappable"],
       exclude: used,
       skipSolLike: true,
     });
@@ -7977,7 +8405,7 @@ async function runBuckshot() {
       if (isWalletDisabledByGuard(wallet.name)) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -8136,7 +8564,7 @@ async function runBuckshot() {
       if (isWalletDisabledByGuard(wallet.name)) {
         console.log(
           paint(
-            `Skipping ${wallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${wallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -8234,7 +8662,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
         {
           fromMint: DEFAULT_USDC_MINT,
           toMint: POPCAT_MINT,
-          amount: "random",
+          amount: "all",
           description: "Take a randomized POPCAT entry from USDC",
         },
         {
@@ -8270,6 +8698,130 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
     },
   ],
   [
+    "horizon",
+    {
+      key: "horizon",
+      label: "Horizon",
+      description:
+        "Mid-duration rotation cycling through USDC, URANUS, WIF, and POPCAT with SOL anchors.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: { mode: "range", min: 0.12, max: 0.35 },
+          description: "Establish USDC base from SOL",
+        },
+        {
+          fromMint: DEFAULT_USDC_MINT,
+          toMint: URANUS_MINT,
+          amount: "all",
+          description: "Rotate USDC into URANUS position",
+        },
+        {
+          fromMint: URANUS_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Consolidate URANUS back to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: WIF_MINT,
+          amount: { mode: "range", min: 0.08, max: 0.25 },
+          description: "Deploy SOL into WIF",
+        },
+        {
+          fromMint: WIF_MINT,
+          toMint: POPCAT_MINT,
+          amount: "all",
+          description: "Pivot WIF into POPCAT",
+        },
+        {
+          fromMint: POPCAT_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest POPCAT position to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: null,
+          description: "Rebalance into USDC for next cycle",
+        },
+      ],
+      swapCountRange: { min: 50, max: 300 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 90_000, max: 180_000 },
+      defaultDurationMs: 60 * 60 * 1000,
+    },
+  ],
+  [
+    "echo",
+    {
+      key: "echo",
+      label: "Echo",
+      description:
+        "Extended multi-hour loop alternating between major pairs with deep USDC buffers.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: { mode: "range", min: 0.18, max: 0.42 },
+          description: "Build substantial USDC runway",
+        },
+        {
+          fromMint: DEFAULT_USDC_MINT,
+          toMint: URANUS_MINT,
+          amount: { mode: "range", min: 0.25, max: 0.5 },
+          description: "Take measured URANUS entry from USDC",
+        },
+        {
+          fromMint: URANUS_MINT,
+          toMint: WIF_MINT,
+          amount: "all",
+          description: "Rotate URANUS exposure into WIF",
+        },
+        {
+          fromMint: WIF_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Consolidate WIF back to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: POPCAT_MINT,
+          amount: { mode: "range", min: 0.1, max: 0.3 },
+          description: "Deploy SOL into POPCAT",
+        },
+        {
+          fromMint: POPCAT_MINT,
+          toMint: PUMP_MINT,
+          amount: "all",
+          description: "Pivot POPCAT into PUMP",
+        },
+        {
+          fromMint: PUMP_MINT,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest PUMP position to SOL",
+        },
+        {
+          fromMint: SOL_MINT,
+          toMint: DEFAULT_USDC_MINT,
+          amount: null,
+          description: "Rebuild USDC buffer for continuation",
+        },
+      ],
+      swapCountRange: { min: 250, max: 750 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      waitBoundsMs: { min: 120_000, max: 300_000 },
+      defaultDurationMs: 6 * 60 * 60 * 1000,
+    },
+  ],
+  [
     "icarus",
     {
       key: "icarus",
@@ -8286,7 +8838,8 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           randomization: {
             mode: "sol-to-random",
             sessionGroup: "icarus-core",
-            poolTags: ["fanout", "default-sweep", "long-circle"],
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
             excludeMints: [SOL_MINT],
           },
         },
@@ -8304,7 +8857,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       swapCountRange: { min: 18, max: 120 },
       minimumCycles: 2,
       requireTerminalSolHop: true,
-      waitBoundsMs: { min: 35_000, max: 95_000 },
+      waitBoundsMs: { min: 60_000, max: 180_000 },  // 1-3 minutes between hops for better randomization
       defaultDurationMs: 40 * 60 * 1000,
     },
   ],
@@ -8325,19 +8878,21 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           randomization: {
             mode: "sol-to-random",
             sessionGroup: "zenith-core",
-            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
             excludeMints: [SOL_MINT],
           },
         },
         {
           fromMint: RANDOM_MINT_PLACEHOLDER,
           toMint: RANDOM_MINT_PLACEHOLDER,
-          amount: "random",
+          amount: "all",
           description: "Rotate into another random pool before returning",
           randomization: {
             mode: "session-to-random",
             sessionGroup: "zenith-core",
-            poolTags: ["default-sweep", "long-circle", "secondary-pool"],
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
             excludeMints: [SOL_MINT],
           },
         },
@@ -8355,7 +8910,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       swapCountRange: { min: 24, max: 150 },
       minimumCycles: 2,
       requireTerminalSolHop: true,
-      waitBoundsMs: { min: 45_000, max: 120_000 },
+      waitBoundsMs: { min: 90_000, max: 240_000 },  // 1.5-4 minutes between hops
       defaultDurationMs: 55 * 60 * 1000,
     },
   ],
@@ -8376,7 +8931,8 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           randomization: {
             mode: "sol-to-random",
             sessionGroup: "aurora-core",
-            poolTags: ["fanout", "secondary-pool"],
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
             excludeMints: [SOL_MINT],
           },
         },
@@ -8396,6 +8952,149 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       requireTerminalSolHop: true,
       waitBoundsMs: { min: 60_000, max: 150_000 },
       defaultDurationMs: 70 * 60 * 1000,
+    },
+  ],
+  [
+    "titan",
+    {
+      key: "titan",
+      label: "Titan",
+      description:
+        "High-value version of Icarus with $5 minimum swaps and extended delays for whale positions.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.15, max: 0.4 },
+          description: "Deploy SOL into a random token (whale-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "titan-core",
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest the random position back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "titan-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 18, max: 120 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      defaultDurationMs: 30 * 60 * 1000,
+    },
+  ],
+  [
+    "odyssey",
+    {
+      key: "odyssey",
+      label: "Odyssey",
+      description:
+        "High-value version of Zenith with $5 minimum swaps and extended delays for substantial holdings.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.2, max: 0.45 },
+          description: "Seed a random token from SOL (whale-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "odyssey-core",
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: "all",
+          description: "Rotate into another random pool (full balance)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay while holding token
+          randomization: {
+            mode: "session-to-random",
+            sessionGroup: "odyssey-core",
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Realise the position back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "odyssey-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 30, max: 180 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      defaultDurationMs: 90 * 60 * 1000,
+    },
+  ],
+  [
+    "sovereign",
+    {
+      key: "sovereign",
+      label: "Sovereign",
+      description:
+        "High-value version of Aurora with $5 minimum swaps and extended delays for commanding long-term positions.",
+      startMint: SOL_MINT,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.12, max: 0.35 },
+          description: "Feather SOL into a random token (whale-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "sovereign-core",
+            // Using poolTags to pull ALL swappable tokens from token_catalog.json
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Rebalance back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "sovereign-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 20, max: 150 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      defaultDurationMs: 8 * 60 * 60 * 1000,
     },
   ],
 ]);
@@ -8553,12 +9252,19 @@ function normalizeFlowAmount(amount, options = {}) {
   }
   if (typeof source === "number") {
     if (!Number.isFinite(source)) return null;
-    return source.toString();
+    // Round to 9 decimals max to prevent "too many fractional digits" errors
+    const rounded = Math.floor(source * 1_000_000_000) / 1_000_000_000;
+    return rounded.toString();
   }
   if (typeof source === "object") {
     const mode = typeof source.mode === "string" ? source.mode.toLowerCase() : null;
     if (mode === "all" || mode === "random") return mode;
     if (mode === "explicit" && source.value !== undefined && source.value !== null) {
+      const value = Number(source.value);
+      if (Number.isFinite(value)) {
+        const rounded = Math.floor(value * 1_000_000_000) / 1_000_000_000;
+        return rounded.toString();
+      }
       return source.value.toString();
     }
     if (mode === "range") {
@@ -8568,9 +9274,16 @@ function normalizeFlowAmount(amount, options = {}) {
       const lower = Math.min(min, max);
       const upper = Math.max(min, max);
       const sampled = lower + randomFloat(rng) * (upper - lower);
-      return sampled.toString();
+      // Round to 9 decimals max to prevent "too many fractional digits" errors
+      const rounded = Math.floor(sampled * 1_000_000_000) / 1_000_000_000;
+      return rounded.toString();
     }
     if (source.value !== undefined && source.value !== null) {
+      const value = Number(source.value);
+      if (Number.isFinite(value)) {
+        const rounded = Math.floor(value * 1_000_000_000) / 1_000_000_000;
+        return rounded.toString();
+      }
       return source.value.toString();
     }
   }
@@ -8585,6 +9298,61 @@ function describeFlowAmount(normalizedAmount) {
   return `(amount ${normalizedAmount})`;
 }
 
+// Helper function to resolve mint candidates (missing from imports)
+function resolveMintCandidate(candidate, options = {}) {
+  const fallbackMint = options.fallbackMint || SOL_MINT;
+
+  // If it's already a valid mint address, return it
+  if (typeof candidate === "string" && candidate.length > 32) {
+    return {
+      mint: normaliseSolMint(candidate),
+      resolution: null,
+    };
+  }
+
+  // If it's a symbol, look it up
+  if (typeof candidate === "string") {
+    const entry = tokenBySymbol(candidate);
+    if (entry?.mint) {
+      return {
+        mint: entry.mint,
+        resolution: { symbol: entry.symbol, source: "catalog" },
+      };
+    }
+  }
+
+  // Fall back to default
+  return {
+    mint: fallbackMint,
+    resolution: null,
+  };
+}
+
+// Helper object for mint resolution (missing from code)
+const mintResolver = {
+  resolveMint(candidate, options = {}) {
+    if (!candidate) return null;
+
+    // Handle RANDOM_MINT_PLACEHOLDER
+    if (candidate === RANDOM_MINT_PLACEHOLDER) {
+      return RANDOM_MINT_PLACEHOLDER;
+    }
+
+    // If it's already a valid mint, return it
+    if (typeof candidate === "string" && candidate.length > 32) {
+      return normaliseSolMint(candidate);
+    }
+
+    // If it's a symbol, look it up
+    if (typeof candidate === "string") {
+      const entry = tokenBySymbol(candidate);
+      if (entry?.mint) return entry.mint;
+    }
+
+    return candidate;
+  }
+};
+
 async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
@@ -8595,6 +9363,9 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   }
 
   const flowRandomSessions = new Map();
+
+  // Create per-wallet session maps for independent random token selection
+  const perWalletSessions = new Map();
 
   let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
     ? options.wallets
@@ -8686,11 +9457,11 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   let sampledTarget;
   if (overrideTarget !== null && overrideTarget !== undefined) {
     sampledTarget = Math.max(
-      rangeMin,
-      Math.floor(Number(overrideTarget) || rangeMin)
+      rangeMinBase,
+      Math.floor(Number(overrideTarget) || rangeMinBase)
     );
   } else {
-    sampledTarget = sampleIntegerInRange(rangeMin, rangeMax, flowRng);
+    sampledTarget = sampleIntegerInRange(rangeMinBase, rangeMaxBase, flowRng);
   }
 
   const minimumCycles = Math.max(1, Math.floor(flow.minimumCycles ?? 1));
@@ -8789,12 +9560,15 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   }
 
   const schedule = [];
+  const cycles = executedCycles;
+
   for (let cycleIndex = 0; cycleIndex < cycles; cycleIndex += 1) {
     const sessionGroups = new Map();
-    const limit = Math.min(stepLimit, cycleTemplate.length);
+    const limit = cycleIndex === cycles - 1 && partialCycleHops > 0 ? partialCycleHops : cycleTemplate.length;
     for (let stepIndex = 0; stepIndex < limit; stepIndex += 1) {
       const step = cycleTemplate[stepIndex];
       const fromMint = step.fromMint || currentMint;
+      const resolvedFromMint = mintResolver.resolveMint(fromMint);
       const toMint = step.toMint;
       const resolvedToMint = mintResolver.resolveMint(toMint, {
         exclude: [
@@ -8808,6 +9582,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       }
 
       const amount = cloneFlowAmount(step.amount);
+      const randomResolutions = [];
       let randomization = null;
       if (step.randomization) {
         randomization = { ...step.randomization };
@@ -8870,13 +9645,6 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       currentMint = resolvedToMint;
     }
   };
-
-  for (let cycleIndex = 0; cycleIndex < fullCycles; cycleIndex += 1) {
-    appendCycleSteps(cycleIndex, cycleTemplate.length);
-  }
-  if (partialCycleHops > 0) {
-    appendCycleSteps(fullCycles, partialCycleHops);
-  }
 
   if (flow.requireTerminalSolHop && currentMint !== SOL_MINT) {
     schedule.push({
@@ -8969,52 +9737,194 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     console.log(paint(`Wallet scope: ${walletNames}.`, "muted"));
   }
 
+  // Initialize swap counter for forced SOL returns
+  let swapCounter = 0;
+  let nextSolReturnAt = null;
+  if (flow.forceSolReturnEvery && typeof flow.forceSolReturnEvery === 'object') {
+    const min = Number(flow.forceSolReturnEvery.min) || 4;
+    const max = Number(flow.forceSolReturnEvery.max) || min;
+    nextSolReturnAt = Math.floor(min + flowRng() * (max - min + 1));
+    console.log(paint(`Forced SOL return enabled: every ${nextSolReturnAt} swaps.`, "muted"));
+  }
+
   for (let index = 0; index < schedule.length; index += 1) {
     const step = schedule[index];
     const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
-    let resolvedStep;
-    try {
-      resolvedStep = resolveRandomizedStep(step, flowRng, {
-        sessionState: flowRandomSessions,
-        selectMint: selectMintForFlow,
-      });
-    } catch (err) {
-      console.error(
-        paint(`  Flow hop skipped: ${err?.message || err}`, "warn")
-      );
-      continue;
-    }
-    const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
-    const resolvedToMint = resolvedStep?.outMint ?? step.toMint;
-    const descriptionParts = [
-      hopLabel,
-      `${describeMintLabel(resolvedFromMint)} → ${describeMintLabel(resolvedToMint)}`,
-      amountLabel,
-    ];
-    if (step.description) descriptionParts.push(`— ${step.description}`);
-    console.log(paint(descriptionParts.join(" "), "info"));
 
-    try {
-      await doSwapAcross(resolvedFromMint, resolvedToMint, normalizedAmount, {
-        wallets: walletList,
-        quietSkips: true,
-        suppressMetadata: true,
-        walletDelayMs:
-          step.walletDelayMs ??
-          flow.walletDelayMs ??
-          options.walletDelayMs ??
-          DELAY_BETWEEN_CALLS_MS,
-      });
-      currentMint = resolvedToMint;
-    } catch (err) {
-      console.error(
-        paint(`  Flow hop failed: ${err?.message || err}`, "error")
-      );
+    // Check if this step has randomization that needs per-wallet resolution
+    const hasRandomization = step.randomization && typeof step.randomization === 'object';
+    const needsPerWalletRandomization = hasRandomization &&
+      (step.randomization.mode === 'sol-to-random' ||
+       step.randomization.mode === 'random-to-random' ||
+       step.randomization.mode === 'session-to-random' ||
+       step.randomization.mode === 'session-to-sol');
+
+    if (needsPerWalletRandomization) {
+      // Per-wallet randomization: each wallet picks its own random token
+      const mode = step.randomization.mode;
+      let hopDescription;
+      if (mode === 'sol-to-random' || mode === 'random-to-random' || mode === 'session-to-random') {
+        hopDescription = `${describeMintLabel(step.fromMint)} → <random tokens>`;
+      } else if (mode === 'session-to-sol') {
+        hopDescription = `<random tokens> → ${describeMintLabel(step.toMint)}`;
+      } else {
+        hopDescription = `${describeMintLabel(step.fromMint)} → ${describeMintLabel(step.toMint)}`;
+      }
+      const descriptionParts = [
+        hopLabel,
+        hopDescription,
+        amountLabel,
+      ];
+      if (step.description) descriptionParts.push(`— ${step.description}`);
+      console.log(paint(descriptionParts.join(" "), "info"));
+
+      // Execute wallets sequentially to maintain consistent output and session state
+      for (let walletIdx = 0; walletIdx < walletList.length; walletIdx++) {
+        const wallet = walletList[walletIdx];
+
+        // Get or create per-wallet session map for independent token selection
+        if (!perWalletSessions.has(wallet.name)) {
+          perWalletSessions.set(wallet.name, new Map());
+        }
+        const walletSessionState = perWalletSessions.get(wallet.name);
+
+        // Create a wallet-specific RNG based on wallet index and hop index
+        const walletSeed = (flowRng() * 1000000 + walletIdx * 1000 + index) >>> 0;
+        const walletRng = (() => {
+          let seed = walletSeed;
+          return () => {
+            seed = (seed * 1664525 + 1013904223) >>> 0;
+            return seed / 0x100000000;
+          };
+        })();
+
+        let resolvedStep;
+        try {
+          resolvedStep = resolveRandomizedStep(step, walletRng, {
+            sessionState: walletSessionState,
+            selectMint: selectMintForFlow,
+          });
+        } catch (err) {
+          console.error(
+            paint(`  ${wallet.name}: flow hop skipped: ${err?.message || err}`, "warn")
+          );
+          continue;
+        }
+
+        const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
+        const resolvedToMint = resolvedStep?.outMint ?? step.toMint;
+
+        try {
+          await doSwapAcross(resolvedFromMint, resolvedToMint, normalizedAmount, {
+            wallets: [wallet],
+            quietSkips: false,
+            suppressMetadata: false,
+            walletDelayMs: 0,
+          });
+        } catch (err) {
+          console.error(
+            paint(`  ${wallet.name}: flow hop failed: ${err?.message || err}`, "error")
+          );
+        }
+      }
+      currentMint = step.toMint; // Keep as placeholder since each wallet has different token
+    } else {
+      // Standard non-randomized or session-based randomization: all wallets use same token
+      let resolvedStep;
+      try {
+        resolvedStep = resolveRandomizedStep(step, flowRng, {
+          sessionState: flowRandomSessions,
+          selectMint: selectMintForFlow,
+        });
+      } catch (err) {
+        console.error(
+          paint(`  Flow hop skipped: ${err?.message || err}`, "warn")
+        );
+        continue;
+      }
+      const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
+      const resolvedToMint = resolvedStep?.outMint ?? step.toMint;
+      const descriptionParts = [
+        hopLabel,
+        `${describeMintLabel(resolvedFromMint)} → ${describeMintLabel(resolvedToMint)}`,
+        amountLabel,
+      ];
+      if (step.description) descriptionParts.push(`— ${step.description}`);
+      console.log(paint(descriptionParts.join(" "), "info"));
+
+      try {
+        await doSwapAcross(resolvedFromMint, resolvedToMint, normalizedAmount, {
+          wallets: walletList,
+          quietSkips: true,
+          suppressMetadata: true,
+          walletDelayMs:
+            step.walletDelayMs ??
+            flow.walletDelayMs ??
+            options.walletDelayMs ??
+            DELAY_BETWEEN_CALLS_MS,
+        });
+        currentMint = resolvedToMint;
+      } catch (err) {
+        console.error(
+          paint(`  Flow hop failed: ${err?.message || err}`, "error")
+        );
+      }
     }
 
-    const waitMs = perHopDelays[index] ?? 0;
+    // Increment swap counter and check for forced SOL return
+    if (nextSolReturnAt !== null) {
+      swapCounter++;
+
+      // Check if we should force return to SOL
+      if (swapCounter >= nextSolReturnAt && currentMint !== SOL_MINT) {
+        console.log(
+          paint(
+            `  → Forced SOL return triggered (swap ${swapCounter}/${nextSolReturnAt})`,
+            "info"
+          )
+        );
+
+        try {
+          await doSwapAcross(currentMint, SOL_MINT, "all", {
+            wallets: walletList,
+            quietSkips: true,
+            suppressMetadata: true,
+            walletDelayMs: DELAY_BETWEEN_CALLS_MS,
+          });
+          currentMint = SOL_MINT;
+          console.log(paint(`  ✓ Forced SOL return complete`, "success"));
+        } catch (err) {
+          console.error(
+            paint(`  ✗ Forced SOL return failed: ${err?.message || err}`, "error")
+          );
+        }
+
+        // Reset counter and pick new threshold
+        swapCounter = 0;
+        const min = Number(flow.forceSolReturnEvery.min) || 4;
+        const max = Number(flow.forceSolReturnEvery.max) || min;
+        nextSolReturnAt = Math.floor(min + flowRng() * (max - min + 1));
+        console.log(
+          paint(
+            `  → Next forced SOL return in ${nextSolReturnAt} swaps`,
+            "muted"
+          )
+        );
+      }
+    }
+
+    // Use step-specific delay if defined, otherwise use allocated delay
+    let waitMs = perHopDelays[index] ?? 0;
+
+    // Check if this step has a custom delayAfterMs setting
+    if (step.delayAfterMs && typeof step.delayAfterMs === 'object') {
+      const minDelay = Number(step.delayAfterMs.min) || 0;
+      const maxDelay = Number(step.delayAfterMs.max) || minDelay;
+      waitMs = Math.floor(minDelay + flowRng() * (maxDelay - minDelay));
+    }
+
     if (waitMs > 0) {
       console.log(
         paint(
@@ -9279,11 +10189,13 @@ async function closeEmptyTokenAccounts() {
     return;
   }
 
+  const MAX_CLOSE_ACCOUNTS_PER_TX = 12;
+
   for (const w of wallets) {
     const lookupConnection = createRpcConnection("confirmed");
     const parsed = await getAllParsedTokenAccounts(lookupConnection, w.kp.publicKey);
 
-    let closedCount = 0;
+    const closable = [];
     for (const { pubkey, account } of parsed) {
       const info = account.data.parsed.info;
       const amount = BigInt(info.tokenAmount.amount);
@@ -9333,43 +10245,111 @@ async function closeEmptyTokenAccounts() {
         }
       }
 
-      try {
-        const closeConnection = createRpcConnection("confirmed");
-        const sig = await closeAccount(
-          closeConnection,
-          w.kp,
-          pubkey,
-          w.kp.publicKey,
-          w.kp,
-          [],
-          undefined,
-          programId
+      const symbol = symbolForMint(info.mint);
+      closable.push({
+        accountPubkey: pubkey,
+        programId,
+        mint: info.mint,
+        symbol,
+      });
+    }
+
+    if (closable.length === 0) {
+      console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
+      continue;
+    }
+
+    const closeConnection = createRpcConnection("confirmed");
+    let closedCount = 0;
+
+    const chunkLabels = (chunk) =>
+      chunk
+        .map((entry) => {
+          const base = entry.symbol || symbolForMint(entry.mint) || entry.mint.slice(0, 4);
+          const suffix = entry.accountPubkey.toBase58().slice(-6);
+          return `${base}:${suffix}`;
+        })
+        .join(", ");
+
+    for (let i = 0; i < closable.length; i += MAX_CLOSE_ACCOUNTS_PER_TX) {
+      const chunk = closable.slice(i, i + MAX_CLOSE_ACCOUNTS_PER_TX);
+      const tx = new Transaction();
+      for (const entry of chunk) {
+        tx.add(
+          createCloseAccountInstruction(
+            entry.accountPubkey,
+            w.kp.publicKey,
+            w.kp.publicKey,
+            [],
+            entry.programId
+          )
         );
+      }
+      tx.feePayer = w.kp.publicKey;
+
+      try {
+        const { blockhash, lastValidBlockHeight } = await closeConnection.getLatestBlockhash("confirmed");
+        tx.recentBlockhash = blockhash;
+        tx.sign(w.kp);
+        const raw = tx.serialize();
+        const signature = await closeConnection.sendRawTransaction(raw);
+        await closeConnection.confirmTransaction(
+          { signature, blockhash, lastValidBlockHeight },
+          "confirmed"
+        );
+        closedCount += chunk.length;
         console.log(
           paint(
-            `Closed token account ${pubkey.toBase58()} — tx ${sig}`,
+            `Closed ${chunk.length} account(s) for ${w.name}: ${chunkLabels(chunk)} — tx ${signature}`,
             "success"
           )
         );
-        closedCount += 1;
-      } catch (err) {
-        logDetailedError(`  close ${pubkey.toBase58()} failed`, err);
+      } catch (bundleErr) {
+        console.warn(
+          paint(
+            `  bundle close failed (${bundleErr.message || bundleErr}); retrying individually.`,
+            "warn"
+          )
+        );
+        for (const entry of chunk) {
+          try {
+            const signature = await closeAccount(
+              closeConnection,
+              w.kp,
+              entry.accountPubkey,
+              w.kp.publicKey,
+              w.kp,
+              [],
+              undefined,
+              entry.programId
+            );
+            closedCount += 1;
+            console.log(
+              paint(
+                `  Closed token account ${entry.accountPubkey.toBase58()} (${entry.symbol || symbolForMint(entry.mint)}) — tx ${signature}`,
+                "success"
+              )
+            );
+          } catch (err) {
+            logDetailedError(`  close ${entry.accountPubkey.toBase58()} failed`, err);
+          }
+        }
       }
     }
 
     if (closedCount === 0) {
       console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
+      continue;
     }
-    if (closedCount > 0) {
-      const balanceConnection = createRpcConnection("confirmed");
-      const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
-      console.log(
-        paint(
-          `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
-          "muted"
-        )
-      );
-    }
+
+    const balanceConnection = createRpcConnection("confirmed");
+    const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
+    console.log(
+      paint(
+        `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
+        "muted"
+      )
+    );
   }
 }
 
@@ -9840,10 +10820,13 @@ function extractUltraOutAmount(response) {
 
 function extractUltraClientOrderId(response) {
   const id = findInObject(response, [
+    "requestId",
     "clientOrderId",
     "orderId",
     "id",
+    "data.requestId",
     "data.clientOrderId",
+    "result.requestId",
     "result.clientOrderId",
   ]);
   return typeof id === "string" && id.length > 0 ? id : null;
@@ -9978,19 +10961,24 @@ async function createUltraOrder({
   slippageBps = SLIPPAGE_BPS,
   wrapAndUnwrapSol = true,
 }) {
-  const payload = {
+  // Official Ultra API uses GET with query parameters
+  const queryParams = {
     inputMint,
     outputMint,
     amount: amountLamports.toString(),
-    slippageBps,
-    userPublicKey,
-    wrapAndUnwrapSol,
-    swapMode: "ExactIn",
+    taker: userPublicKey,
+    restrictIntermediateTokens: "true",
   };
+
+  // Add optional parameters if needed
+  if (slippageBps && slippageBps !== SLIPPAGE_BPS) {
+    queryParams.slippageBps = slippageBps;
+  }
+
   const result = await ultraApiRequest({
     path: "order",
-    method: "POST",
-    body: payload,
+    method: "GET",
+    query: queryParams,
   });
   if (!result.ok) {
     const message =
@@ -10023,18 +11011,20 @@ async function executeUltraSwap({
   signatureHint,
   extraHeaders,
 }) {
+  // Official Ultra API execute endpoint expects: signedTransaction and requestId
   const body = {
-    transaction: signedTransaction,
-    swapTransaction: signedTransaction,
+    signedTransaction: signedTransaction,
   };
+  // requestId is the clientOrderId from the order response
+  if (clientOrderId) {
+    body.requestId = clientOrderId;
+  }
+  // Optional signature hint (not required by API but may help with tracking)
   if (Array.isArray(signatureHint) && signatureHint.length > 0) {
     body.signatures = signatureHint;
   } else if (typeof signatureHint === "string" && signatureHint.length > 0) {
     body.signature = signatureHint;
     body.signatures = [signatureHint];
-  }
-  if (clientOrderId) {
-    body.clientOrderId = clientOrderId;
   }
   const result = await ultraApiRequest({
     path: "execute",
@@ -10338,7 +11328,7 @@ async function testJupiterUltraOrder({
   if (isWalletDisabledByGuard(wallet.name)) {
     console.warn(
       paint(
-        `  Warning: wallet guard disabled ${wallet.name}. Ensure it has at least 0.01 SOL before submitting.`,
+        `  Warning: wallet guard disabled ${wallet.name}. Ensure it has at least ${WALLET_DISABLE_THRESHOLD_LABEL} SOL before submitting.`,
         "warn"
       )
     );
@@ -10745,7 +11735,7 @@ async function listWalletAddresses() {
 async function handleWalletWrap(args) {
   const walletName = args[0];
   const usage =
-    "wallet wrap usage: wallet wrap <walletName> [amount|all] [--raw]";
+    "wallet wrap usage: wallet wrap <wallet #|filename> [amount|all] [--raw]";
   if (!walletName) {
     console.log(usage);
     return;
@@ -10839,7 +11829,7 @@ async function handleWalletWrap(args) {
 async function handleWalletUnwrap(args) {
   const walletName = args[0];
   const usage =
-    "wallet unwrap usage: wallet unwrap <walletName> [amount|all] [--raw]";
+    "wallet unwrap usage: wallet unwrap <wallet #|filename> [amount|all] [--raw]";
   if (!walletName) {
     console.log(usage);
     return;
@@ -10998,12 +11988,13 @@ async function handleWalletCommand(args) {
   const subcommandRaw = args[0];
   if (!subcommandRaw) {
     console.log(
-      "wallet usage: wallet <wrap|unwrap> <walletName> [amount|all] [--raw]"
+      "wallet usage: wallet <wrap|unwrap|list|info|sync|groups|transfer> [args...]"
     );
     return;
   }
   const subcommand = subcommandRaw.toLowerCase();
   const rest = args.slice(1);
+
   if (subcommand === "wrap") {
     await handleWalletWrap(rest);
     return;
@@ -11012,9 +12003,316 @@ async function handleWalletCommand(args) {
     await handleWalletUnwrap(rest);
     return;
   }
+  if (subcommand === "list") {
+    await walletListCommand();
+    return;
+  }
+  if (subcommand === "info") {
+    await walletInfoCommand(rest);
+    return;
+  }
+  if (subcommand === "sync") {
+    await walletSyncCommand();
+    return;
+  }
+  if (subcommand === "groups") {
+    await walletGroupsCommand();
+    return;
+  }
+  if (subcommand === "transfer") {
+    await walletTransferCommand(rest);
+    return;
+  }
+
   throw new Error(
-    `Unknown wallet subcommand '${subcommandRaw}'. Expected 'wrap' or 'unwrap'.`
+    `Unknown wallet subcommand '${subcommandRaw}'. Expected 'wrap', 'unwrap', 'list', 'info', 'sync', 'groups', or 'transfer'.`
   );
+}
+
+async function handleUnwrapWsolMenu() {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const prompt = (question) =>
+    new Promise((resolve) => rl.question(question, resolve));
+
+  console.log(paint("\n=== Unwrap wSOL → SOL ===", "label"));
+
+  const wallets = listWallets();
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    rl.close();
+    return;
+  }
+
+  // Show wallets with wSOL balances
+  const connection = createRpcConnection("confirmed");
+  const walletsWithWsol = [];
+
+  for (const w of wallets) {
+    try {
+      const balances = await getSolAndWrappedSolBalances(connection, w);
+      if (balances.wsolLamports > 0n) {
+        walletsWithWsol.push({
+          wallet: w,
+          wsolAmount: formatBaseUnits(balances.wsolLamports, 9),
+        });
+      }
+    } catch (err) {
+      // Skip wallets with errors
+    }
+  }
+
+  if (walletsWithWsol.length === 0) {
+    console.log(paint("No wallets have wrapped SOL to unwrap.", "muted"));
+    rl.close();
+    return;
+  }
+
+  console.log(paint("\nWallets with wSOL:", "info"));
+  for (let i = 0; i < walletsWithWsol.length; i++) {
+    const { wallet, wsolAmount } = walletsWithWsol[i];
+    console.log(paint(`  ${i + 1}. ${wallet.name} (${wsolAmount} wSOL)`, "muted"));
+  }
+
+  const walletInput = (await prompt("\nWallet name or number (or 'all'): "))?.trim();
+  rl.close();
+
+  if (!walletInput) {
+    console.log(paint("Cancelled.", "muted"));
+    return;
+  }
+
+  if (walletInput.toLowerCase() === "all") {
+    // Unwrap all wallets
+    console.log(paint(`\nUnwrapping wSOL from ${walletsWithWsol.length} wallet(s)...`, "info"));
+    for (const { wallet } of walletsWithWsol) {
+      try {
+        await handleWalletUnwrap([wallet.name, "all"]);
+      } catch (err) {
+        console.error(paint(`  Failed to unwrap ${wallet.name}:`, "error"), err.message);
+      }
+    }
+  } else {
+    // Single wallet
+    const walletNumber = parseInt(walletInput, 10);
+    let targetWallet;
+
+    if (!isNaN(walletNumber) && walletNumber >= 1 && walletNumber <= walletsWithWsol.length) {
+      targetWallet = walletsWithWsol[walletNumber - 1].wallet.name;
+    } else {
+      targetWallet = walletInput;
+    }
+
+    try {
+      await handleWalletUnwrap([targetWallet, "all"]);
+    } catch (err) {
+      console.error(paint(`  Failed to unwrap ${targetWallet}:`, "error"), err.message);
+    }
+  }
+
+  console.log(paint("\nPress Enter to continue...", "muted"));
+}
+
+/* --- Wallet Registry Command Implementations --- */
+
+async function walletListCommand() {
+  const wallets = listWallets();
+
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    return;
+  }
+
+  console.log(paint("\n=== Wallet Registry ===", "label"));
+  console.log(paint(`Total: ${wallets.length} wallets\n`, "info"));
+
+  // Get balances for all wallets
+  const connection = createRpcConnection("confirmed");
+  const walletsWithBalance = [];
+
+  for (const w of wallets) {
+    try {
+      const balance = await getSolBalance(connection, w.kp.publicKey);
+      walletsWithBalance.push({
+        ...w,
+        balance: BigInt(balance)
+      });
+    } catch (err) {
+      walletsWithBalance.push({
+        ...w,
+        balance: 0n
+      });
+    }
+  }
+
+  // Print table header
+  console.log(
+    paint(
+      `${"#".padEnd(4)} ${"Filename".padEnd(20)} ${"Role".padEnd(15)} ${"Master".padEnd(8)} ${"Group".padEnd(7)} ${"SOL Balance".padEnd(15)} ${"Status"}`,
+      "label"
+    )
+  );
+  console.log(paint("-".repeat(90), "muted"));
+
+  // Print each wallet
+  for (const w of walletsWithBalance) {
+    const num = w.number ? `#${w.number}` : "-";
+    const filename = w.name || "-";
+    const role = w.role || "unknown";
+    const master = w.master ? `#${w.master}` : "-";
+    const group = w.group ? `${w.group}` : "-";
+    const balance = formatBaseUnits(w.balance, 9);
+    const status = w.balance < BigInt(GAS_RESERVE_LAMPORTS) ? paint("low", "warn") : paint("ok", "success");
+
+    const roleColor = role === "master-master" ? "label" : role === "master" ? "info" : "muted";
+
+    console.log(
+      `${num.padEnd(4)} ${filename.padEnd(20)} ${paint(role.padEnd(15), roleColor)} ${master.padEnd(8)} ${group.padEnd(7)} ${balance.padEnd(15)} ${status}`
+    );
+  }
+
+  console.log("");
+}
+
+async function walletInfoCommand(args) {
+  const wallets = listWallets();
+
+  if (args.length === 0) {
+    console.error(paint("Usage: wallet info <number|filename>", "error"));
+    return;
+  }
+
+  const identifier = args[0];
+  let wallet;
+
+  // Try to parse as number
+  const num = parseInt(identifier, 10);
+  if (!isNaN(num)) {
+    wallet = wallets.find(w => w.number === num);
+  } else {
+    wallet = wallets.find(w => w.name === identifier);
+  }
+
+  if (!wallet) {
+    console.error(paint(`Wallet '${identifier}' not found`, "error"));
+    return;
+  }
+
+  console.log(paint("\n=== Wallet Info ===", "label"));
+  console.log(paint(`Number:      `, "muted") + paint(`#${wallet.number}`, "info"));
+  console.log(paint(`Filename:    `, "muted") + wallet.name);
+  console.log(paint(`Role:        `, "muted") + paint(wallet.role, wallet.role === "master-master" ? "label" : "info"));
+  console.log(paint(`Group:       `, "muted") + wallet.group);
+  console.log(paint(`Master:      `, "muted") + (wallet.master ? `#${wallet.master}` : "none (this is master-master)"));
+  console.log(paint(`Public Key:  `, "muted") + wallet.kp.publicKey.toBase58());
+
+  // Get balance
+  try {
+    const connection = createRpcConnection("confirmed");
+    const balance = await getSolBalance(connection, wallet.kp.publicKey);
+    console.log(paint(`SOL Balance: `, "muted") + formatBaseUnits(BigInt(balance), 9) + " SOL");
+  } catch (err) {
+    console.log(paint(`SOL Balance: `, "muted") + paint("Error fetching balance", "error"));
+  }
+
+  // Show slaves if this is a master
+  if (wallet.role === "master" || wallet.role === "master-master") {
+    const slaves = walletRegistry.getSlaves(wallet.number);
+    if (slaves.length > 0) {
+      console.log(paint(`\nSlaves (${slaves.length}):`, "info"));
+      for (const slave of slaves) {
+        console.log(paint(`  #${slave.number}`, "muted") + ` (${slave.filename})`);
+      }
+    } else {
+      console.log(paint(`\nSlaves: `, "muted") + "none");
+    }
+  }
+
+  console.log("");
+}
+
+async function walletSyncCommand() {
+  const wallets = listWallets();
+
+  console.log(paint("Syncing wallet registry from filesystem...", "info"));
+  const manifest = walletRegistry.syncWalletsFromFilesystem(wallets);
+
+  console.log(paint(`✓ Synced ${manifest.wallets.length} wallets`, "success"));
+  console.log(paint(`Manifest saved to: ${walletRegistry.MANIFEST_PATH}`, "muted"));
+}
+
+async function walletGroupsCommand() {
+  const wallets = listWallets();
+
+  if (wallets.length === 0) {
+    console.log(paint("No wallets found.", "muted"));
+    return;
+  }
+
+  const hierarchy = walletRegistry.getHierarchySummary();
+  const balanceConnection = createRpcConnection("confirmed");
+
+  console.log(paint("\n=== Wallet Groups ===", "label"));
+  console.log(paint(`Total: ${hierarchy.totalWallets} wallets in ${hierarchy.totalGroups} groups\n`, "info"));
+
+  for (const group of hierarchy.groups) {
+    if (!group.master) {
+      console.log(paint(`Group ${group.groupNumber}: No master assigned`, "warn"));
+      continue;
+    }
+
+    const masterWallet = wallets.find(w => w.number === group.master.number);
+    const masterBalance = masterWallet
+      ? formatBaseUnits(BigInt(await getSolBalance(balanceConnection, masterWallet.kp.publicKey)), 9)
+      : "?";
+
+    console.log(
+      paint(
+        `Group ${group.groupNumber}: `,
+        "label"
+      ) +
+      paint(
+        `Master #${group.master.number} (${group.master.filename})`,
+        group.master.role === "master-master" ? "label" : "info"
+      ) +
+      paint(` - ${masterBalance} SOL`, "muted")
+    );
+
+    if (group.slaves.length > 0) {
+      for (const slave of group.slaves) {
+        const slaveWallet = wallets.find(w => w.number === slave.number);
+        const slaveBalance = slaveWallet
+          ? formatBaseUnits(BigInt(await getSolBalance(balanceConnection, slaveWallet.kp.publicKey)), 9)
+          : "?";
+
+        console.log(
+          paint(`  └─ #${slave.number} `, "muted") +
+          `(${slave.filename})` +
+          paint(` - ${slaveBalance} SOL`, "muted")
+        );
+      }
+    } else {
+      console.log(paint(`  (no slaves)`, "muted"));
+    }
+    console.log("");
+  }
+}
+
+async function walletTransferCommand(args) {
+  if (args.length < 3) {
+    console.error(paint("Usage: wallet transfer <from> <to> <amount> [token]", "error"));
+    console.log(paint("Examples:", "muted"));
+    console.log(paint("  wallet transfer 1 6 0.5", "muted"));
+    console.log(paint("  wallet transfer crew_1.json crew_6.json 1.0 SOL", "muted"));
+    console.log(paint("  wallet transfer 2 5 all", "muted"));
+    return;
+  }
+
+  const [from, to, amount, token = 'SOL'] = args;
+  await transferBetweenWallets(from, to, amount, token);
 }
 
 // fund all wallets from one source - same lamportsEach to each wallet
@@ -11292,8 +12590,12 @@ async function aggregateSol(targetWalletName) {
     console.error(paint("No wallets found in keypairs folder.", "error"));
     return;
   }
-  const targetIndex = wallets.findIndex((w) => w.name === targetWalletName);
-  if (targetIndex === -1) {
+
+  let targetIndex = -1;
+  try {
+    const targetWallet = findWalletByName(targetWalletName);
+    targetIndex = wallets.findIndex((w) => w.kp.publicKey.equals(targetWallet.kp.publicKey));
+  } catch (err) {
     console.error(paint("Target wallet not found:", "error"), targetWalletName);
     return;
   }
@@ -11367,6 +12669,303 @@ async function aggregateSol(targetWalletName) {
       "label"
     )
   );
+}
+
+/* --- Hierarchical Wallet Aggregation --- */
+
+// aggregate SOL hierarchically: slaves send to their masters
+async function aggregateHierarchical() {
+  const wallets = listWallets();
+
+  if (wallets.length === 0) {
+    console.error(paint("No wallets found in keypairs folder.", "error"));
+    return;
+  }
+
+  const hierarchy = walletRegistry.getHierarchySummary();
+  console.log(
+    paint(
+      `Hierarchical aggregation: ${hierarchy.totalWallets} wallets in ${hierarchy.totalGroups} groups`,
+      "label"
+    )
+  );
+
+  let totalTransfers = 0;
+  let totalAmount = 0n;
+
+  // Process each group
+  for (const group of hierarchy.groups) {
+    if (!group.master || group.slaves.length === 0) {
+      console.log(paint(`Group ${group.groupNumber}: No slaves to aggregate`, "muted"));
+      continue;
+    }
+
+    const masterWallet = wallets.find(w => w.number === group.master.number);
+    if (!masterWallet) {
+      console.error(paint(`Master wallet #${group.master.number} not found`, "error"));
+      continue;
+    }
+
+    console.log(
+      paint(
+        `\nGroup ${group.groupNumber}: Aggregating ${group.slaves.length} slaves → master #${group.master.number} (${group.master.filename})`,
+        "info"
+      )
+    );
+
+    // Transfer from each slave to master
+    for (const slave of group.slaves) {
+      const slaveWallet = wallets.find(w => w.number === slave.number);
+      if (!slaveWallet) {
+        console.error(paint(`  Slave wallet #${slave.number} not found`, "error"));
+        continue;
+      }
+
+      const connection = createRpcConnection("confirmed");
+      const balance = BigInt(await getSolBalance(connection, slaveWallet.kp.publicKey));
+
+      if (balance === 0n) {
+        console.log(paint(`  #${slave.number} (${slave.filename}): balance is zero`, "muted"));
+        continue;
+      }
+
+      // Calculate reserve and transferable amount
+      let reserve = balance > GAS_RESERVE_LAMPORTS
+        ? GAS_RESERVE_LAMPORTS
+        : balance / 10n;
+      if (reserve < MIN_TRANSFER_LAMPORTS && balance > MIN_TRANSFER_LAMPORTS) {
+        reserve = MIN_TRANSFER_LAMPORTS;
+      }
+      const transferable = balance > reserve ? balance - reserve : 0n;
+
+      if (transferable === 0n || transferable < MIN_TRANSFER_LAMPORTS) {
+        console.log(
+          paint(
+            `  #${slave.number} (${slave.filename}): transferable ${formatBaseUnits(transferable, 9)} SOL below minimum`,
+            "muted"
+          )
+        );
+        continue;
+      }
+
+      try {
+        const lamports = toSafeNumber(transferable);
+        const sig = await sendSolTransfer(
+          connection,
+          slaveWallet.kp,
+          masterWallet.kp.publicKey,
+          lamports
+        );
+        console.log(
+          paint(
+            `  ✓ #${slave.number} → #${group.master.number}: ${formatBaseUnits(transferable, 9)} SOL (tx: ${sig.slice(0, 8)}...)`,
+            "success"
+          )
+        );
+        totalTransfers++;
+        totalAmount += transferable;
+      } catch (err) {
+        console.error(paint(`  ✗ Failed to transfer from #${slave.number}: ${err.message}`, "error"));
+      }
+
+      await delay(DELAY_BETWEEN_CALLS_MS);
+    }
+  }
+
+  console.log(
+    paint(
+      `\nHierarchical aggregation complete: ${totalTransfers} transfers, ${formatBaseUnits(totalAmount, 9)} SOL total`,
+      "label"
+    )
+  );
+}
+
+// aggregate masters to master-master (#1)
+async function aggregateMasters() {
+  const wallets = listWallets();
+
+  if (wallets.length === 0) {
+    console.error(paint("No wallets found in keypairs folder.", "error"));
+    return;
+  }
+
+  const masterMaster = wallets.find(w => w.number === 1);
+  if (!masterMaster) {
+    console.error(paint("Master-master wallet #1 not found", "error"));
+    return;
+  }
+
+  const groupMasters = walletRegistry.getGroupMasters();
+  if (groupMasters.length === 0) {
+    console.log(paint("No group masters to aggregate", "muted"));
+    return;
+  }
+
+  console.log(
+    paint(
+      `Aggregating ${groupMasters.length} group masters → master-master #1 (${masterMaster.name})`,
+      "label"
+    )
+  );
+
+  let totalTransfers = 0;
+  let totalAmount = 0n;
+
+  for (const masterNum of groupMasters) {
+    const masterWallet = wallets.find(w => w.number === masterNum);
+    if (!masterWallet) {
+      console.error(paint(`Master wallet #${masterNum} not found`, "error"));
+      continue;
+    }
+
+    const connection = createRpcConnection("confirmed");
+    const balance = BigInt(await getSolBalance(connection, masterWallet.kp.publicKey));
+
+    if (balance === 0n) {
+      console.log(paint(`  #${masterNum} (${masterWallet.name}): balance is zero`, "muted"));
+      continue;
+    }
+
+    // Calculate reserve and transferable amount
+    let reserve = balance > GAS_RESERVE_LAMPORTS
+      ? GAS_RESERVE_LAMPORTS
+      : balance / 10n;
+    if (reserve < MIN_TRANSFER_LAMPORTS && balance > MIN_TRANSFER_LAMPORTS) {
+      reserve = MIN_TRANSFER_LAMPORTS;
+    }
+    const transferable = balance > reserve ? balance - reserve : 0n;
+
+    if (transferable === 0n || transferable < MIN_TRANSFER_LAMPORTS) {
+      console.log(
+        paint(
+          `  #${masterNum} (${masterWallet.name}): transferable ${formatBaseUnits(transferable, 9)} SOL below minimum`,
+          "muted"
+        )
+      );
+      continue;
+    }
+
+    try {
+      const lamports = toSafeNumber(transferable);
+      const sig = await sendSolTransfer(
+        connection,
+        masterWallet.kp,
+        masterMaster.kp.publicKey,
+        lamports
+      );
+      console.log(
+        paint(
+          `  ✓ #${masterNum} → #1: ${formatBaseUnits(transferable, 9)} SOL (tx: ${sig.slice(0, 8)}...)`,
+          "success"
+        )
+      );
+      totalTransfers++;
+      totalAmount += transferable;
+    } catch (err) {
+      console.error(paint(`  ✗ Failed to transfer from #${masterNum}: ${err.message}`, "error"));
+    }
+
+    await delay(DELAY_BETWEEN_CALLS_MS);
+  }
+
+  const finalConnection = createRpcConnection("confirmed");
+  const finalBalance = BigInt(await getSolBalance(finalConnection, masterMaster.kp.publicKey));
+  console.log(
+    paint(
+      `\nMaster aggregation complete: ${totalTransfers} transfers, ${formatBaseUnits(totalAmount, 9)} SOL total`,
+      "label"
+    )
+  );
+  console.log(
+    paint(
+      `Master-master #1 (${masterMaster.name}) now holds ${formatBaseUnits(finalBalance, 9)} SOL`,
+      "success"
+    )
+  );
+}
+
+// direct transfer between wallets by number
+async function transferBetweenWallets(fromIdentifier, toIdentifier, amount, token = 'SOL') {
+  const wallets = listWallets();
+
+  // Resolve from wallet
+  let fromWallet;
+  if (typeof fromIdentifier === 'number' || !isNaN(parseInt(fromIdentifier))) {
+    const num = typeof fromIdentifier === 'number' ? fromIdentifier : parseInt(fromIdentifier);
+    fromWallet = wallets.find(w => w.number === num);
+    if (!fromWallet) {
+      console.error(paint(`Source wallet #${num} not found`, "error"));
+      return;
+    }
+  } else {
+    fromWallet = wallets.find(w => w.name === fromIdentifier);
+    if (!fromWallet) {
+      console.error(paint(`Source wallet '${fromIdentifier}' not found`, "error"));
+      return;
+    }
+  }
+
+  // Resolve to wallet
+  let toWallet;
+  if (typeof toIdentifier === 'number' || !isNaN(parseInt(toIdentifier))) {
+    const num = typeof toIdentifier === 'number' ? toIdentifier : parseInt(toIdentifier);
+    toWallet = wallets.find(w => w.number === num);
+    if (!toWallet) {
+      console.error(paint(`Destination wallet #${num} not found`, "error"));
+      return;
+    }
+  } else {
+    toWallet = wallets.find(w => w.name === toIdentifier);
+    if (!toWallet) {
+      console.error(paint(`Destination wallet '${toIdentifier}' not found`, "error"));
+      return;
+    }
+  }
+
+  if (fromWallet.kp.publicKey.equals(toWallet.kp.publicKey)) {
+    console.error(paint("Source and destination wallets are the same", "error"));
+    return;
+  }
+
+  const connection = createRpcConnection("confirmed");
+
+  if (token.toUpperCase() === 'SOL') {
+    // Parse amount
+    let lamports;
+    if (amount === 'all') {
+      const balance = BigInt(await getSolBalance(connection, fromWallet.kp.publicKey));
+      const reserve = balance > GAS_RESERVE_LAMPORTS ? GAS_RESERVE_LAMPORTS : balance / 10n;
+      lamports = toSafeNumber(balance > reserve ? balance - reserve : 0n);
+    } else {
+      lamports = Math.floor(parseFloat(amount) * 1e9);
+    }
+
+    if (lamports <= 0) {
+      console.error(paint("Invalid transfer amount", "error"));
+      return;
+    }
+
+    console.log(
+      paint(
+        `Transferring ${formatBaseUnits(BigInt(lamports), 9)} SOL: #${fromWallet.number} (${fromWallet.name}) → #${toWallet.number} (${toWallet.name})`,
+        "info"
+      )
+    );
+
+    try {
+      const sig = await sendSolTransfer(
+        connection,
+        fromWallet.kp,
+        toWallet.kp.publicKey,
+        lamports
+      );
+      console.log(paint(`✓ Transfer successful (tx: ${sig})`, "success"));
+    } catch (err) {
+      console.error(paint(`✗ Transfer failed: ${err.message}`, "error"));
+    }
+  } else {
+    console.error(paint("Token transfers not yet implemented. Only SOL is supported.", "error"));
+  }
 }
 
 // airdrop single wallet (devnet)
@@ -11537,7 +13136,7 @@ async function showBalances(tokenArgs = []) {
     if (isWalletDisabledByGuard(w.name)) {
       console.log(
         paint(
-          "  status: disabled for swaps (<0.01 SOL). Fund and run balances or use force reset to re-enable.",
+          `  status: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL). Fund and run balances or use force reset to re-enable.`,
           "warn"
         )
       );
@@ -11631,6 +13230,58 @@ function parseImportWalletArgs(rawArgs) {
   return opts;
 }
 
+// ---- Auto-withdraw lend share tokens helper ----
+// Detects if a token is a lend share token (jwSOL, etc.) and automatically
+// withdraws it to the base asset before attempting swaps
+async function autoWithdrawLendShareTokensForWallet(wallet, mint) {
+  try {
+    // Check if the mint is a lend share token by loading its metadata
+    const tokenRecord = await resolveTokenRecord(mint);
+    if (!tokenRecord) {
+      return { withdrawn: false, reason: "token not found" };
+    }
+
+    if (!isLendShareToken(tokenRecord)) {
+      return { withdrawn: false, reason: "not a share token" };
+    }
+
+    const symbol = tokenRecord.symbol || "unknown";
+    console.log(
+      paint(
+        `  ${wallet.name}: detected lend share token ${symbol} (${mint}), attempting auto-withdrawal...`,
+        "info"
+      )
+    );
+
+    // Use the existing lendEarnTransferLike infrastructure to withdraw
+    // We need to construct the args as if it were called from CLI
+    const args = [wallet.name, mint, "*"];
+    const options = { raw: false };
+
+    try {
+      // Call the withdraw action directly via lendEarnTransferLike
+      await lendEarnTransferLike("withdraw", args, { valueField: "amount" });
+      console.log(
+        paint(
+          `  ${wallet.name}: successfully withdrew ${symbol} from lend`,
+          "success"
+        )
+      );
+      return { withdrawn: true, symbol };
+    } catch (withdrawErr) {
+      console.warn(
+        paint(
+          `  ${wallet.name}: lend withdrawal failed for ${symbol}: ${withdrawErr.message || withdrawErr}`,
+          "warn"
+        )
+      );
+      return { withdrawn: false, reason: withdrawErr.message || "withdrawal failed" };
+    }
+  } catch (err) {
+    return { withdrawn: false, reason: err.message || "detection failed" };
+  }
+}
+
 // perform the swap across wallets (one swap each)
 // ---- Core swap executor ----
 // Performs a Jupiter swap across all wallets, handling per-wallet skips,
@@ -11654,7 +13305,7 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       for (const disabledWallet of disabledWithinScope) {
         console.log(
           paint(
-            `Skipping ${disabledWallet.name}: disabled for swaps (<0.01 SOL).`,
+            `Skipping ${disabledWallet.name}: disabled for swaps (<${WALLET_DISABLE_THRESHOLD_LABEL} SOL).`,
             "muted"
           )
         );
@@ -11673,7 +13324,12 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       return;
     }
   }
-  const walletDelayMs = options.walletDelayMs ?? DELAY_BETWEEN_CALLS_MS;
+  const explicitWalletDelayMs =
+    options.walletDelayMs !== undefined
+      ? Math.max(0, Number(options.walletDelayMs) || 0)
+      : null;
+  const resolveWalletDelayMs = (mode) =>
+    explicitWalletDelayMs ?? (mode === "ultra" ? ULTRA_WALLET_DELAY_MS : DELAY_BETWEEN_CALLS_MS);
   const suppressMetadataLog = options.suppressMetadata === true;
   const walletSkipRegistryMap = options.walletSkipRegistryMap instanceof Map ? options.walletSkipRegistryMap : null;
   const sharedSkipRegistry = options.walletSkipRegistry instanceof Set ? options.walletSkipRegistry : null;
@@ -11738,9 +13394,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
   const wrapAccountRent = cachedAtaRentLamports;
 
   if (!suppressMetadataLog) {
+    const engineLabel = swapEngineMode === "ultra" ? "[ULTRA]" : "[LITE]";
     console.log(
       paint(
-        `Swap path: ${describeMintLabel(inputMint)} → ${describeMintLabel(outputMint)}`,
+        `Swap path ${engineLabel}: ${describeMintLabel(inputMint)} → ${describeMintLabel(outputMint)}`,
         "label"
       )
     );
@@ -11757,18 +13414,25 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
     let connection = createRpcConnection("confirmed", forcedRpcEndpoint);
     const getCurrentRpcEndpoint = () =>
       connection.__rpcEndpoint || connection._rpcEndpoint || "unknown";
-    const markEndpoint = (reason) => {
+    const markEndpoint = (reason, options = {}) => {
       const delegate = connection.__markUnhealthy;
       if (typeof delegate === "function") {
-        delegate(reason);
+        delegate(reason, options);
       }
     };
     const rotateConnection = (reason, label) => {
       const previous = getCurrentRpcEndpoint();
-      markEndpoint(reason);
+      const isRateLimit = /rate[-\s]?limit/i.test(reason);
+      markEndpoint(reason, {
+        cooldownMs: isRateLimit ? RPC_RATE_LIMIT_COOLDOWN_MS : RPC_GENERAL_COOLDOWN_MS,
+      });
       connection = createRpcConnection("confirmed", forcedRpcEndpoint);
       const next = getCurrentRpcEndpoint();
-      const message = `RPC ${previous} rate-limited during ${label}; switched to ${next}`;
+      const reasonLabel = reason || "rotation";
+      const sameEndpoint = next === previous;
+      const message = sameEndpoint
+        ? `RPC ${previous} (${reasonLabel}) during ${label}; no healthy alternatives, retrying same endpoint`
+        : `RPC ${previous} (${reasonLabel}) during ${label}; switched to ${next}`;
       if (quietSkips) {
         console.warn(paint(message, "warn"));
       } else {
@@ -11799,6 +13463,8 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       ensureHeader();
       console.warn(paint(message, "warn"));
     };
+    let ultraFallbackCount = 0;
+    let liteFallbackActive = false;
     const logInfo = (message) => {
       ensureHeader();
       console.log(paint(message, "info"));
@@ -12052,15 +13718,45 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
                   continue;
                 }
                 const status = orderErr?.status ?? null;
-                if (status !== null && (status === 404 || status === 401 || status === 403) && engine === "ultra") {
+                const errorMessage = orderErr?.message || String(orderErr);
+
+                // Fall back to Lite API for various Ultra API issues
+                const shouldFallbackToLite =
+                  engine === "ultra" && (
+                    (status !== null && (status === 404 || status === 401 || status === 403)) ||
+                    /missing swap transaction payload/i.test(errorMessage) ||
+                    /failed to get quotes/i.test(errorMessage) ||
+                    /no routes found/i.test(errorMessage)
+                  );
+
+                if (shouldFallbackToLite) {
+                  const fallbackReason = (() => {
+                    if (status === 404) return "order endpoint returned 404";
+                    if (status === 401 || status === 403) return "order endpoint returned 401/403";
+                    if (/missing swap transaction payload/i.test(errorMessage)) return "incomplete response";
+                    if (/failed to get quotes/i.test(errorMessage)) return "failed to get quotes";
+                    if (/no routes found/i.test(errorMessage)) return "no routes found";
+                    return errorMessage.substring(0, 60) || "unknown Ultra error";
+                  })();
+
+                  if (ultraFallbackCount < MAX_ULTRA_FALLBACK_RETRIES) {
+                    ultraFallbackCount += 1;
+                    const backoffMs = Math.min(
+                      2000,
+                      ULTRA_RETRY_BACKOFF_BASE_MS * Math.pow(2, ultraFallbackCount - 1)
+                    );
+                    logWarn(
+                      `  Ultra issue (${fallbackReason}); retrying Ultra ${ultraFallbackCount}/${MAX_ULTRA_FALLBACK_RETRIES} before falling back.`
+                    );
+                    await delay(backoffMs);
+                    continue;
+                  }
+
                   if (!ultraUnavailableLogged) {
-                    if (status === 404) {
-                      logWarn("  Ultra order endpoint returned 404; falling back to legacy Lite API.");
-                    } else {
-                      logWarn("  Ultra order endpoint returned 401/403; falling back to legacy Lite API.");
-                    }
+                    logWarn(`  Ultra issue (${fallbackReason}); falling back to legacy Lite API.`);
                     ultraUnavailableLogged = true;
                   }
+                  liteFallbackActive = true;
                   engine = "lite";
                   swapEngineMode = "lite";
                   orderInfo = null;
@@ -12073,6 +13769,9 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
               continue;
             }
 
+            if (engine === "ultra") {
+              ultraFallbackCount = 0;
+            }
             if (orderInfo.outAmount) {
               logMuted("  expected outAmount:", orderInfo.outAmount);
             }
@@ -12094,7 +13793,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             const signedBase64 = Buffer.from(rawSigned).toString("base64");
             const derivedSignature = bs58.encode(vtx.signatures[0]);
 
-            await delay(DELAY_BETWEEN_CALLS_MS);
+            const executeDelayMs = explicitWalletDelayMs ?? ULTRA_EXECUTE_DELAY_MS;
+            if (executeDelayMs > 0) {
+              await delay(executeDelayMs);
+            }
             const executeResult = await executeUltraSwap({
               signedTransaction: signedBase64,
               clientOrderId: orderInfo.clientOrderId,
@@ -12139,7 +13841,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
               logMuted("  expected outAmount:", quote.outAmount);
             }
 
-            await delay(DELAY_BETWEEN_CALLS_MS);
+            const liteSubmitDelayMs = explicitWalletDelayMs ?? DELAY_BETWEEN_CALLS_MS;
+            if (liteSubmitDelayMs > 0) {
+              await delay(liteSubmitDelayMs);
+            }
             const swapResp = await fetchLegacySwap(
               quote,
               w.kp.publicKey.toBase58(),
@@ -12237,6 +13942,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             tokenBalanceBefore = tokenBalanceAfter;
           }
           swapComplete = true;
+          if (liteFallbackActive && USE_ULTRA_ENGINE) {
+            swapEngineMode = "ultra";
+            liteFallbackActive = false;
+          }
         } catch (innerErr) {
           const errorInfo = classifySwapError(innerErr);
 
@@ -12244,14 +13953,27 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
             const status = innerErr?.status ?? null;
             const message = innerErr?.message || "";
             if (status === 404 || status === 401 || status === 403) {
+              const fallbackReason =
+                status === 404
+                  ? "execute endpoint returned 404"
+                  : "execute endpoint returned 401/403";
+              if (ultraFallbackCount < MAX_ULTRA_FALLBACK_RETRIES) {
+                ultraFallbackCount += 1;
+                const backoffMs = Math.min(
+                  2000,
+                  ULTRA_RETRY_BACKOFF_BASE_MS * Math.pow(2, ultraFallbackCount - 1)
+                );
+                logWarn(
+                  `  Ultra issue (${fallbackReason}); retrying Ultra ${ultraFallbackCount}/${MAX_ULTRA_FALLBACK_RETRIES} before falling back.`
+                );
+                await delay(backoffMs);
+                continue;
+              }
               if (!ultraUnavailableLogged) {
-                if (status === 404) {
-                  logWarn("  Ultra execute endpoint returned 404; falling back to legacy Lite API.");
-                } else {
-                  logWarn("  Ultra execute returned 401/403; falling back to legacy Lite API (check JUPITER_ULTRA_API_KEY / JUPITER_ULTRA_API_BASE).");
-                }
+                logWarn(`  Ultra issue (${fallbackReason}); falling back to legacy Lite API.`);
                 ultraUnavailableLogged = true;
               }
+              liteFallbackActive = true;
               engine = "lite";
               swapEngineMode = "lite";
               continue;
@@ -12367,7 +14089,16 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       }
     } catch (e) {
       const errorInfo = classifySwapError(e);
-      
+
+      // Check if the error is about a non-tradable token (lend share token)
+      const errorMsg = (errorInfo.message || e.message || "").toLowerCase();
+      if (errorMsg.includes("not tradable") || errorMsg.includes("not tradeable")) {
+        // Skip lend share tokens - user can manually withdraw via 'lend withdraw' command
+        logWarn(`  ${w.name}: skipping lend share token (not tradable via swap API). Use 'lend withdraw' to redeem.`);
+        if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
+        break; // Skip this wallet for this token
+      }
+
       // Handle rate limiting at outer level
       if (errorInfo.type === 'rate_limit') {
         rotateConnection("rate-limit outer", "outer swap stage");
@@ -12413,7 +14144,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       // Mark token as problematic if it's not SOL
       if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
     }
-    await delay(walletDelayMs);
+    const postWalletDelay = resolveWalletDelayMs(engine);
+    if (postWalletDelay > 0) {
+      await delay(postWalletDelay);
+    }
   }
 }
 
@@ -13486,6 +15220,36 @@ async function perpsDecreaseCommand(rawArgs) {
   }
 }
 
+// Helper function to run flows with optional indefinite looping
+async function runFlowWithLoopOption(flowKey) {
+  while (true) {
+    await runPrewrittenFlowPlan(flowKey, {});
+
+    // Prompt user if they want to loop
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const answer = await new Promise((resolve) => {
+      rl.question(
+        paint(`\n🔁 Run ${flowKey} again? (y/n): `, "label"),
+        resolve
+      );
+    });
+
+    rl.close();
+
+    const normalized = (answer || "").trim().toLowerCase();
+    if (normalized !== "y" && normalized !== "yes") {
+      console.log(paint(`✅ ${flowKey} completed.`, "success"));
+      break;
+    }
+
+    console.log(paint(`\n♻️  Restarting ${flowKey}...\n`, "info"));
+  }
+}
+
 // CLI dispatch
 // ---- CLI entry point ----
 // Parses CLI arguments, performs RPC health checks, and dispatches to the
@@ -13711,8 +15475,12 @@ async function main() {
       await sendSolBetween(fromName, toName, lam);
     } else if (cmd === "aggregate") {
       const targetName = args[1];
-      if (!targetName) throw new Error("aggregate usage: aggregate <targetWalletFile>");
+      if (!targetName) throw new Error("aggregate usage: aggregate <wallet #|filename>");
       await aggregateSol(targetName);
+    } else if (cmd === "aggregate-hierarchical") {
+      await aggregateHierarchical();
+    } else if (cmd === "aggregate-masters") {
+      await aggregateMasters();
     } else if (cmd === "airdrop") {
       const [ , walletFile, lamStr ] = args;
       const lam = parseInt(lamStr);
@@ -13924,8 +15692,8 @@ async function main() {
       );
     } else if (cmd === "sol-usdc-popcat") {
       await swapSolToUsdcThenPopcat();
-    } else if (cmd === "crew1-cycle") {
-      await runCrew1Cycle();
+    } else if (cmd === "interval-cycle" || cmd === "crew1-cycle") {
+      await runWalletIntervalCycle();
     } else if (cmd === "long-circle") {
       const extraFlag = (args[1] || "").toLowerCase();
       const enableSecondary = extraFlag === "extra" || extraFlag === "--extra" || extraFlag === "secondary" || extraFlag === "--secondary";
@@ -13941,6 +15709,24 @@ async function main() {
       cmd === "close-token-accounts"
     ) {
       await closeEmptyTokenAccounts();
+    } else if (cmd === "arpeggio") {
+      await runFlowWithLoopOption("arpeggio");
+    } else if (cmd === "horizon") {
+      await runFlowWithLoopOption("horizon");
+    } else if (cmd === "echo") {
+      await runFlowWithLoopOption("echo");
+    } else if (cmd === "icarus") {
+      await runFlowWithLoopOption("icarus");
+    } else if (cmd === "zenith") {
+      await runFlowWithLoopOption("zenith");
+    } else if (cmd === "aurora") {
+      await runFlowWithLoopOption("aurora");
+    } else if (cmd === "titan") {
+      await runFlowWithLoopOption("titan");
+    } else if (cmd === "odyssey") {
+      await runFlowWithLoopOption("odyssey");
+    } else if (cmd === "sovereign") {
+      await runFlowWithLoopOption("sovereign");
     } else {
       throw new Error("Unknown command: " + cmd);
     }
@@ -13967,4 +15753,5 @@ export {
   createDeterministicRng,
   stepsFromMints,
   snapshotTokenCatalog,
+  handleUnwrapWsolMenu,
 };
