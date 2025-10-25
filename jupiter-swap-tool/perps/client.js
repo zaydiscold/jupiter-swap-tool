@@ -2,8 +2,32 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { AnchorProvider, Program } from "@coral-xyz/anchor";
 import { structuredLog, toSerializable } from "./utils.js";
+
+let AnchorProvider = null;
+let Program = null;
+let anchorLoadError = null;
+
+try {
+  const anchorModule = await import("@coral-xyz/anchor");
+  const resolved = anchorModule?.default ?? anchorModule;
+  AnchorProvider = resolved?.AnchorProvider ?? null;
+  Program = resolved?.Program ?? null;
+} catch (error) {
+  anchorLoadError = error;
+}
+
+function ensureAnchorAvailable() {
+  if (!AnchorProvider || !Program) {
+    const baseMessage =
+      "Perps functionality requires the optional dependency @coral-xyz/anchor. Install it with `npm install @coral-xyz/anchor` to enable these commands.";
+    const detail =
+      anchorLoadError && anchorLoadError.message
+        ? ` Original load error: ${anchorLoadError.message}`
+        : "";
+    throw new Error(baseMessage + detail);
+  }
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const IDL_PATH = path.join(__dirname, "idl", "jupiter_perps.json");
@@ -220,6 +244,7 @@ export function createPerpsConnection(rpcUrl, config = {}) {
 }
 
 export function createPerpsProvider(options = {}) {
+  ensureAnchorAvailable();
   const rpcConfig = getPerpsRpcConfig(options);
   const endpoint = options.rpcUrl || rpcConfig.primary;
   const connection =
@@ -233,6 +258,7 @@ export function createPerpsProvider(options = {}) {
 }
 
 export function createPerpetualsProgram(options = {}) {
+  ensureAnchorAvailable();
   const idl = loadPerpsIdl();
   const programId = getPerpsProgramId();
   const provider = options.provider || createPerpsProvider(options);
@@ -261,6 +287,7 @@ function resolveEndpointEntries(options) {
 }
 
 export async function withPerpsRpcRetry(label, handler, options = {}) {
+  ensureAnchorAvailable();
   const attempts = resolveEndpointEntries(options);
   if (attempts.length === 0) {
     throw new Error("No RPC endpoints configured for perps client");
@@ -386,6 +413,7 @@ export async function withPerpsRpcRetry(label, handler, options = {}) {
 }
 
 export function createPerpsClient(options = {}) {
+  ensureAnchorAvailable();
   const endpointCache = options.endpointCache || new Map();
   const baseOptions = { ...options, endpointCache };
 

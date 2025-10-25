@@ -1,5 +1,19 @@
-import anchorPkg from "@coral-xyz/anchor";
-const { AnchorProvider, BN, Program, BorshAccountsCoder } = anchorPkg;
+let AnchorProvider = null;
+let BN = null;
+let Program = null;
+let BorshAccountsCoder = null;
+let anchorLoadError = null;
+
+try {
+  const anchorModule = await import("@coral-xyz/anchor");
+  const resolved = anchorModule?.default ?? anchorModule;
+  AnchorProvider = resolved?.AnchorProvider ?? null;
+  BN = resolved?.BN ?? null;
+  Program = resolved?.Program ?? null;
+  BorshAccountsCoder = resolved?.BorshAccountsCoder ?? null;
+} catch (error) {
+  anchorLoadError = error;
+}
 import {
   PublicKey,
   ComputeBudgetProgram,
@@ -113,7 +127,19 @@ const ACCOUNTS_IDL = {
   accounts: filteredAccounts,
   types: baseTypes,
 };
-const ACCOUNTS_CODER = new BorshAccountsCoder(ACCOUNTS_IDL);
+const ACCOUNTS_CODER = BorshAccountsCoder ? new BorshAccountsCoder(ACCOUNTS_IDL) : null;
+
+function ensureAnchorAvailable() {
+  if (!AnchorProvider || !Program || !BN || !BorshAccountsCoder || !ACCOUNTS_CODER) {
+    const baseMessage =
+      "Perps functionality requires the optional dependency @coral-xyz/anchor. Install it with `npm install @coral-xyz/anchor` to enable these commands.";
+    const detail =
+      anchorLoadError && anchorLoadError.message
+        ? ` Original load error: ${anchorLoadError.message}`
+        : "";
+    throw new Error(baseMessage + detail);
+  }
+}
 
 export const JUPITER_PERPETUALS_EVENT_AUTHORITY = new PublicKey(
   "37hJBDnntwqhGbK7L6M1bLyvccj4u55CCUiLPdYkiqBN"
@@ -190,6 +216,7 @@ function getProgramCacheKey(connection, programId) {
 }
 
 export function getPerpsProgram(connection) {
+  ensureAnchorAvailable();
   if (!connection) {
     throw new Error("connection is required to load the perps program");
   }
@@ -255,6 +282,7 @@ export function derivePositionPda({
 }
 
 export function derivePositionRequestPda({ position, counter, change }) {
+  ensureAnchorAvailable();
   if (!position) {
     throw new Error("position public key required");
   }
@@ -307,6 +335,7 @@ export function resolveCustodyIdentifier(identifier) {
 }
 
 function toBn(input) {
+  ensureAnchorAvailable();
   if (input instanceof BN) return input;
   if (typeof input === "bigint") return new BN(input.toString());
   if (typeof input === "number") return new BN(input);
@@ -340,6 +369,7 @@ export async function buildIncreaseRequestInstruction({
   counter = null,
   referral = null,
 }) {
+  ensureAnchorAvailable();
   const program = getPerpsProgram(connection);
   const programId = program.programId;
   const custodyPk = new PublicKey(custody);
@@ -420,6 +450,7 @@ export async function buildDecreaseRequestInstruction({
   counter = null,
   referral = null,
 }) {
+  ensureAnchorAvailable();
   const program = getPerpsProgram(connection);
   const programId = program.programId;
   const ownerPk = new PublicKey(owner);
@@ -506,6 +537,7 @@ export async function simulatePerpsInstructions({
 }
 
 export async function fetchPoolAccount(connection) {
+  ensureAnchorAvailable();
   const info = await connection.getAccountInfo(JLP_POOL_ACCOUNT);
   if (!info || !info.data) {
     throw new Error("Pool account not found");
@@ -515,6 +547,7 @@ export async function fetchPoolAccount(connection) {
 }
 
 export async function fetchCustodyAccounts(connection, custodyPubkeys) {
+  ensureAnchorAvailable();
   const unique = Array.from(
     new Map(
       custodyPubkeys.map((pk) => {
@@ -539,6 +572,7 @@ export async function fetchCustodyAccounts(connection, custodyPubkeys) {
 }
 
 export async function fetchPositionsForOwners(connection, ownerPubkeys) {
+  ensureAnchorAvailable();
   const programId = resolvePerpsProgramId();
   const results = [];
   for (const owner of ownerPubkeys) {

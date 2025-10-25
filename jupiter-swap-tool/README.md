@@ -1,4 +1,4 @@
-# Jupiter Swap Tool CLI (v1.1.3)
+# Jupiter Swap Tool CLI (v1.2.0)
 
 ## Getting Started
 1. Install Node.js 18+ **and** the Anchor CLI dependencies Jupiter Perps relies on (e.g. `cargo install --git https://github.com/coral-xyz/anchor anchor-cli` or follow [Anchor’s installation guide](https://www.anchor-lang.com/docs/installation)).

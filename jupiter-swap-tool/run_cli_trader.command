@@ -19,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf 'Jupiter Swap Tool v1.1.3 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.2.0 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC
@@ -540,6 +540,72 @@ test_menu() {
   done
 }
 
+flows_menu() {
+  while true; do
+    echo
+    echo "Trading flows:"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys flows-menu --no-title --indent 2 || \
+      echo "  (unable to load flows hotkeys)"
+    read -r -p "flow> " FLOW_OPT
+    FLOW_OPT_LOWER=$(printf '%s' "$FLOW_OPT" | tr '[:upper:]' '[:lower:]')
+    case "$FLOW_OPT_LOWER" in
+      ""|b)
+        break
+        ;;
+      1|a)
+        run_cli_command "Arpeggio flow (15min)" node cli_trader.js arpeggio
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      2|h)
+        run_cli_command "Horizon flow (60min)" node cli_trader.js horizon
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      3|e)
+        run_cli_command "Echo flow (6hr)" node cli_trader.js echo
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      4|i)
+        run_cli_command "Icarus flow (high-tempo random)" node cli_trader.js icarus
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      5|z)
+        run_cli_command "Zenith flow (mid-tempo random)" node cli_trader.js zenith
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      6|u)
+        run_cli_command "Aurora flow (slow steady random)" node cli_trader.js aurora
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      7|t)
+        run_cli_command "Titan whale flow (aggressive)" node cli_trader.js titan
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      8|o)
+        run_cli_command "Odyssey whale flow (diverse)" node cli_trader.js odyssey
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      9|v)
+        run_cli_command "Sovereign whale flow (strategic)" node cli_trader.js sovereign
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      *)
+        echo "Unknown option: $FLOW_OPT"
+        ;;
+    esac
+  done
+}
+
 lend_menu() {
   while true; do
     echo
@@ -662,10 +728,27 @@ advanced_menu() {
   while true; do
     echo
     echo "Advanced trade tools:"
-    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
-    JUPITER_SWAP_TOOL_NO_BANNER=1 \
-      node cli_trader.js hotkeys advanced-menu --no-title --indent 2 || \
+    ADVANCED_OUTPUT=$(
+      JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+      JUPITER_SWAP_TOOL_NO_BANNER=1 \
+        node cli_trader.js hotkeys advanced-menu --no-title --indent 2 2>/dev/null \
+        || true
+    )
+    if [[ -n "$ADVANCED_OUTPUT" ]]; then
+      printf "%s\n" "$ADVANCED_OUTPUT"
+    else
       echo "  (unable to load advanced hotkeys)"
+    fi
+    FLOW_SHORTCUTS_OUTPUT=$(
+      JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+      JUPITER_SWAP_TOOL_NO_BANNER=1 \
+        node cli_trader.js hotkeys flow-shortcuts --no-title --indent 4 2>/dev/null \
+        || true
+    )
+    if [[ -n "$FLOW_SHORTCUTS_OUTPUT" ]]; then
+      echo "    Flow shortcuts:"
+      printf "%s\n" "$FLOW_SHORTCUTS_OUTPUT"
+    fi
     read -r -p "advanced> " ADV_OPT
     ADV_OPT_LOWER=$(printf '%s' "$ADV_OPT" | tr '[:upper:]' '[:lower:]')
     case "$ADV_OPT_LOWER" in
@@ -714,6 +797,45 @@ advanced_menu() {
         ;;
       7)
         lend_menu
+        update_launcher_state
+        ;;
+      8|flows)
+        flows_menu
+        update_launcher_state
+        ;;
+      a)
+        run_cli_command "Arpeggio flow (fast deterministic)" node cli_trader.js arpeggio
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      i)
+        run_cli_command "Icarus flow (high-tempo random)" node cli_trader.js icarus
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      z)
+        run_cli_command "Zenith flow (mid-tempo diverse)" node cli_trader.js zenith
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      u)
+        run_cli_command "Aurora flow (slow extended)" node cli_trader.js aurora
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      t)
+        run_cli_command "Titan whale flow (aggressive $5+)" node cli_trader.js titan
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      o)
+        run_cli_command "Odyssey whale flow (diverse)" node cli_trader.js odyssey
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      v)
+        run_cli_command "Sovereign whale flow (strategic)" node cli_trader.js sovereign
+        read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       *)

@@ -318,10 +318,10 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
   }
 
   const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
-
   const steps = [];
-  const safeHopCount = Number.isFinite(hopCount) && hopCount > 0 ? Math.floor(hopCount) : 1;
   let currentMint = WSOL_MINT;
+  let cycleIdx = 0;
+
   for (let hop = 0; hop < safeHopCount; hop += 1) {
     const isFinalHop = hop === safeHopCount - 1;
     if (isFinalHop && currentMint === WSOL_MINT) {
@@ -353,7 +353,7 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
       continue;
     }
 
-    steps.push({
+    const step = {
       inMint: currentMint,
       outMint: nextMint,
       requiresAta: nextMint !== WSOL_MINT,
@@ -370,7 +370,6 @@ function buildFallbackLongChainSteps(rng, hopCount, poolMints) {
   }
 
   const shouldAppendFinalHop = steps.length < safeHopCount && currentMint !== WSOL_MINT;
-
   if (shouldAppendFinalHop) {
     steps.push({
       inMint: currentMint,
@@ -488,7 +487,7 @@ export function buildTimedPlanForWallet({
     return { schedule: [] };
   }
   const safeTarget = Math.max(1, Math.floor(targetSwaps));
-  let basePath = [];
+  let logicalSteps = [];
   if (kind === "meme-carousel" || kind === "btc-eth-circuit") {
     logicalSteps = planLongChainSteps(rng, poolMints);
     if (!logicalSteps.length) {
@@ -499,7 +498,7 @@ export function buildTimedPlanForWallet({
     const bucketCount = Math.min(6, Math.max(3, Math.floor(safeTarget / 8) || 3));
     const picks = planBuckshotScatterTargets(rng, poolMints, bucketCount);
     if (picks.length === 0) {
-      basePath = [];
+      logicalSteps = [];
     } else {
       logicalSteps = Array.from({ length: safeTarget }, (_, idx) => ({
         inMint: WSOL_MINT,
@@ -555,72 +554,51 @@ export function buildTimedPlanForWallet({
     });
   }
 
-  if (!basePath.length) {
+  const templateSteps = Array.isArray(logicalSteps)
+    ? logicalSteps.filter((step) => step && typeof step === "object")
+    : [];
+  if (templateSteps.length === 0) {
     return { schedule: [] };
   }
 
-  const fanSteps = logicalSteps.filter((step) => step.kind === "fanOutSwap" || !step.kind).length;
-  const swapCountForInterval = kind === "btc-eth-circuit" && fanSteps > 0 ? fanSteps : safeTarget;
-  const baseInterval = Math.max(10_000, Math.floor(durationMs / Math.max(1, swapCountForInterval)));
+  const swapCountForInterval = Math.max(1, kind === "btc-eth-circuit" ? templateSteps.length : safeTarget);
+  const effectiveDuration =
+    Number.isFinite(durationMs) && durationMs > 0 ? durationMs : 60 * 60 * 1000;
+  const baseInterval = Math.max(3_000, Math.floor(effectiveDuration / swapCountForInterval));
   const checkpointEvery = pickInt(rng, CHECKPOINT_SOL_EVERY_MIN, CHECKPOINT_SOL_EVERY_MAX);
   let dueAt = Date.now();
   let sinceCheckpoint = 0;
-  let pathIdx = 0;
-  let currentFromMint = WSOL_MINT;
   const schedule = [];
 
-  const placeholderState = {
-    currentMint: WSOL_MINT,
-    lastRandomMint: null,
-  };
-
   for (let idx = 0; idx < safeTarget; idx += 1) {
-    const template = basePath[pathIdx % basePath.length];
-    const toMint = template?.toMint;
-    if (!toMint) {
-      break;
-    }
-    const spendFraction = clampSpendFraction(template?.spendFraction ?? pickSpendFraction(rng));
-    const fromMintForStep = template?.forceFromSol ? WSOL_MINT : currentFromMint;
-    const logical = {
-      fromMint: fromMintForStep,
-      toMint,
-      spendFraction,
-      requiresAta: toMint !== WSOL_MINT,
-    };
+    const template = templateSteps[idx % templateSteps.length];
+    if (!template) continue;
+    const stepKind = template.kind ?? "swapHop";
+    const normalizedLogical = template.logicalStep ? template.logicalStep : template;
     const jitterSign = rng() < 0.5 ? -1 : 1;
     const jitterAmount = 1 + jitterSign * (JITTER_FRACTION * rng());
     const delta =
-      kind === "btc-eth-circuit" && logical?.kind === "sweepToSOL"
+      kind === "btc-eth-circuit" && stepKind === "sweepToSOL"
         ? pickInt(rng, SWEEP_MIN_DELAY_MS, SWEEP_MAX_DELAY_MS)
         : Math.max(3_000, Math.floor(baseInterval * jitterAmount));
     dueAt += delta;
-    if (logical?.kind === "sweepToSOL") {
-      schedule.push({
-        kind: "sweepToSOL",
-        dueAt,
-        logicalStep: logical.logicalStep,
-        idx,
-      });
-      continue;
-    }
-
-    const normalizedLogical = logical?.logicalStep ? logical.logicalStep : logical;
     schedule.push({
-      kind: logical?.kind === "fanOutSwap" ? "fanOutSwap" : "swapHop",
+      kind:
+        stepKind === "fanOutSwap" || stepKind === "sweepToSOL" || stepKind === "checkpointToSOL"
+          ? stepKind
+          : "swapHop",
       dueAt,
       logicalStep: normalizedLogical,
       idx,
     });
-    sequenceIdx += 1;
-    sinceCheckpoint += 1;
-    currentFromMint = toMint;
-    pathIdx = (pathIdx + 1) % basePath.length;
-    if (sinceCheckpoint >= checkpointEvery) {
+
+    if (stepKind === "checkpointToSOL") {
       sinceCheckpoint = 0;
+      continue;
     }
 
-    if (!checkpointForced && sinceCheckpoint >= checkpointEvery) {
+    sinceCheckpoint += 1;
+    if (sinceCheckpoint >= checkpointEvery) {
       const checkpointDelay = Math.max(750, Math.floor(delta * 0.25));
       schedule.push({
         kind: "checkpointToSOL",
@@ -628,11 +606,11 @@ export function buildTimedPlanForWallet({
         logicalStep: { inMint: WSOL_MINT, outMint: WSOL_MINT, requiresAta: false, sourceBalance: { kind: "sol" } },
         idx: idx + 0.1,
       });
-      currentFromMint = WSOL_MINT;
+      sinceCheckpoint = 0;
     }
   }
 
-  return { schedule, checkpointEvery, ...planMeta };
+  return { schedule, checkpointEvery };
 }
 
 export const CAMPAIGNS = {
@@ -788,6 +766,18 @@ function buildRandomMintPool(randomMeta, planPoolMints = []) {
     if (pool.includes(normalized)) return;
     pool.push(normalized);
   };
+
+  // First check if poolTags is specified - if so, build pool from token catalog
+  if (Array.isArray(randomMeta?.poolTags) && randomMeta.poolTags.length > 0) {
+    const catalog = readTokenCatalog();
+    const filtered = tokensByTags(catalog, randomMeta.poolTags);
+    for (const token of filtered) {
+      if (token.mint) append(token.mint);
+    }
+    return pool;
+  }
+
+  // Otherwise use the existing poolMints logic
   const rawPool = Array.isArray(randomMeta?.poolMints) && randomMeta.poolMints.length > 0
     ? randomMeta.poolMints
     : planPoolMints;
@@ -927,6 +917,87 @@ export function resolveRandomizedStep(logicalStep, rng, options = {}) {
     return resolvedRecord;
   }
 
+  if (mode === "session-to-random") {
+    // Get the previous random token from session
+    const existing = resolveFromSession(sessionState, sessionKey);
+    if (!existing || !existing.outMint) {
+      throw new Error("random session has no recorded mint");
+    }
+
+    // Build pool of available tokens
+    const planPoolMints = Array.isArray(options.poolMints) ? options.poolMints : [];
+    const pool = buildRandomMintPool(randomMeta, planPoolMints);
+    if (pool.length === 0) {
+      throw new Error("random mint pool is empty");
+    }
+
+    // Build exclude set - exclude current token and any specified excludes
+    const excludeSet = new Set();
+    if (Array.isArray(randomMeta.excludeMints)) {
+      for (const value of randomMeta.excludeMints) {
+        const normalized = normaliseSolMint(value);
+        if (normalized) excludeSet.add(normalized);
+      }
+    }
+    // Exclude the current token so we pick a DIFFERENT one
+    const currentMint = normaliseSolMint(existing.outMint);
+    if (currentMint) excludeSet.add(currentMint);
+
+    // Filter pool to exclude current and blacklisted tokens
+    const filteredPool = pool.filter((mint) => !excludeSet.has(mint));
+    if (filteredPool.length === 0) {
+      throw new Error("no alternative tokens available after exclusions");
+    }
+
+    // Use selectMint callback or random selection
+    const selectMint = typeof options.selectMint === "function" ? options.selectMint : null;
+    let newMint = null;
+    if (selectMint) {
+      const selection = selectMint({
+        ...randomMeta,
+        excludeMints: Array.from(excludeSet),
+        poolMints: randomMeta.poolMints ?? planPoolMints,
+      });
+      if (selection) {
+        if (typeof selection === "string") {
+          newMint = selection;
+        } else if (typeof selection === "object" && selection.mint) {
+          newMint = selection.mint;
+        }
+      }
+    }
+
+    if (!newMint) {
+      const idx = Math.floor(effectiveRng() * filteredPool.length);
+      newMint = filteredPool[idx];
+    }
+
+    // Build source balance from previous token
+    const previousBalance = existing.sourceBalance;
+    const splSourceBalance = (() => {
+      if (previousBalance?.kind === "spl") {
+        return {
+          ...previousBalance,
+          mint: previousBalance.mint ?? existing.outMint,
+        };
+      }
+      return { kind: "spl", mint: existing.outMint };
+    })();
+
+    const record = {
+      inMint: existing.outMint,
+      outMint: newMint,
+      sourceBalance: splSourceBalance,
+    };
+
+    // Update session with new token
+    if (sessionState && sessionKey) {
+      sessionState.set(sessionKey, { ...record });
+    }
+
+    return record;
+  }
+
   return null;
 }
 
@@ -981,7 +1052,8 @@ export async function doSwapStep(pubkeyBase58, logicalStep, rng, planContext = {
   if (amountLamports <= 0n) {
     throw new Error("amount below dust floor");
   }
-  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports, resolvedStep);
+  const metadata = resolved ?? logicalStep ?? null;
+  return HOOKS.jupiterLiteSwap(pubkeyBase58, inMint, outMint, amountLamports, metadata);
 }
 
 export async function doCheckpointToSOL(pubkeyBase58, rng) {

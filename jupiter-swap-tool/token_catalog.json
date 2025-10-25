@@ -11,157 +11,167 @@
     "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
     "decimals": 6,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "long-circle",
-      "secondary-pool",
-      "secondary-terminal",
-      "crew-cycle",
-      "zenith",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "secondary-terminal", "long-circle"]
   },
   {
     "symbol": "USDT",
     "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
     "decimals": 6,
     "program": "spl",
-    "tags": ["zenith", "aurora"]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "POPCAT",
     "mint": "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",
     "decimals": 9,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "PUMP",
     "mint": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
     "decimals": 6,
     "program": "token-2022",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "PENGU",
     "mint": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
     "decimals": 6,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "FART",
     "mint": "9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump",
     "decimals": 6,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
-  },
-  {
-    "symbol": "USELESS",
-    "mint": "Dz9mQ9NzkBcCsuGPFJ3r1bS4wgqKMHBPiVuniW8Mbonk",
-    "decimals": 6,
-    "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "WIF",
     "mint": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
     "decimals": 6,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "icarus",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "long-circle"]
   },
   {
     "symbol": "URANUS",
     "mint": "BFgdzMkTPdKKJeTipv2njtDEwhKxkgFueJQfJGt1jups",
     "decimals": 6,
     "program": "spl",
-    "tags": ["default-sweep", "long-circle", "fanout", "icarus", "aurora"]
+    "tags": ["swappable", "default-sweep", "long-circle", "fanout"]
   },
   {
     "symbol": "wBTC",
     "mint": "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh",
     "decimals": 8,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "secondary-terminal",
-      "zenith",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "secondary-terminal", "long-circle"]
   },
   {
     "symbol": "cbBTC",
     "mint": "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij",
     "decimals": 8,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "secondary-terminal",
-      "zenith",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "secondary-terminal", "long-circle"]
   },
   {
     "symbol": "wETH",
     "mint": "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs",
     "decimals": 8,
     "program": "spl",
-    "tags": [
-      "default-sweep",
-      "crew-cycle",
-      "long-circle",
-      "secondary-pool",
-      "secondary-terminal",
-      "zenith",
-      "aurora"
-    ]
+    "tags": ["swappable", "default-sweep", "secondary-terminal", "long-circle"]
+  },
+  {
+    "symbol": "JLP",
+    "mint": "27G8MtK7VtTcCHkpASjSDdkWWYfoqT6ggEuKidVJidD4",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "JupSOL",
+    "mint": "jupSoLaHXQiZZTSfEWMTRRgpnyFm8f6sZdosWBjx93v",
+    "decimals": 9,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "JUP",
+    "mint": "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "ZEC",
+    "mint": "A7bdiYdS5GjqGFtxf17ppRHtDKPkkRqbKtR27dxvQXaS",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "SPX",
+    "mint": "J3NKxxXZcnNiMjKw9hYb2K4LUxgwB6t1FtPtQVsv3KFr",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "FITCOIN",
+    "mint": "Cr2mM4szbt8286XMn7iTpY5A8S17LbGAu1UyodkyEwn4",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "ZEREBRO",
+    "mint": "8x5VqbHA8D7NkD52uNuS5nnt3PwA8pLD34ymskeSo2Wn",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "SPYx",
+    "mint": "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "BOT",
+    "mint": "63bpnCja1pGB2HSazkS8FAPAUkYgcXoDwYHfvZZveBot",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "GOOGLx",
+    "mint": "XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "CRCLx",
+    "mint": "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "NVDAx",
+    "mint": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
+  },
+  {
+    "symbol": "AVICI",
+    "mint": "BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta",
+    "decimals": 6,
+    "program": "spl",
+    "tags": ["swappable", "default-sweep"]
   }
 ]

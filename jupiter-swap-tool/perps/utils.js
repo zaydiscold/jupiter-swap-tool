@@ -1,7 +1,13 @@
-import anchor from "@coral-xyz/anchor";
 import { PublicKey } from "@solana/web3.js";
 
-const { BN } = anchor;
+let BN = null;
+try {
+  const anchorModule = await import("@coral-xyz/anchor");
+  const resolved = anchorModule?.default ?? anchorModule;
+  BN = resolved?.BN ?? null;
+} catch (_) {
+  BN = null;
+}
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object") return false;
@@ -15,7 +21,7 @@ function isPlainObject(value) {
 }
 
 export function toSerializable(value) {
-  if (value instanceof BN) {
+  if (BN && value instanceof BN) {
     return value.toString();
   }
   if (value instanceof PublicKey) {

@@ -95,7 +95,7 @@ All knobs are optional; unset variables fall back to the defaults below. Grouped
 | `JUPITER_SWAP_TOOL_SKIP_INIT` | Skip initial RPC guard refresh during launcher startup. | `0` |
 | `JUPITER_SWAP_TOOL_NO_BANNER` / `JUPITER_NO_BANNER` | Suppress the ASCII art banner at startup. | `0` |
 
-## CLI quick reference (v1.1.2)
+## CLI quick reference (v1.2.0)
 Commands can be invoked directly via `node cli_trader.js <command …>` or through the interactive launcher hotkeys. Amount arguments accept decimals (auto-converted to base units) unless the `--raw` flag is present.
 
 ### Wallet & key management

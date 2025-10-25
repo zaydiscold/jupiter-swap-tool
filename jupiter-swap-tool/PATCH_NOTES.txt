@@ -20,6 +20,13 @@
 - Lend earn deposit/withdraw now auto-select eligible base assets or share tokens when you pass `*`, defaulting to the max spendable balance per wallet while leaving a SOL reserve for rent/gas (and wrapping SOL as needed).
 - Launcher lend prompts accept blank inputs to trigger the wildcard behaviour so operators can fan actions across every active wallet without typing paths or amounts.
 
+## [1.2.0] 2025-10-22
+- Wallet discovery now syncs with a persistent `wallets_manifest.json`, giving every keypair a stable number, group, and role (master/master-master/slave) and keeping the CLI output ordered by creation time.
+- `shared/wallet_helpers.js` gained robust keypair parsers (array JSON, object JSON, base58), optional logger hooks, and automatic registry sync so downstream commands inherit metadata without extra plumbing.
+- Added deterministic Solana campaign utilities under `chains/solana/` (seeded RNG, plan truncation, tag filtering) and exposed them to tests for reproducible automation planning.
+- Rounded out test coverage for ATA creation + campaign randomisation via Node’s built-in runner; run `npm test` to confirm the helper layer before shipping.
+- Refreshed docs and launcher artefacts to advertise v1.2.0 and highlight the new registry architecture for future contributors.
+
 ## [1.1.2] 2025-10-21
 - Added a dedicated `test` hotkey (and launcher sub-menu) grouping RPC diagnostics and an Ultra API swap check in one place.
 - New `test-ultra` CLI command performs a Jupiter Ultra order dry run (or live swap with `--submit`) so you can verify the default API key or your own credentials end-to-end.

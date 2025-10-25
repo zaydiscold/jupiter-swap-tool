@@ -150,6 +150,29 @@ export function listWallets() {
     if (a.birthMs !== b.birthMs) return a.birthMs - b.birthMs;
     return a.name.localeCompare(b.name);
   });
+
+  // Sync wallet registry and add hierarchy metadata
+  try {
+    const walletRegistry = require('./wallet_registry.js');
+    const manifest = walletRegistry.syncWalletsFromFilesystem(wallets);
+
+    // Enrich wallet objects with registry data
+    wallets.forEach((wallet) => {
+      const entry = manifest.wallets.find(w => w.filename === wallet.name);
+      if (entry) {
+        wallet.number = entry.number;
+        wallet.role = entry.role;
+        wallet.master = entry.master;
+        wallet.group = entry.group;
+      }
+    });
+  } catch (err) {
+    // If registry fails, wallets still work without hierarchy metadata
+    if (logger?.warn) {
+      logger.warn(paint(`Wallet registry sync failed: ${err.message}`, "warn"));
+    }
+  }
+
   return wallets;
 }
 

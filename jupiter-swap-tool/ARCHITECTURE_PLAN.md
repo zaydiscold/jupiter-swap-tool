@@ -1,8 +1,8 @@
 # Multi-Chain Jupiter Swap Roadmap
 
-This plan tracks the evolution of the Jupiter Swap Tool from the existing Solana-focused CLI (`cli_trader.js`) toward a modular, multi-chain automation platform. The current v1.1.2 codebase already separates several subsystems—wallet helpers, campaign planning, and the perps client—so the roadmap below builds on what ships today.
+This plan tracks the evolution of the Jupiter Swap Tool from the existing Solana-focused CLI (`cli_trader.js`) toward a modular, multi-chain automation platform. The current v1.2.0 codebase already separates several subsystems—wallet helpers, campaign planning, and the perps client—so the roadmap below builds on what ships today.
 
-## Current implementation snapshot (v1.1.2)
+## Current implementation snapshot (v1.2.0)
 - **CLI façade (`cli_trader.js`)** – houses command parsing, swap execution, Jupiter Lend integration, perps helpers, automation presets, and diagnostics (`test-rpcs`, `test-ultra`, etc.).
 - **Shared wallet helpers (`shared/wallet_helpers.js`)** – filesystem-backed keypair discovery, ATA creation, and wrapped SOL utilities reused by both the CLI and perps client.
 - **Campaign planner (`chains/solana/campaigns_runtime.js`)** – deterministic scheduler powering `campaign …` presets, wallet-seeded RNG, budget truncation, and token-tag filtering.

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0] - 2025-10-22
+- Added a filesystem-backed wallet registry manifest that auto-numbers keypairs, tags master/slave groupings, and surfaces hierarchy metadata to CLI consumers.
+- Hardened wallet helper utilities with multi-format keypair parsing, richer logging hooks, and automatic manifest sync when listing wallets.
+- Expanded campaign planning and randomisation helpers under `chains/solana/`, including deterministic RNG utilities, budget-aware truncation, and tag-based token selection.
+- Introduced focused unit test coverage for campaign budgeting, token randomisation, and ATA handling to keep the new shared modules verifiable via `npm test`.
+- Updated documentation (README, ARCHITECTURE_PLAN) and launcher assets to reflect the 1.2.0 release while keeping operator guidance current.
+
 ## [1.1.2] - 2025-10-21
 - Added a dedicated diagnostics hotkey grouping RPC tests and Ultra order checks alongside the existing launcher.
 - Introduced the `test-ultra` CLI command so operators can dry-run (or submit with `--submit`) Ultra orders end-to-end, including optional wallet and slippage overrides.
