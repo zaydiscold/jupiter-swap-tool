@@ -72,7 +72,7 @@ import {
 // --------------------------------------------------
 
 const TOOL_VERSION = "1.2.1";
-const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
+const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | nexus | nebula | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
 function printGeneralUsage() {
@@ -357,6 +357,26 @@ const HOTKEY_MAP = buildHotkeyMap([
           keys: ["6"],
           description: "Aurora (slow steady random)",
         },
+        {
+          action: "titan-flow",
+          keys: ["7", "t"],
+          description: "Titan (whale Icarus — $5+ min, 30s-10m holds)",
+        },
+        {
+          action: "odyssey-flow",
+          keys: ["8", "o"],
+          description: "Odyssey (whale Zenith — $5+ min, 30s-10m holds)",
+        },
+        {
+          action: "sovereign-flow",
+          keys: ["9", "s"],
+          description: "Sovereign (whale Aurora — $5+ min, 30s-10m holds)",
+        },
+        {
+          action: "nova-flow",
+          keys: ["0", "n"],
+          description: "Nova (supernova Icarus — $3.5+ min, 30s-10m holds)",
+        },
         { action: "back", keys: ["b", "back"], description: "Back to advanced tools" },
       ],
     },
@@ -404,7 +424,7 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "flows-menu",
           keys: ["8", "flows"],
-          description: "Trading flows (Arpeggio, Horizon, Echo, Icarus, Zenith, Aurora)",
+          description: "Trading flows (Arpeggio, Horizon, Echo, Icarus, Zenith, Aurora, Titan, Odyssey, Sovereign, Nova)",
         },
         { action: "back", keys: ["b", "back"], description: "Back to launcher" },
       ],
@@ -874,6 +894,9 @@ const MIN_SWAP_VALUE_USD = process.env.MIN_SWAP_VALUE_USD
 const DUST_RESCUE_THRESHOLD_USD = process.env.DUST_RESCUE_THRESHOLD_USD
   ? parseFloat(process.env.DUST_RESCUE_THRESHOLD_USD)
   : 0.05; // $0.05 minimum - below this, just burn and close
+const SOL_DUST_AUTOCLOSE_THRESHOLD_USD = process.env.SOL_DUST_AUTOCLOSE_THRESHOLD_USD
+  ? parseFloat(process.env.SOL_DUST_AUTOCLOSE_THRESHOLD_USD)
+  : 0.05; // Only unwrap SOL dust worth less than ~5 cents
 const GAS_RESERVE_LAMPORTS = process.env.GAS_RESERVE_LAMPORTS
   ? BigInt(process.env.GAS_RESERVE_LAMPORTS)
   : BigInt(1_000_000); // default reserve ~0.001 SOL
@@ -5315,6 +5338,16 @@ function classifySwapError(err) {
     return { type: 'slippage', retryable: true, message: 'Slippage tolerance exceeded' };
   }
   
+  // Minimum output threshold (dust / rounding) issues
+  if (
+    /cannot compute other amount threshold/i.test(combined) ||
+    /minimum output (?:not )?met/i.test(combined) ||
+    /min(?:imum)? output/i.test(combined) ||
+    /amount (?:became )?too small/i.test(combined)
+  ) {
+    return { type: 'min_output', retryable: false, message: 'Minimum output not satisfied for route' };
+  }
+
   // Insufficient funds
   if (isLamportShortageError(err) || msg.includes("insufficient")) {
     return { type: 'insufficient_funds', retryable: true, message: 'Insufficient funds' };
@@ -6750,17 +6783,34 @@ async function handleCampaignCommand(rawArgs) {
   console.log(paint("Campaign complete.", "success"));
 }
 
+let decimalPrecisionWarnings = 0;
+
 function decimalToBaseUnits(amountStr, decimals) {
   if (typeof amountStr !== "string") amountStr = String(amountStr);
   const normalized = amountStr.trim();
   if (!/^[0-9]+(\.[0-9]+)?$/.test(normalized)) {
     throw new Error(`Invalid decimal amount: ${amountStr}`);
   }
-  const [wholePart, fractionalPart = ""] = normalized.split(".");
+  const [wholePart, rawFractionalPart = ""] = normalized.split(".");
+  let fractionalPart = rawFractionalPart;
   if (fractionalPart.length > decimals) {
-    throw new Error(
-      `Amount ${amountStr} has more fractional digits than supported (${decimals})`
-    );
+    const truncated = fractionalPart.slice(0, decimals);
+    const dropped = fractionalPart.slice(decimals);
+    fractionalPart = truncated;
+    if (decimalPrecisionWarnings < 5) {
+      console.warn(
+        paint(
+          `⚠️  Truncating amount ${amountStr} to ${wholePart}.${truncated} to respect ${decimals} decimal places (dropped ${dropped.length} digit${dropped.length === 1 ? "" : "s"})`,
+          "warn"
+        )
+      );
+      decimalPrecisionWarnings += 1;
+      if (decimalPrecisionWarnings === 5) {
+        console.warn(
+          paint("⚠️  Further decimal truncation warnings suppressed.", "warn")
+        );
+      }
+    }
   }
   const base = BigInt(10) ** BigInt(decimals);
   const whole = BigInt(wholePart) * base;
@@ -6864,53 +6914,36 @@ function pickRandomPortion(total) {
 }
 
 // Calculate total gas requirements for a multi-hop swap sequence
+// Note: This is an ESTIMATION only - actual ATA checks happen during execution
 async function calculateTotalGasRequirements(steps, connection, walletPublicKey) {
   if (!steps || steps.length === 0) return { totalGas: 0n, ataCreations: 0, breakdown: [] };
-  
+
   let totalGas = 0n;
   let ataCreations = 0;
   const breakdown = [];
-  const uniqueTokens = new Set();
-  
-  // Collect all unique tokens that will need ATAs
+
+  // Count unique non-SOL output tokens (conservative estimate: assume we need to create ATA for each)
+  const uniqueNonSolOutputs = new Set();
   for (const step of steps) {
     if (!SOL_LIKE_MINTS.has(step.to)) {
-      uniqueTokens.add(step.to);
+      uniqueNonSolOutputs.add(step.to);
     }
   }
-  
-  // Estimate ATA creation costs
-  for (const tokenMint of uniqueTokens) {
-    try {
-      const ataAddr = await getAssociatedTokenAddress(
-        new PublicKey(tokenMint),
-        walletPublicKey,
-        false,
-        TOKEN_PROGRAM_ID,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-      const ataInfo = await connection.getAccountInfo(ataAddr);
-      if (ataInfo === null) {
-        ataCreations++;
-        totalGas += ESTIMATED_ATA_CREATION_LAMPORTS;
-        breakdown.push({
-          type: 'ata_creation',
-          token: symbolForMint(tokenMint),
-          cost: ESTIMATED_ATA_CREATION_LAMPORTS
-        });
-      }
-    } catch (err) {
-      // If we can't check, assume we need to create it (conservative estimate)
-      ataCreations++;
-      totalGas += ESTIMATED_ATA_CREATION_LAMPORTS;
-      breakdown.push({
-        type: 'ata_creation',
-        token: symbolForMint(tokenMint),
-        cost: ESTIMATED_ATA_CREATION_LAMPORTS
-      });
-    }
+
+  // Conservative estimate: assume we might need to create ATA for each unique non-SOL token
+  // but don't actually check with RPC (to avoid rate limiting)
+  ataCreations = uniqueNonSolOutputs.size;
+  totalGas += BigInt(ataCreations) * ESTIMATED_ATA_CREATION_LAMPORTS;
+
+  for (const tokenMint of uniqueNonSolOutputs) {
+    breakdown.push({
+      type: 'ata_creation',
+      token: symbolForMint(tokenMint),
+      cost: ESTIMATED_ATA_CREATION_LAMPORTS,
+      note: 'estimated (actual check during execution)'
+    });
   }
-  
+
   // Estimate gas for each swap transaction
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
@@ -6924,7 +6957,7 @@ async function calculateTotalGasRequirements(steps, connection, walletPublicKey)
       cost: swapGas
     });
   }
-  
+
   // Add base gas reserve
   const baseReserve = GAS_RESERVE_LAMPORTS + JUPITER_SOL_BUFFER_LAMPORTS;
   totalGas += baseReserve;
@@ -6933,7 +6966,7 @@ async function calculateTotalGasRequirements(steps, connection, walletPublicKey)
     description: 'Base gas reserve + Jupiter buffer',
     cost: baseReserve
   });
-  
+
   return { totalGas, ataCreations, breakdown };
 }
 
@@ -7081,6 +7114,29 @@ async function getTokenBalanceBaseUnits(connection, walletPubkey, mintPubkey, pr
 // ---- Token sweeping helpers ----
 // Consolidate SPL balances back into SOL, either for a provided mint list or
 // by scanning every wallet. Used by the sweep commands and BTC/ETH allocator.
+// Estimate USD value of dust tokens using Jupiter Price API
+async function estimateDustValueUsd(mint, amount, decimals) {
+  try {
+    const url = new URL(JUPITER_PRICE_ENDPOINT);
+    url.searchParams.set("ids", mint);
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const priceData = data?.data?.[mint];
+    if (!priceData?.price) return null;
+
+    const tokenAmount = Number(amount) / Math.pow(10, decimals);
+    const usdValue = tokenAmount * priceData.price;
+    return usdValue;
+  } catch {
+    return null;
+  }
+}
+
 async function sweepTokensToSol(mints, label = "") {
   const uniqueMints = [...new Set(mints)].filter((mint) => mint && !SOL_LIKE_MINTS.has(mint));
   if (uniqueMints.length === 0) {
@@ -7146,15 +7202,32 @@ async function sweepTokensToSol(mints, label = "") {
     try {
       const parsedAccounts = await getAllParsedTokenAccounts(connection, wallet.kp.publicKey);
       const walletMints = [];
+      const solDustAccounts = [];
 
       for (const { account, pubkey } of parsedAccounts) {
         const info = account.data.parsed.info;
         const mint = info.mint;
         const amount = BigInt(info.tokenAmount.amount);
+        const decimals = info.tokenAmount.decimals ?? 0;
 
-        // Only include mints that are in our sweep list and have balance
-        if (amount > 0n && mintSet.has(mint)) {
+        if (amount <= 0n) continue;
+
+        if (mintSet.has(mint)) {
           walletMints.push({ mint, amount, accountPubkey: pubkey });
+          continue;
+        }
+
+        if (SOL_LIKE_MINTS.has(mint)) {
+          let programId = TOKEN_PROGRAM_ID;
+          try {
+            programId = new PublicKey(account.owner);
+          } catch (_) {}
+          solDustAccounts.push({
+            accountPubkey: pubkey,
+            amount,
+            decimals,
+            programId,
+          });
         }
       }
 
@@ -7164,26 +7237,78 @@ async function sweepTokensToSol(mints, label = "") {
           await doSwapAcross(mint, SOL_MINT, "all", {
             wallets: [wallet],
             quietSkips: false,
+            failOnMinOutput: true,
           });
         } catch (err) {
-          // If swap failed (likely due to dust amount), try to close the token account to reclaim rent
+          // If swap failed (likely due to dust amount), decide whether to rescue or burn
           const tokenSymbol = symbolForMint(mint) || mint.substring(0, 8);
           logDetailedError(`  ${wallet.name}: sweep ${tokenSymbol} failed`, err);
 
-          // Check if it's a dust amount issue - burn the dust and close account
+          // Check if it's a dust amount issue
           if (/too small|simulation error|failed to get quotes|amount became too small/i.test(err.message)) {
             try {
+              // Get token info for value calculation
+              const parsedData = await connection.getParsedAccountInfo(accountPubkey);
+              const tokenInfo = parsedData?.value?.data?.parsed?.info?.tokenAmount;
+              const remainingAmount = tokenInfo?.amount ? BigInt(tokenInfo.amount) : 0n;
+              const decimals = tokenInfo?.decimals ?? 6;
+
+              // Calculate dust USD value
+              const dustValueUsd = await estimateDustValueUsd(mint, remainingAmount, decimals);
+              const DUST_RESCUE_THRESHOLD_USD = 0.05;
+
+              if (dustValueUsd !== null && dustValueUsd >= DUST_RESCUE_THRESHOLD_USD) {
+                // RESCUE: Dust is worth rescuing
+                console.log(
+                  paint(
+                    `  ${wallet.name}: ${tokenSymbol} dust worth $${dustValueUsd.toFixed(4)} - attempting rescue...`,
+                    "info"
+                  )
+                );
+
+                try {
+                  // Step 1: Buy more of the token (0.01 SOL worth)
+                  await doSwapAcross(SOL_MINT, mint, { mode: "range", min: 0.01, max: 0.01 }, {
+                    wallets: [wallet],
+                    quietSkips: true,
+                  });
+
+                  // Step 2: Sweep all (original dust + new purchase) back to SOL
+                  await delay(1000); // Brief pause for transaction settlement
+                  await doSwapAcross(mint, SOL_MINT, "all", {
+                    wallets: [wallet],
+                    quietSkips: true,
+                    failOnMinOutput: true,
+                  });
+
+                  console.log(
+                    paint(
+                      `  ${wallet.name}: successfully rescued ${tokenSymbol} dust worth $${dustValueUsd.toFixed(4)}`,
+                      "success"
+                    )
+                  );
+                  continue; // Skip burn logic, rescue successful
+                } catch (rescueErr) {
+                  console.warn(
+                    paint(
+                      `  ${wallet.name}: dust rescue failed for ${tokenSymbol}, falling back to burn`,
+                      "warn"
+                    )
+                  );
+                  // Fall through to burn logic below
+                }
+              }
+
+              // BURN: Dust is not worth rescuing or price unavailable or rescue failed
+              const valueMsg = dustValueUsd !== null
+                ? ` (value $${dustValueUsd.toFixed(4)} < $${DUST_RESCUE_THRESHOLD_USD})`
+                : " (price unavailable)";
               console.log(
                 paint(
-                  `  ${wallet.name}: swap failed for ${tokenSymbol}, burning dust and closing account...`,
+                  `  ${wallet.name}: burning ${tokenSymbol} dust${valueMsg}...`,
                   "muted"
                 )
               );
-
-              // Get current token account balance
-              const parsedData = await connection.getParsedAccountInfo(accountPubkey);
-              const tokenAmount = parsedData?.value?.data?.parsed?.info?.tokenAmount?.amount;
-              const remainingAmount = tokenAmount ? BigInt(tokenAmount) : 0n;
 
               if (remainingAmount > 0n) {
                 // Burn remaining dust tokens first (required before closing)
@@ -7278,6 +7403,76 @@ async function sweepTokensToSol(mints, label = "") {
           }
         }
       }
+
+      for (const solEntry of solDustAccounts) {
+        try {
+          const dustValueUsd = await estimateDustValueUsd(SOL_MINT, solEntry.amount, solEntry.decimals || 9);
+          if (dustValueUsd === null) {
+            console.log(
+              paint(
+                `  ${wallet.name}: skipping SOL dust account ${solEntry.accountPubkey.toBase58()} — price unavailable`,
+                "muted"
+              )
+            );
+            continue;
+          }
+          if (dustValueUsd >= SOL_DUST_AUTOCLOSE_THRESHOLD_USD) {
+            continue;
+          }
+
+          const amountLabel = formatBaseUnits(solEntry.amount, solEntry.decimals || 9);
+          console.log(
+            paint(
+              `  ${wallet.name}: unwrapping SOL dust ${amountLabel} (≈$${dustValueUsd.toFixed(4)})`,
+              "muted"
+            )
+          );
+
+          const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+          const tx = new Transaction({
+            feePayer: wallet.kp.publicKey,
+            blockhash,
+            lastValidBlockHeight,
+          }).add(
+            createCloseAccountInstruction(
+              solEntry.accountPubkey,
+              wallet.kp.publicKey,
+              wallet.kp.publicKey,
+              [],
+              solEntry.programId
+            )
+          );
+
+          tx.sign(wallet.kp);
+          const sig = await connection.sendRawTransaction(tx.serialize(), {
+            skipPreflight: false,
+            maxRetries: 2,
+          });
+
+          await connection.confirmTransaction(
+            {
+              signature: sig,
+              blockhash,
+              lastValidBlockHeight,
+            },
+            "confirmed"
+          );
+
+          console.log(
+            paint(
+              `  ${wallet.name}: reclaimed SOL dust from ${solEntry.accountPubkey.toBase58()} (tx: ${sig.substring(0, 8)}...)`,
+              "success"
+            )
+          );
+        } catch (solDustErr) {
+          console.warn(
+            paint(
+              `  ${wallet.name}: failed to unwrap SOL dust for ${solEntry.accountPubkey.toBase58()}: ${solDustErr.message || solDustErr}`,
+              "warn"
+            )
+          );
+        }
+      }
     } catch (err) {
       console.error(paint(`  ${wallet.name}: failed to scan token accounts:`, "error"), err.message);
     }
@@ -7344,13 +7539,26 @@ async function sweepTokensToBtcEthTargets() {
   console.log(paint("Sweeping all non-SOL balances into SOL before allocating to wBTC/cbBTC/wETH", "label"));
   await sweepAllTokensToSol();
 
-  const targets = [
+  // Target tokens for sweep (excludes USDT/USDC, includes other swappable tokens)
+  const allTargets = [
     { mint: WBTC_MINT, label: "wBTC" },
     { mint: CBBTC_MINT, label: "cbBTC" },
     { mint: WETH_MINT, label: "wETH" },
   ];
 
-  const randomMode = DEFAULT_SWAP_AMOUNT_MODE === "random";
+  // Add other swappable tokens (SPYX, NVDAX, CRCLX, JUPSOL, etc.) from token catalog
+  const catalogTargets = TOKEN_CATALOG.filter(entry =>
+    entry.tags?.includes("swappable") &&
+    !SOL_LIKE_MINTS.has(entry.mint) &&
+    entry.mint !== USDC_MINT &&
+    entry.mint !== USDT_MINT &&
+    entry.mint !== WBTC_MINT &&
+    entry.mint !== CBBTC_MINT &&
+    entry.mint !== WETH_MINT
+  ).map(entry => ({ mint: entry.mint, label: entry.symbol }));
+
+  const targets = [...allTargets, ...catalogTargets];
+
   if (cachedAtaRentLamports === null) {
     const rentConnection = createRpcConnection("confirmed");
     const rent = await rentConnection.getMinimumBalanceForRentExemption(165);
@@ -7366,7 +7574,7 @@ async function sweepTokensToBtcEthTargets() {
         ? GAS_RESERVE_LAMPORTS
         : solBalanceLamports / 10n;
       reserve += JUPITER_SOL_BUFFER_LAMPORTS;
-      reserve += cachedAtaRentLamports * BigInt(targets.length);
+      reserve += cachedAtaRentLamports; // Only need ATA for ONE token now
       if (reserve >= solBalanceLamports) {
         console.log(
           paint(
@@ -7382,45 +7590,20 @@ async function sweepTokensToBtcEthTargets() {
         continue;
       }
 
-      const weights = targets.map(() => randomMode ? BigInt(randomIntInclusive(1, 100)) : 1n);
-      const totalWeight = weights.reduce((acc, w) => acc + w, 0n);
-      if (totalWeight === 0n) {
-        console.log(paint(`Skipping ${wallet.name}: unable to derive allocation weights`, "muted"));
-        continue;
-      }
+      // Pick ONE random target token for this wallet
+      const selectedTarget = targets[Math.floor(Math.random() * targets.length)];
+      const summary = `Sweeping ${formatBaseUnits(spendable, 9)} SOL from ${wallet.name} → ${selectedTarget.label}`;
+      const allocations = [{
+        mint: selectedTarget.mint,
+        label: selectedTarget.label,
+        amountDecimal: formatBaseUnits(spendable, 9),
+      }];
 
-      const summary = `Allocating ${formatBaseUnits(spendable, 9)} SOL from ${wallet.name} across ${targets.length} targets (${randomMode ? "random" : "even"} split)`;
-      const allocations = [];
-      let remaining = spendable;
-      for (let i = 0; i < targets.length; i += 1) {
-        const target = targets[i];
-        let share;
-        if (i === targets.length - 1) {
-          share = remaining;
-        } else {
-          share = (spendable * weights[i]) / totalWeight;
-          if (share > remaining) share = remaining;
-        }
-        if (share <= 0n) {
-          continue;
-        }
-        const shareDecimal = formatBaseUnits(share, 9);
-        allocations.push({
-          mint: target.mint,
-          label: target.label,
-          amountDecimal: shareDecimal,
-        });
-        remaining -= share;
-        if (remaining <= 0n) break;
-      }
-
-      if (allocations.length > 0) {
-        entries.push({
-          wallet,
-          summary,
-          allocations,
-        });
-      }
+      entries.push({
+        wallet,
+        summary,
+        allocations,
+      });
 
       await balanceRpcDelay();
     }
@@ -8724,7 +8907,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
         {
           fromMint: SOL_MINT,
           toMint: DEFAULT_USDC_MINT,
-          amount: { mode: "range", min: 0.12, max: 0.35 },
+          amount: { mode: "range", min: 0.02, max: 0.35 },
           description: "Establish USDC base from SOL",
         },
         {
@@ -8977,6 +9160,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       description:
         "High-value version of Icarus with $5 minimum swaps and extended delays for whale positions.",
       startMint: SOL_MINT,
+      minSwapValueUSD: 5,
       cycleTemplate: [
         {
           fromMint: SOL_MINT,
@@ -8997,19 +9181,20 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           toMint: SOL_MINT,
           amount: "all",
           description: "Harvest the random position back to SOL (full balance)",
-          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
           randomization: {
             mode: "session-to-sol",
             sessionGroup: "titan-core",
           },
+          delayAfterMs: { min: 30_000, max: 600_000 },
         },
       ],
       swapCountRange: { min: 18, max: 120 },
       minimumCycles: 2,
       requireTerminalSolHop: true,
       forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
-      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      waitBoundsMs: { min: 30_000, max: 600_000 },  // 30 seconds to 10 minutes between swaps
       defaultDurationMs: 30 * 60 * 1000,
+      loopable: true,
     },
   ],
   [
@@ -9020,6 +9205,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       description:
         "High-value version of Zenith with $5 minimum swaps and extended delays for substantial holdings.",
       startMint: SOL_MINT,
+      minSwapValueUSD: 5,
       cycleTemplate: [
         {
           fromMint: SOL_MINT,
@@ -9054,19 +9240,20 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           toMint: SOL_MINT,
           amount: "all",
           description: "Realise the position back to SOL (full balance)",
-          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
           randomization: {
             mode: "session-to-sol",
             sessionGroup: "odyssey-core",
           },
+          delayAfterMs: { min: 30_000, max: 600_000 },
         },
       ],
       swapCountRange: { min: 30, max: 180 },
       minimumCycles: 2,
       requireTerminalSolHop: true,
       forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
-      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      waitBoundsMs: { min: 30_000, max: 600_000 },  // 30 seconds to 10 minutes between swaps
       defaultDurationMs: 90 * 60 * 1000,
+      loopable: true,
     },
   ],
   [
@@ -9077,11 +9264,12 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       description:
         "High-value version of Aurora with $5 minimum swaps and extended delays for commanding long-term positions.",
       startMint: SOL_MINT,
+      minSwapValueUSD: 5,
       cycleTemplate: [
         {
           fromMint: SOL_MINT,
           toMint: RANDOM_MINT_PLACEHOLDER,
-          amount: { mode: "range", min: 0.12, max: 0.35 },
+          amount: { mode: "range", min: 0.02, max: 0.35 },
           description: "Feather SOL into a random token (whale-sized)",
           delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
           randomization: {
@@ -9097,10 +9285,155 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
           toMint: SOL_MINT,
           amount: "all",
           description: "Rebalance back to SOL (full balance)",
-          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
           randomization: {
             mode: "session-to-sol",
             sessionGroup: "sovereign-core",
+          },
+          delayAfterMs: { min: 30_000, max: 600_000 },
+        },
+      ],
+      swapCountRange: { min: 20, max: 150 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 30_000, max: 600_000 },  // 30 seconds to 10 minutes between swaps
+      defaultDurationMs: 8 * 60 * 60 * 1000,
+      loopable: true,
+    },
+  ],
+  [
+    "nova",
+    {
+      key: "nova",
+      label: "Nova",
+      description:
+        "Supernova version of Icarus with $3.50 minimum swaps, 30s-10min holding periods, and infinite loop capability.",
+      startMint: SOL_MINT,
+      minSwapValueUSD: 3.5,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.15, max: 0.4 },
+          description: "Deploy SOL into a random token (supernova-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "nova-core",
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Harvest the random position back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "nova-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 18, max: 120 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      defaultDurationMs: 30 * 60 * 1000,
+      loopable: true,  // Supports infinite looping
+    },
+  ],
+  [
+    "nexus",
+    {
+      key: "nexus",
+      label: "Nexus",
+      description:
+        "Supernova version of Zenith with $3.50 minimum swaps, 30s-10min holding periods, and infinite loop capability.",
+      startMint: SOL_MINT,
+      minSwapValueUSD: 3.5,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.2, max: 0.45 },
+          description: "Seed a random token from SOL (supernova-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "nexus-core",
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: "all",
+          description: "Rotate into another random pool (full balance)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay while holding token
+          randomization: {
+            mode: "session-to-random",
+            sessionGroup: "nexus-core",
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Realise the position back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "nexus-core",
+          },
+        },
+      ],
+      swapCountRange: { min: 30, max: 180 },
+      minimumCycles: 2,
+      requireTerminalSolHop: true,
+      forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
+      waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
+      defaultDurationMs: 90 * 60 * 1000,
+      loopable: true,  // Supports infinite looping
+    },
+  ],
+  [
+    "nebula",
+    {
+      key: "nebula",
+      label: "Nebula",
+      description:
+        "Supernova version of Aurora with $3.50 minimum swaps, 30s-10min holding periods, and infinite loop capability.",
+      startMint: SOL_MINT,
+      minSwapValueUSD: 3.5,
+      cycleTemplate: [
+        {
+          fromMint: SOL_MINT,
+          toMint: RANDOM_MINT_PLACEHOLDER,
+          amount: { mode: "range", min: 0.02, max: 0.35 },
+          description: "Feather SOL into a random token (supernova-sized)",
+          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          randomization: {
+            mode: "sol-to-random",
+            sessionGroup: "nebula-core",
+            poolTags: ["swappable"],
+            excludeMints: [SOL_MINT],
+          },
+        },
+        {
+          fromMint: RANDOM_MINT_PLACEHOLDER,
+          toMint: SOL_MINT,
+          amount: "all",
+          description: "Rebalance back to SOL (full balance)",
+          delayAfterMs: { min: 1_000, max: 3_000 },  // Minimal delay before next SOL deployment
+          randomization: {
+            mode: "session-to-sol",
+            sessionGroup: "nebula-core",
           },
         },
       ],
@@ -9110,6 +9443,7 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
       waitBoundsMs: { min: 1_000, max: 600_000 },  // Allow per-step delays to override
       defaultDurationMs: 8 * 60 * 60 * 1000,
+      loopable: true,  // Supports infinite looping
     },
   ],
 ]);
@@ -9368,6 +9702,82 @@ const mintResolver = {
   }
 };
 
+// USD Validation Helper: Validates and auto-adjusts swap amounts to meet minimum USD value
+async function validateAndAdjustSwapAmountUSD(fromMint, plannedSolAmount, minUSD) {
+  try {
+    // Fetch current SOL price in USD
+    const url = new URL(JUPITER_PRICE_ENDPOINT);
+    url.searchParams.set("ids", SOL_MINT);
+    const resp = await fetch(url.toString(), {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!resp.ok) {
+      console.warn(paint("⚠️  Failed to fetch SOL price for USD validation, proceeding with planned amount", "warn"));
+      return {
+        isValid: true,
+        adjustedAmount: plannedSolAmount,
+        usdValue: null,
+        pricePerSol: null,
+        skipped: false
+      };
+    }
+
+    const data = await resp.json();
+    const priceData = data?.data?.[SOL_MINT];
+
+    if (!priceData?.price) {
+      console.warn(paint("⚠️  SOL price unavailable, proceeding with planned amount", "warn"));
+      return {
+        isValid: true,
+        adjustedAmount: plannedSolAmount,
+        usdValue: null,
+        pricePerSol: null,
+        skipped: false
+      };
+    }
+
+    const pricePerSol = priceData.price;
+    const plannedUsdValue = plannedSolAmount * pricePerSol;
+
+    // Check if planned amount meets minimum
+    if (plannedUsdValue >= minUSD) {
+      return {
+        isValid: true,
+        adjustedAmount: plannedSolAmount,
+        usdValue: plannedUsdValue,
+        pricePerSol: pricePerSol,
+        skipped: false
+      };
+    }
+
+    // Calculate adjusted amount to meet minimum USD value
+    const adjustedAmount = minUSD / pricePerSol;
+    const adjustedUsdValue = adjustedAmount * pricePerSol;
+
+    return {
+      isValid: false,
+      adjustedAmount: adjustedAmount,
+      usdValue: adjustedUsdValue,
+      plannedUsdValue: plannedUsdValue,
+      pricePerSol: pricePerSol,
+      skipped: false
+    };
+
+  } catch (err) {
+    console.warn(paint(`⚠️  USD validation error: ${err.message}, proceeding with planned amount`, "warn"));
+    return {
+      isValid: true,
+      adjustedAmount: plannedSolAmount,
+      usdValue: null,
+      pricePerSol: null,
+      skipped: false
+    };
+  }
+}
+
 async function runPrewrittenFlowPlan(flowKey, options = {}) {
   const normalizedKey = normalizePrewrittenFlowKey(flowKey);
   const flow =
@@ -9405,7 +9815,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   }
 
   const runtimeProfile = PREWRITTEN_FLOW_DEFINITIONS?.[normalizedKey]?.runtimeProfile;
-  const selectMintForFlow = (randomMeta = {}) => {
+  const selectMintForFlow = (randomMeta = {}, rng = flowRng) => {
     let pool = TOKEN_CATALOG.filter((entry) => entry && entry.mint);
     if (Array.isArray(randomMeta.poolTags) && randomMeta.poolTags.length > 0) {
       const tagSet = new Set(
@@ -9439,7 +9849,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     if (candidates.length === 0) {
       return null;
     }
-    const pickIndex = Math.floor(flowRng() * candidates.length) % candidates.length;
+    const pickIndex = Math.floor(rng() * candidates.length) % candidates.length;
     const pick = candidates[pickIndex] || candidates[0];
     if (!pick) return null;
     return {
@@ -9752,6 +10162,126 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     console.log(paint(`Wallet scope: ${walletNames}.`, "muted"));
   }
 
+  // First-hop USD validation and wallet gating (if minSwapValueUSD is set)
+  if (typeof flow.minSwapValueUSD === 'number' && flow.minSwapValueUSD > 0 && schedule.length > 0) {
+    console.log(paint(`\n💵 First-hop USD validation enabled: $${flow.minSwapValueUSD.toFixed(2)} minimum`, "info"));
+
+    const firstStep = schedule[0];
+    const firstStepAmount = normalizeFlowAmount(firstStep.amount, { rng: flowRng });
+
+    // Only validate if first hop is from SOL
+    if (SOL_LIKE_MINTS.has(firstStep.fromMint)) {
+      const validWallets = [];
+      const skippedWallets = [];
+
+      // Create RPC connection for balance checks
+      const balanceConnection = createRpcConnection("confirmed");
+
+      for (const wallet of walletList) {
+        try {
+          // Get wallet SOL balance
+          const solBalance = await getSolBalance(balanceConnection, wallet.kp.publicKey);
+          const solBalanceFormatted = formatBaseUnits(BigInt(solBalance), 9);
+
+          // Determine planned SOL amount for first swap
+          let plannedSolAmount;
+          if (typeof firstStepAmount === 'string') {
+            if (firstStepAmount === 'all' || firstStepAmount === 'random') {
+              // For 'all' or 'random', use a portion of balance (conservatively estimate 80% for 'all', 50% for 'random')
+              plannedSolAmount = Number(solBalance) / 1e9 * (firstStepAmount === 'all' ? 0.8 : 0.5);
+            } else {
+              plannedSolAmount = Number(solBalance) / 1e9;
+            }
+          } else if (typeof firstStepAmount === 'object' && firstStepAmount !== null) {
+            if (firstStepAmount.mode === 'range') {
+              // Use the minimum of the range for validation
+              plannedSolAmount = Number(firstStepAmount.min) || 0;
+            } else {
+              plannedSolAmount = Number(solBalance) / 1e9;
+            }
+          } else if (typeof firstStepAmount === 'number') {
+            plannedSolAmount = firstStepAmount;
+          } else {
+            // Default to half of balance if we can't determine
+            plannedSolAmount = Number(solBalance) / 1e9 * 0.5;
+          }
+
+          // Validate and potentially adjust the amount
+          const validation = await validateAndAdjustSwapAmountUSD(firstStep.fromMint, plannedSolAmount, flow.minSwapValueUSD);
+
+          if (validation.skipped) {
+            skippedWallets.push({ wallet, reason: validation.reason });
+            continue;
+          }
+
+          // Check if wallet has enough SOL to meet the minimum
+          const maxAvailableSol = Number(solBalance) / 1e9;
+
+          if (validation.adjustedAmount > maxAvailableSol) {
+            // Wallet doesn't have enough SOL to meet minimum USD value
+            const estimatedValue = maxAvailableSol * (validation.pricePerSol || 0);
+            console.log(
+              paint(
+                `  ⏭️  Skipping ${wallet.name}: SOL balance ${solBalanceFormatted} SOL (~$${estimatedValue.toFixed(2)}) is below $${flow.minSwapValueUSD.toFixed(2)} minimum`,
+                "warn"
+              )
+            );
+            skippedWallets.push({ wallet, reason: `Insufficient balance (${solBalanceFormatted} SOL)` });
+            continue;
+          }
+
+          // Wallet passes validation
+          if (!validation.isValid && validation.adjustedAmount > plannedSolAmount) {
+            // Amount was auto-adjusted
+            console.log(
+              paint(
+                `  ✓ ${wallet.name}: Auto-adjusted first swap from ${plannedSolAmount.toFixed(4)} to ${validation.adjustedAmount.toFixed(4)} SOL (~$${validation.usdValue.toFixed(2)})`,
+                "success"
+              )
+            );
+          } else if (validation.usdValue !== null) {
+            console.log(
+              paint(
+                `  ✓ ${wallet.name}: First swap ~$${validation.usdValue.toFixed(2)} (${plannedSolAmount.toFixed(4)} SOL) meets minimum`,
+                "muted"
+              )
+            );
+          }
+
+          validWallets.push(wallet);
+
+        } catch (err) {
+          console.warn(
+            paint(`  ⚠️  ${wallet.name}: USD validation error (${err.message}), including anyway`, "warn")
+          );
+          validWallets.push(wallet);
+        }
+      }
+
+      // Update wallet list to only include valid wallets
+      walletList = validWallets;
+
+      if (validWallets.length === 0) {
+        console.log(paint("\n❌ No wallets meet the minimum USD requirement for first hop. Flow aborted.", "error"));
+        return {
+          key: flow.key,
+          plannedSwaps: 0,
+          cycles: 0,
+          waitTotalMs: 0,
+          targetWaitTotalMs: 0,
+          finalMint: flow.startMint || SOL_MINT,
+          skippedWallets: skippedWallets.length,
+        };
+      }
+
+      if (skippedWallets.length > 0) {
+        console.log(paint(`\n📊 Validation summary: ${validWallets.length} wallet(s) will execute, ${skippedWallets.length} skipped`, "info"));
+      }
+    } else {
+      console.log(paint("  ℹ️  First hop is not from SOL, skipping USD validation", "muted"));
+    }
+  }
+
   // Initialize swap counter for forced SOL returns
   let swapCounter = 0;
   let nextSolReturnAt = null;
@@ -9795,10 +10325,8 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
       if (step.description) descriptionParts.push(`— ${step.description}`);
       console.log(paint(descriptionParts.join(" "), "info"));
 
-      // Execute wallets sequentially to maintain consistent output and session state
-      for (let walletIdx = 0; walletIdx < walletList.length; walletIdx++) {
-        const wallet = walletList[walletIdx];
-
+      // Execute all wallets concurrently for true parallel execution
+      await Promise.all(walletList.map(async (wallet, walletIdx) => {
         // Get or create per-wallet session map for independent token selection
         if (!perWalletSessions.has(wallet.name)) {
           perWalletSessions.set(wallet.name, new Map());
@@ -9819,13 +10347,13 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
         try {
           resolvedStep = resolveRandomizedStep(step, walletRng, {
             sessionState: walletSessionState,
-            selectMint: selectMintForFlow,
+            selectMint: (meta) => selectMintForFlow(meta, walletRng),
           });
         } catch (err) {
           console.error(
             paint(`  ${wallet.name}: flow hop skipped: ${err?.message || err}`, "warn")
           );
-          continue;
+          return;
         }
 
         const resolvedFromMint = resolvedStep?.inMint ?? step.fromMint;
@@ -9843,7 +10371,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             paint(`  ${wallet.name}: flow hop failed: ${err?.message || err}`, "error")
           );
         }
-      }
+      }));
       currentMint = step.toMint; // Keep as placeholder since each wallet has different token
     } else {
       // Standard non-randomized or session-based randomization: all wallets use same token
@@ -10206,7 +10734,8 @@ async function closeEmptyTokenAccounts() {
 
   const MAX_CLOSE_ACCOUNTS_PER_TX = 12;
 
-  for (const w of wallets) {
+  // Process all wallets concurrently for faster cleanup
+  await Promise.all(wallets.map(async (w) => {
     const lookupConnection = createRpcConnection("confirmed");
     const parsed = await getAllParsedTokenAccounts(lookupConnection, w.kp.publicKey);
 
@@ -10271,7 +10800,7 @@ async function closeEmptyTokenAccounts() {
 
     if (closable.length === 0) {
       console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
-      continue;
+      return; // Exit this wallet's async task
     }
 
     const closeConnection = createRpcConnection("confirmed");
@@ -10286,86 +10815,92 @@ async function closeEmptyTokenAccounts() {
         })
         .join(", ");
 
+    const chunkTasks = [];
     for (let i = 0; i < closable.length; i += MAX_CLOSE_ACCOUNTS_PER_TX) {
       const chunk = closable.slice(i, i + MAX_CLOSE_ACCOUNTS_PER_TX);
-      const tx = new Transaction();
-      for (const entry of chunk) {
-        tx.add(
-          createCloseAccountInstruction(
-            entry.accountPubkey,
-            w.kp.publicKey,
-            w.kp.publicKey,
-            [],
-            entry.programId
-          )
-        );
-      }
-      tx.feePayer = w.kp.publicKey;
-
-      try {
-        const { blockhash, lastValidBlockHeight } = await closeConnection.getLatestBlockhash("confirmed");
-        tx.recentBlockhash = blockhash;
-        tx.sign(w.kp);
-        const raw = tx.serialize();
-        const signature = await closeConnection.sendRawTransaction(raw);
-        await closeConnection.confirmTransaction(
-          { signature, blockhash, lastValidBlockHeight },
-          "confirmed"
-        );
-        closedCount += chunk.length;
-        console.log(
-          paint(
-            `Closed ${chunk.length} account(s) for ${w.name}: ${chunkLabels(chunk)} — tx ${signature}`,
-            "success"
-          )
-        );
-      } catch (bundleErr) {
-        console.warn(
-          paint(
-            `  bundle close failed (${bundleErr.message || bundleErr}); retrying individually.`,
-            "warn"
-          )
-        );
+      chunkTasks.push(async () => {
+        const tx = new Transaction();
         for (const entry of chunk) {
-          try {
-            const signature = await closeAccount(
-              closeConnection,
-              w.kp,
+          tx.add(
+            createCloseAccountInstruction(
               entry.accountPubkey,
               w.kp.publicKey,
-              w.kp,
+              w.kp.publicKey,
               [],
-              undefined,
               entry.programId
-            );
-            closedCount += 1;
-            console.log(
-              paint(
-                `  Closed token account ${entry.accountPubkey.toBase58()} (${entry.symbol || symbolForMint(entry.mint)}) — tx ${signature}`,
-                "success"
-              )
-            );
-          } catch (err) {
-            logDetailedError(`  close ${entry.accountPubkey.toBase58()} failed`, err);
+            )
+          );
+        }
+        tx.feePayer = w.kp.publicKey;
+
+        try {
+          const { blockhash, lastValidBlockHeight } = await closeConnection.getLatestBlockhash("confirmed");
+          tx.recentBlockhash = blockhash;
+          tx.sign(w.kp);
+          const raw = tx.serialize();
+          const signature = await closeConnection.sendRawTransaction(raw);
+          await closeConnection.confirmTransaction(
+            { signature, blockhash, lastValidBlockHeight },
+            "confirmed"
+          );
+          closedCount += chunk.length;
+          console.log(
+            paint(
+              `Closed ${chunk.length} account(s) for ${w.name}: ${chunkLabels(chunk)} — tx ${signature}`,
+              "success"
+            )
+          );
+        } catch (bundleErr) {
+          console.warn(
+            paint(
+              `  bundle close failed (${bundleErr.message || bundleErr}); retrying individually.`,
+              "warn"
+            )
+          );
+          for (const entry of chunk) {
+            try {
+              const signature = await closeAccount(
+                closeConnection,
+                w.kp,
+                entry.accountPubkey,
+                w.kp.publicKey,
+                w.kp,
+                [],
+                undefined,
+                entry.programId
+              );
+              closedCount += 1;
+              console.log(
+                paint(
+                  `  Closed token account ${entry.accountPubkey.toBase58()} (${entry.symbol || symbolForMint(entry.mint)}) — tx ${signature}`,
+                  "success"
+                )
+              );
+            } catch (err) {
+              logDetailedError(`  close ${entry.accountPubkey.toBase58()} failed`, err);
+            }
           }
         }
-      }
+      });
     }
 
-    if (closedCount === 0) {
-      console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
-      continue;
+    const CHUNK_CONCURRENCY = 3;
+    for (let idx = 0; idx < chunkTasks.length; idx += CHUNK_CONCURRENCY) {
+      const batch = chunkTasks.slice(idx, idx + CHUNK_CONCURRENCY);
+      await Promise.all(batch.map((task) => task()));
     }
 
-    const balanceConnection = createRpcConnection("confirmed");
-    const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
-    console.log(
-      paint(
-        `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
-        "muted"
-      )
-    );
-  }
+    if (closedCount > 0) {
+      const balanceConnection = createRpcConnection("confirmed");
+      const solBalance = await getSolBalance(balanceConnection, w.kp.publicKey);
+      console.log(
+        paint(
+          `Post-cleanup SOL for ${w.name}: ${formatBaseUnits(BigInt(solBalance), 9)} SOL`,
+          "muted"
+        )
+      );
+    }
+  }))
 }
 
 function toSafeNumber(value) {
@@ -13502,6 +14037,7 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
   }
   const quietSkips = options.quietSkips === true;
   const includeDisabled = options.includeDisabled === true;
+  const failOnMinOutput = options.failOnMinOutput === true;
   if (!includeDisabled) {
     const disabledWithinScope = walletList.filter((w) =>
       isWalletDisabledByGuard(w.name)
@@ -14154,6 +14690,19 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
         } catch (innerErr) {
           const errorInfo = classifySwapError(innerErr);
 
+          if (errorInfo.type === 'min_output') {
+            if (failOnMinOutput) {
+              throw innerErr;
+            }
+            if (!quietSkips) {
+              logWarn(`  skipping: ${errorInfo.message || "minimum output not satisfied"}`);
+            }
+            if (!SOL_LIKE_MINTS.has(inputMint)) {
+              walletSkipRegistry?.add(inputMint);
+            }
+            break;
+          }
+
           if (engine === "ultra") {
             const status = innerErr?.status ?? null;
             const message = innerErr?.message || "";
@@ -14302,6 +14851,17 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
         logWarn(`  ${w.name}: skipping lend share token (not tradable via swap API). Use 'lend withdraw' to redeem.`);
         if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
         break; // Skip this wallet for this token
+      }
+
+      if (errorInfo.type === 'min_output') {
+        if (failOnMinOutput) {
+          throw e;
+        }
+        if (!quietSkips) {
+          logWarn(`  skipping: ${errorInfo.message || "minimum output not satisfied"}`);
+        }
+        if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
+        continue;
       }
 
       // Handle rate limiting at outer level
@@ -15932,6 +16492,12 @@ async function main() {
       await runFlowWithLoopOption("odyssey");
     } else if (cmd === "sovereign") {
       await runFlowWithLoopOption("sovereign");
+    } else if (cmd === "nova") {
+      await runFlowWithLoopOption("nova");
+    } else if (cmd === "nexus") {
+      await runFlowWithLoopOption("nexus");
+    } else if (cmd === "nebula") {
+      await runFlowWithLoopOption("nebula");
     } else {
       throw new Error("Unknown command: " + cmd);
     }
