@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.3.2.5] - 2025-10-27
+
+### Fixed (CRITICAL - NUCLEAR OPTION)
+- **Process-Level Error Handlers**: Added global unhandledRejection and uncaughtException handlers
+  - Catches ANY error that escapes all try/catch blocks (including deep @solana/web3.js errors)
+  - Detects rate limit errors (429, "too many requests", "rate limit") at process level
+  - Rate limit errors: Log warning and continue (process never crashes)
+  - Non-rate limit errors: Log error and continue (with counter safety)
+  - Safety limit: Exits after 50 unhandled errors to prevent infinite loops
+  - This is the FINAL safety net - guarantees process continuity
+  - Fixes: Unhandled promise rejections from web3.js RPC client causing "status 1" exits
+
 ## [1.3.2.4] - 2025-10-27
 
 ### Fixed (CRITICAL)

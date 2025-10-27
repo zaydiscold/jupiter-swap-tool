@@ -72,7 +72,59 @@ import {
 // version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.2.4";
+// CRITICAL: Global error handlers to prevent crashes from unhandled RPC errors
+// These catch errors that escape try/catch blocks deep in @solana/web3.js
+let globalErrorCount = 0;
+const MAX_GLOBAL_ERRORS_BEFORE_EXIT = 50; // Safety limit to prevent infinite loops
+
+process.on('unhandledRejection', (reason, promise) => {
+  globalErrorCount++;
+  const reasonStr = String(reason?.message || reason || 'Unknown error');
+  const isRateLimit = reasonStr.toLowerCase().includes('429') ||
+                     reasonStr.toLowerCase().includes('too many requests') ||
+                     reasonStr.toLowerCase().includes('rate limit');
+
+  if (isRateLimit) {
+    console.warn(`⚠️  Caught unhandled rate limit error (${globalErrorCount}/${MAX_GLOBAL_ERRORS_BEFORE_EXIT})`);
+    console.warn(`   ${reasonStr.slice(0, 200)}`);
+    console.warn(`   Process will continue - RPC rotation should handle this automatically`);
+    // Don't exit, let the process continue
+  } else {
+    console.error(`❌ Unhandled rejection (${globalErrorCount}/${MAX_GLOBAL_ERRORS_BEFORE_EXIT}):`, reasonStr.slice(0, 300));
+  }
+
+  // Safety exit if too many errors occur
+  if (globalErrorCount >= MAX_GLOBAL_ERRORS_BEFORE_EXIT) {
+    console.error(`\n💥 Too many unhandled errors (${globalErrorCount}). Exiting to prevent infinite loop.`);
+    process.exit(1);
+  }
+});
+
+process.on('uncaughtException', (error, origin) => {
+  globalErrorCount++;
+  const errorStr = String(error?.message || error || 'Unknown error');
+  const isRateLimit = errorStr.toLowerCase().includes('429') ||
+                     errorStr.toLowerCase().includes('too many requests') ||
+                     errorStr.toLowerCase().includes('rate limit');
+
+  if (isRateLimit) {
+    console.warn(`⚠️  Caught uncaught rate limit exception (${globalErrorCount}/${MAX_GLOBAL_ERRORS_BEFORE_EXIT})`);
+    console.warn(`   ${errorStr.slice(0, 200)}`);
+    console.warn(`   Process will continue - RPC rotation should handle this automatically`);
+    // Don't exit, let the process continue
+  } else {
+    console.error(`❌ Uncaught exception (${globalErrorCount}/${MAX_GLOBAL_ERRORS_BEFORE_EXIT}):`, errorStr.slice(0, 300));
+    console.error(`   Origin: ${origin}`);
+  }
+
+  // Safety exit if too many errors occur
+  if (globalErrorCount >= MAX_GLOBAL_ERRORS_BEFORE_EXIT) {
+    console.error(`\n💥 Too many uncaught errors (${globalErrorCount}). Exiting to prevent infinite loop.`);
+    process.exit(1);
+  }
+});
+
+const TOOL_VERSION = "1.3.2.5";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
