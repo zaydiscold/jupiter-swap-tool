@@ -3255,6 +3255,7 @@ async function handlePerpsPositions(args) {
         "muted"
       )
     );
+    console.log(paint("  Note: Newly opened positions may take a few moments to appear in the API.", "muted"));
     return;
   }
 
@@ -3270,23 +3271,105 @@ async function handlePerpsPositions(args) {
         "info"
       )
     );
-    const sample = entries.slice(0, Math.min(entries.length, 6));
-    for (const entry of sample) {
+
+    // Show detailed position cards instead of one-line snippets
+    for (const entry of entries) {
       const ownerKey =
         normalizeWalletIdentifier(entry.owner) ||
         normalizeWalletIdentifier(entry.wallet) ||
         normalizeWalletIdentifier(entry.account);
-      const label = ownerKey && walletNameMap.get(ownerKey)
+      const walletLabel = ownerKey && walletNameMap.get(ownerKey)
         ? walletNameMap.get(ownerKey)
-        : ownerKey || "unknown";
-      console.log(
-        paint(`    ${label}: ${formatPerpsPositionSnippet(entry)}`, "muted")
-      );
-    }
-    if (entries.length > sample.length) {
-      console.log(
-        paint(`    ... ${entries.length - sample.length} more position(s).`, "muted")
-      );
+        : ownerKey || entry._walletName || "unknown";
+
+      console.log(paint(`\n  ━━━ Position: ${walletLabel} ━━━`, "info"));
+
+      // Position ID
+      const positionId = entry.positionPubkey || entry.position || entry.id || entry.pubkey;
+      if (positionId) {
+        console.log(paint(`    Position ID: ${positionId}`, "muted"));
+      }
+
+      // Market
+      const market = entry.market || entry.symbol || entry.pair || "Unknown";
+      console.log(paint(`    Market: ${market}`, "info"));
+
+      // Side
+      const side = entry.side || entry.direction || entry.positionSide;
+      if (side) {
+        const sideLabel = String(side).toUpperCase();
+        const sideColor = sideLabel === "LONG" ? "success" : "warn";
+        console.log(paint(`    Direction: ${sideLabel}`, sideColor));
+      }
+
+      // Leverage
+      const leverage = entry.leverage || entry.currentLeverage;
+      if (leverage) {
+        console.log(paint(`    Leverage: ${leverage}x`, "info"));
+      }
+
+      // Entry Price
+      const entryPrice = entry.entryPrice || entry.entryPriceUsd || entry.avgEntryPrice;
+      if (entryPrice) {
+        console.log(paint(`    Entry Price: $${parseFloat(entryPrice).toFixed(2)}`, "muted"));
+      }
+
+      // Current/Mark Price
+      const markPrice = entry.markPrice || entry.currentPrice || entry.markPriceUsd;
+      if (markPrice) {
+        console.log(paint(`    Mark Price: $${parseFloat(markPrice).toFixed(2)}`, "muted"));
+      }
+
+      // Liquidation Price
+      const liqPrice = entry.liquidationPrice || entry.liquidationPriceUsd || entry.liqPrice;
+      if (liqPrice) {
+        console.log(paint(`    Liquidation Price: $${parseFloat(liqPrice).toFixed(2)} ⚠️`, "warn"));
+
+        // Calculate distance to liquidation
+        if (markPrice && entryPrice) {
+          const currentPrice = parseFloat(markPrice);
+          const liquidationPrice = parseFloat(liqPrice);
+          const distance = Math.abs(currentPrice - liquidationPrice);
+          const distancePct = ((distance / currentPrice) * 100).toFixed(2);
+          console.log(paint(`    Liquidation Distance: ${distancePct}%`, "muted"));
+        }
+      }
+
+      // Position Size
+      const posSize = entry.positionSize || entry.positionSizeUsd || entry.notionalUsd || entry.notional;
+      if (posSize) {
+        console.log(paint(`    Position Size: $${parseFloat(posSize).toFixed(2)}`, "info"));
+      }
+
+      // Collateral
+      const collateral = entry.collateral || entry.collateralUsd || entry.marginUsd;
+      if (collateral) {
+        console.log(paint(`    Collateral: $${parseFloat(collateral).toFixed(2)}`, "muted"));
+      }
+
+      // PnL
+      const pnl = entry.unrealizedPnl || entry.unrealizedPnL || entry.pnlUsd || entry.pnl;
+      if (pnl !== undefined && pnl !== null) {
+        const pnlValue = parseFloat(pnl);
+        const pnlColor = pnlValue >= 0 ? "success" : "error";
+        const pnlSign = pnlValue >= 0 ? "+" : "";
+        console.log(paint(`    Unrealized PnL: ${pnlSign}$${pnlValue.toFixed(2)}`, pnlColor));
+
+        // Show PnL percentage if we have collateral
+        if (collateral) {
+          const pnlPct = ((pnlValue / parseFloat(collateral)) * 100).toFixed(2);
+          console.log(paint(`    PnL %: ${pnlSign}${pnlPct}%`, pnlColor));
+        }
+      }
+
+      // Close instructions
+      console.log(paint(`    💡 Close: node cli_trader.js perps close ${walletLabel} --market ${market}`, "muted"));
+
+      // Show raw data if DEBUG mode
+      if (process.env.DEBUG_PERPS || process.env.VERBOSE) {
+        console.log(paint("    Raw data:", "muted"));
+        console.log(JSON.stringify(entry, null, 2));
+      }
     }
 }
 
@@ -3625,16 +3708,67 @@ async function handlePerpsOpen(args) {
 
       if (result.ok && result.data) {
         console.log(paint(`\n  ✅ ${wallet.name}: Position opened successfully!`, "success"));
-        if (result.data.transaction) {
-          console.log(paint("    Transaction ready to sign and broadcast.", "info"));
+
+        // Extract readable position info from the quote
+        const quote = result.data.quote || {};
+        const positionPubkey = result.data.positionPubkey;
+
+        if (positionPubkey) {
+          console.log(paint(`    Position ID: ${positionPubkey}`, "info"));
         }
-        if (result.data.positionPubkey) {
-          console.log(paint(`    Position: ${result.data.positionPubkey}`, "muted"));
+
+        // Show key position metrics in a user-friendly format
+        if (quote.side) {
+          const sideLabel = String(quote.side).toUpperCase();
+          const sideColor = sideLabel === "LONG" ? "success" : "warn";
+          console.log(paint(`    Direction: ${sideLabel}`, sideColor));
         }
-        if (result.data.expectedOutAmount) {
-          console.log(paint(`    Expected: $${(result.data.expectedOutAmount / 1e6).toFixed(2)}`, "muted"));
+
+        if (quote.leverage) {
+          console.log(paint(`    Leverage: ${quote.leverage}x`, "info"));
         }
-        logPerpsApiResult("increase-position", result);
+
+        if (quote.entryPriceUsd) {
+          console.log(paint(`    Entry Price: $${parseFloat(quote.entryPriceUsd).toFixed(2)}`, "muted"));
+        }
+
+        if (quote.liquidationPriceUsd) {
+          const liqPrice = parseFloat(quote.liquidationPriceUsd).toFixed(2);
+          console.log(paint(`    Liquidation Price: $${liqPrice} ⚠️`, "warn"));
+        }
+
+        if (quote.positionCollateralSizeUsd) {
+          const collateral = parseFloat(quote.positionCollateralSizeUsd).toFixed(2);
+          console.log(paint(`    Collateral: $${collateral}`, "muted"));
+        }
+
+        if (quote.positionSizeUsd) {
+          const posSize = parseFloat(quote.positionSizeUsd).toFixed(2);
+          console.log(paint(`    Position Size: $${posSize}`, "info"));
+        }
+
+        // Calculate and show the liquidation distance
+        if (quote.entryPriceUsd && quote.liquidationPriceUsd) {
+          const entryPrice = parseFloat(quote.entryPriceUsd);
+          const liqPrice = parseFloat(quote.liquidationPriceUsd);
+          const distance = Math.abs(entryPrice - liqPrice);
+          const distancePct = ((distance / entryPrice) * 100).toFixed(2);
+          console.log(paint(`    Liquidation Distance: ${distancePct}% ($${distance.toFixed(2)})`, "muted"));
+        }
+
+        // Show fees
+        const totalFees = (parseFloat(quote.openFeeUsd || 0) + parseFloat(quote.priceImpactFeeUsd || 0)).toFixed(2);
+        if (parseFloat(totalFees) > 0) {
+          console.log(paint(`    Total Fees: $${totalFees}`, "muted"));
+        }
+
+        console.log(paint(`\n    💡 To view this position: node cli_trader.js perps positions ${wallet.name}`, "muted"));
+        console.log(paint(`    💡 To close this position: node cli_trader.js perps close ${wallet.name} --market ${market}`, "muted"));
+
+        // Only show detailed JSON if DEBUG_PERPS or VERBOSE is set
+        if (process.env.DEBUG_PERPS || process.env.VERBOSE) {
+          logPerpsApiResult("increase-position", result);
+        }
       } else {
         console.error(paint(`  ❌ ${wallet.name}: Failed to open position`, "error"));
         if (result.data?.error || result.data?.message) {
@@ -3757,9 +3891,14 @@ async function handlePerpsClose(args) {
       if (result.ok && result.data) {
         console.log(paint("\n  ✅ All positions closed successfully!", "success"));
         if (Array.isArray(result.data.transactions)) {
-          console.log(paint(`  ${result.data.transactions.length} transaction(s) ready to sign.`, "info"));
+          console.log(paint(`    ${result.data.transactions.length} transaction(s) processed`, "info"));
         }
-        logPerpsApiResult("close-all", result);
+        console.log(paint("    💡 Check your wallet balance to confirm closure", "muted"));
+
+        // Only show detailed JSON if DEBUG_PERPS or VERBOSE is set
+        if (process.env.DEBUG_PERPS || process.env.VERBOSE) {
+          logPerpsApiResult("close-all", result);
+        }
       } else {
         console.error(paint("  ❌ Failed to close all positions", "error"));
         if (result.data?.error) {
@@ -3799,13 +3938,33 @@ async function handlePerpsClose(args) {
 
       if (result.ok && result.data) {
         console.log(paint("\n  ✅ Position closed successfully!", "success"));
-        if (result.data.transaction) {
-          console.log(paint("  Transaction ready to sign.", "info"));
-        }
+
         if (result.data.closedPosition) {
-          console.log(paint(`  Closed: ${result.data.closedPosition}`, "muted"));
+          console.log(paint(`    Position ID: ${result.data.closedPosition}`, "muted"));
         }
-        logPerpsApiResult("decrease", result);
+
+        // Extract PnL info if available
+        const quote = result.data.quote || {};
+        if (quote.realizedPnl || quote.realizedPnlUsd) {
+          const pnl = parseFloat(quote.realizedPnl || quote.realizedPnlUsd);
+          const pnlColor = pnl >= 0 ? "success" : "error";
+          const pnlSign = pnl >= 0 ? "+" : "";
+          console.log(paint(`    Realized PnL: ${pnlSign}$${pnl.toFixed(2)}`, pnlColor));
+        }
+
+        // Show fees
+        if (quote.closeFeeUsd || quote.feeUsd) {
+          const fee = parseFloat(quote.closeFeeUsd || quote.feeUsd);
+          console.log(paint(`    Close Fee: $${fee.toFixed(2)}`, "muted"));
+        }
+
+        console.log(paint("    💡 Check your wallet balance to confirm closure", "muted"));
+        console.log(paint(`    💡 View remaining positions: node cli_trader.js perps positions ${wallet.name}`, "muted"));
+
+        // Only show detailed JSON if DEBUG_PERPS or VERBOSE is set
+        if (process.env.DEBUG_PERPS || process.env.VERBOSE) {
+          logPerpsApiResult("decrease", result);
+        }
       } else {
         console.error(paint("  ❌ Failed to close position", "error"));
         if (result.data?.error) {
