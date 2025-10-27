@@ -3,12 +3,20 @@
 ## [1.3.1] - 2025-10-27
 
 ### Added
+- **Interactive Flow Configuration**: Flows now prompt for settings when started via CLI
+  - "Enable quiet mode?" - Default: Yes (less console spam)
+  - "Run flow infinitely?" - Default: Yes (no manual Y/N prompts)
+  - "Loop cooldown in seconds?" - Default: 60s (delay between loops)
+  - Displays configuration summary before starting
+  - Prompts only appear when not using command-line flags (backwards compatible)
+  - Applied to all flows: icarus, zenith, aurora, titan, odyssey, sovereign, nova, arpeggio, horizon, echo
 - **QUIET_MODE**: New environment variable to suppress verbose console output
   - Hides RPC retry messages, ultra payload JSON dumps, mint addresses, balance calculations
   - Shows only critical info: swap confirmations, errors, completions
   - Set `QUIET_MODE=1` or `JUPITER_QUIET_MODE=1` to enable
+  - Can also be enabled via interactive prompt when starting flows
 - **Infinite Loop Support**: Flows can now run indefinitely without manual prompts
-  - Add `--infinite` or `--loop` flag to any flow command
+  - Add `--infinite` or `--loop` flag to any flow command (or enable via interactive prompt)
   - Add `--loop-cooldown <ms>` to set delay between loops (default: 60s)
   - Graceful shutdown: Ctrl+C finishes current loop before exiting
   - Shows loop counter: "Loop #5 completed, starting Loop #6..."
@@ -44,7 +52,14 @@
 
 ### Usage Examples
 ```bash
-# Run Icarus infinitely with quiet mode (recommended for unattended operation)
+# Interactive mode (EASIEST - prompts for all options with smart defaults)
+node cli_trader.js icarus
+# Prompts: Enable quiet mode? (Y/n)
+# Prompts: Run infinitely? (Y/n)
+# Prompts: Loop cooldown? (default: 60)
+# Just press Enter 3 times to accept defaults!
+
+# Command-line flag mode (bypass prompts)
 QUIET_MODE=1 node cli_trader.js icarus --infinite
 
 # Run with custom delays to avoid rate limits

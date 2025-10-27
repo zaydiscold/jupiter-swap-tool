@@ -16489,8 +16489,91 @@ function parseFlowOptions(args) {
 
 // Helper function to run flows with optional indefinite looping
 async function runFlowWithLoopOption(flowKey, options = {}) {
-  const infiniteMode = options.infinite || options.loop || false;
-  const loopCooldownMs = options.loopCooldown ?? FLOW_LOOP_COOLDOWN_MS;
+  // Interactive prompts for flow configuration (if not provided via CLI flags)
+  let infiniteMode = options.infinite || options.loop || false;
+  let loopCooldownMs = options.loopCooldown ?? null;
+  let useQuietMode = QUIET_MODE;
+
+  // Only prompt if options weren't passed via command line
+  const shouldPrompt = !options.infinite && !options.loop && options.loopCooldown === undefined;
+
+  if (shouldPrompt) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    console.log(paint(`\n━━━ Flow Configuration ━━━`, "label"));
+
+    // Prompt for quiet mode
+    const quietAnswer = await new Promise((resolve) => {
+      rl.question(
+        paint(`Enable quiet mode (less console spam)? (Y/n): `, "info"),
+        resolve
+      );
+    });
+    const quietNormalized = (quietAnswer || "").trim().toLowerCase();
+    useQuietMode = quietNormalized === "" || quietNormalized === "y" || quietNormalized === "yes";
+
+    // Prompt for infinite loop
+    const infiniteAnswer = await new Promise((resolve) => {
+      rl.question(
+        paint(`Run flow infinitely (no manual prompts)? (Y/n): `, "info"),
+        resolve
+      );
+    });
+    const infiniteNormalized = (infiniteAnswer || "").trim().toLowerCase();
+    infiniteMode = infiniteNormalized === "" || infiniteNormalized === "y" || infiniteNormalized === "yes";
+
+    // Prompt for loop cooldown (only if infinite mode enabled)
+    if (infiniteMode) {
+      const cooldownAnswer = await new Promise((resolve) => {
+        rl.question(
+          paint(`Loop cooldown in seconds (default: 60): `, "info"),
+          resolve
+        );
+      });
+      const cooldownValue = parseInt(cooldownAnswer, 10);
+      loopCooldownMs = Number.isFinite(cooldownValue) && cooldownValue >= 0
+        ? cooldownValue * 1000
+        : FLOW_LOOP_COOLDOWN_MS;
+    }
+
+    rl.close();
+
+    // Display configuration summary
+    console.log(paint(`\n📋 Configuration:`, "label"));
+    console.log(paint(`  • Quiet mode: ${useQuietMode ? "✓ Enabled" : "✗ Disabled"}`, "info"));
+    console.log(paint(`  • Infinite loop: ${infiniteMode ? "✓ Enabled" : "✗ Disabled"}`, "info"));
+    if (infiniteMode) {
+      const cooldownSec = (loopCooldownMs / 1000).toFixed(0);
+      console.log(paint(`  • Loop cooldown: ${cooldownSec}s`, "info"));
+    }
+    console.log(paint(`\nStarting ${flowKey} flow...\n`, "success"));
+  }
+
+  // Apply quiet mode setting (override global QUIET_MODE for this session)
+  if (shouldPrompt && useQuietMode !== QUIET_MODE) {
+    // Store original logMuted function
+    const originalLogMuted = global.logMuted || logMuted;
+
+    // Override logMuted temporarily if quiet mode differs from global
+    if (useQuietMode && !QUIET_MODE) {
+      global.logMuted = (message, value) => {
+        const criticalKeywords = ['confirmed', 'error', 'failed', 'success', 'completed'];
+        const msgLower = String(message).toLowerCase();
+        const isCritical = criticalKeywords.some(keyword => msgLower.includes(keyword));
+        if (!isCritical) return;
+        originalLogMuted(message, value);
+      };
+    }
+  }
+
+  // Default loop cooldown if still not set
+  if (loopCooldownMs === null) {
+    loopCooldownMs = FLOW_LOOP_COOLDOWN_MS;
+  }
+
   let loopCount = 0;
 
   // Set up graceful shutdown handler
