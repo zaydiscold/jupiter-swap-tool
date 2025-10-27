@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.2.2] - 2025-10-27
+
+### Fixed
+- **RPC Rate Limiting Crash**: ensureAta() now gracefully handles 429 rate limit errors instead of crashing
+  - Wraps all RPC calls with `runWithRpcRetry()` for automatic retry with backoff
+  - Detects rate limit errors and falls back without creating ATA instead of crashing
+  - Silent fallback for rate limits (expected behavior during heavy load)
+  - Continues flow execution instead of terminating with error
+  - Prevents "Error: 429 Too Many Requests" from terminating the entire trading session
+
 ## [1.3.2.1] - 2025-10-27
 
 ### Fixed (CRITICAL)
