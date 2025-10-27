@@ -11247,9 +11247,11 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     }
 
     if (waitMs > 0) {
+      const currentVolume = Number(volumeAccumulator.lamports) / 1e9;
+      const volumeDisplay = currentVolume > 0 ? ` | 📊 Current volume: ${currentVolume.toFixed(6)} SOL` : '';
       console.log(
         paint(
-          `  waiting ${formatDurationMs(waitMs)} before next hop`,
+          `  waiting ${formatDurationMs(waitMs)} before next hop${volumeDisplay}`,
           "muted"
         )
       );
