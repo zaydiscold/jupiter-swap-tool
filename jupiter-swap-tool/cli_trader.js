@@ -12001,10 +12001,7 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
   // Always verify the actual on-chain mint owner to ensure correct token program
   let tokenProgram = programId || TOKEN_PROGRAM_ID;
   try {
-    // Wrap mint verification with RPC retry to handle rate limiting
-    const mintInfo = await runWithRpcRetry("getAccountInfo", () =>
-      connection.getAccountInfo(mint)
-    );
+    const mintInfo = await connection.getAccountInfo(mint);
     if (mintInfo) {
       if (mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
         tokenProgram = TOKEN_2022_PROGRAM_ID;
@@ -12016,7 +12013,7 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
     // If verification fails (including rate limit), fall back gracefully
     const isRateLimit = verifyErr?.message?.includes('429') || verifyErr?.message?.includes('rate limit');
     if (!isRateLimit) {
-      console.warn(paint(`  warning: could not verify mint program, using ${programId ? 'provided' : 'default'} program (${verifyErr?.message || verifyErr})`, "warn"));
+      console.warn(paint(`  warning: could not verify mint program, using ${programId ? 'provided' : 'default'} program`, "warn"));
     }
     // Continue with provided or default program
   }
@@ -12031,22 +12028,20 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
 
   let info = null;
   try {
-    info = await runWithRpcRetry("getAccountInfo", () =>
-      connection.getAccountInfo(ata)
-    );
+    info = await connection.getAccountInfo(ata);
   } catch (checkErr) {
     // If check fails due to rate limit, assume ATA doesn't exist and try to create
-    if (!checkErr?.message?.includes('429') && !checkErr?.message?.includes('rate limit')) {
+    const isRateLimit = checkErr?.message?.includes('429') || checkErr?.message?.includes('rate limit');
+    if (isRateLimit) {
+      info = null; // Assume doesn't exist, will try to create
+    } else {
       throw checkErr;
     }
-    info = null; // Assume doesn't exist
   }
 
   if (info === null) {
     try {
-      const mintInfo = await runWithRpcRetry("getAccountInfo", () =>
-        connection.getAccountInfo(mint)
-      );
+      const mintInfo = await connection.getAccountInfo(mint);
       if (!mintInfo) {
         throw new Error("mint account not found on current RPC");
       }
@@ -12059,7 +12054,7 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
     } catch (mintErr) {
       const isRateLimit = mintErr?.message?.includes('429') || mintErr?.message?.includes('rate limit');
       if (isRateLimit) {
-        console.warn(paint(`  warning: RPC rate limited during mint lookup, skipping ATA creation details`, "warn"));
+        // Skip mint details log when rate limited, but continue
       } else {
         throw new Error(
           `mint lookup failed (${mint.toBase58()}): ${mintErr.message || mintErr}`
@@ -12068,19 +12063,27 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
     }
 
     if (cachedAtaRentLamports === null) {
-      const rent = await metadataConnection.getMinimumBalanceForRentExemption(165);
-      cachedAtaRentLamports = BigInt(rent);
+      try {
+        const rent = await metadataConnection.getMinimumBalanceForRentExemption(165);
+        cachedAtaRentLamports = BigInt(rent);
+      } catch (rentErr) {
+        const isRateLimit = rentErr?.message?.includes('429') || rentErr?.message?.includes('rate limit');
+        if (isRateLimit) {
+          // Use fallback rent value if rate limited
+          cachedAtaRentLamports = BigInt(2039280);
+        } else {
+          throw rentErr;
+        }
+      }
     }
 
     let payerBalance = 0n;
     try {
-      payerBalance = BigInt(await runWithRpcRetry("getBalance", () =>
-        connection.getBalance(payerKeypair.publicKey)
-      ));
+      payerBalance = BigInt(await connection.getBalance(payerKeypair.publicKey));
     } catch (balanceErr) {
       const isRateLimit = balanceErr?.message?.includes('429') || balanceErr?.message?.includes('rate limit');
       if (isRateLimit) {
-        console.warn(paint(`  warning: RPC rate limited during balance check, skipping ATA creation`, "warn"));
+        // Can't verify balance, skip ATA creation to avoid potential insufficient funds error
         return { ata, created: false };
       }
       throw balanceErr;
@@ -12114,7 +12117,7 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
     } catch (createErr) {
       const isRateLimit = createErr?.message?.includes('429') || createErr?.message?.includes('rate limit');
       if (isRateLimit) {
-        console.warn(paint(`  warning: RPC rate limited during ATA creation, skipping`, "warn"));
+        // Skip ATA creation when rate limited - Jupiter swap may create it automatically
         return { ata, created: false };
       }
       throw createErr;
