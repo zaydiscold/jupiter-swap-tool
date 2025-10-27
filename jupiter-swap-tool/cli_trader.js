@@ -72,7 +72,7 @@ import {
 // version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.2";
+const TOOL_VERSION = "1.3.2.1";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -11996,7 +11996,21 @@ async function getTokenBalance(connection, walletPubkey, mintPubkey, programId) 
 
 // check & create ATA if missing
 async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId) {
-  const tokenProgram = programId || TOKEN_PROGRAM_ID;
+  // Always verify the actual on-chain mint owner to ensure correct token program
+  let tokenProgram = programId || TOKEN_PROGRAM_ID;
+  try {
+    const mintInfo = await connection.getAccountInfo(mint);
+    if (mintInfo) {
+      if (mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)) {
+        tokenProgram = TOKEN_2022_PROGRAM_ID;
+      } else if (mintInfo.owner.equals(TOKEN_PROGRAM_ID)) {
+        tokenProgram = TOKEN_PROGRAM_ID;
+      }
+    }
+  } catch (verifyErr) {
+    // If verification fails, fall back to passed programId or default
+    console.warn(paint(`  warning: could not verify mint program, using ${programId ? 'provided' : 'default'} program`, "warn"));
+  }
   const ata = await getAssociatedTokenAddress(
     mint,
     ownerPubkey,

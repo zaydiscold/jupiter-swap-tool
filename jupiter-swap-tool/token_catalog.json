@@ -257,7 +257,7 @@
     "symbol": "GOOGLx",
     "mint": "XsCPL9dNWBMvFtTmwcCA5v3xWPSMEBCszbQdiLLq6aN",
     "decimals": 6,
-    "program": "spl",
+    "program": "token-2022",
     "tags": [
       "swappable",
       "fanout",
@@ -269,7 +269,7 @@
     "symbol": "CRCLx",
     "mint": "XsueG8BtpquVJX9LVLLEGuViXUungE6WmK5YZ3p3bd1",
     "decimals": 6,
-    "program": "spl",
+    "program": "token-2022",
     "tags": [
       "swappable",
       "fanout",
@@ -281,7 +281,7 @@
     "symbol": "NVDAx",
     "mint": "Xsc9qvGR1efVDFGLrVsmkzv3qi45LTBjeUKSPmx9qEh",
     "decimals": 6,
-    "program": "spl",
+    "program": "token-2022",
     "tags": [
       "swappable",
       "fanout",

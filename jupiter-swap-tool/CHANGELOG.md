@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.2.1] - 2025-10-27
+
+### Fixed (CRITICAL)
+- **Token-2022 ATA Creation Bug**: GOOGLx, CRCLx, NVDAx, and other Token-2022 mints were incorrectly marked as "spl" program in token_catalog.json
+  - Caused "incorrect program id for instruction" errors when creating ATAs
+  - Fixed catalog entries: GOOGLx, CRCLx, NVDAx now correctly marked as "token-2022"
+  - Added on-chain mint owner verification in `ensureAta()` function
+  - Now automatically detects and uses correct token program (SPL or Token-2022) regardless of catalog data
+  - Falls back gracefully if RPC verification fails during rate limiting
+
 ## [1.3.2] - 2025-10-27
 
 ### Added
