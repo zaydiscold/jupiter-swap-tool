@@ -7362,17 +7362,40 @@ async function getAllParsedTokenAccounts(connection, ownerPubkey) {
   const seen = new Set();
 
   for (const programId of programs) {
-    try {
-      const resp = await connection.getParsedTokenAccountsByOwner(ownerPubkey, {
-        programId,
-      });
-      for (const entry of resp.value) {
-        const key = entry.pubkey.toBase58();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        combined.push(entry);
+    let retries = 3;
+    let lastError = null;
+
+    while (retries > 0) {
+      try {
+        const resp = await connection.getParsedTokenAccountsByOwner(ownerPubkey, {
+          programId,
+        });
+        for (const entry of resp.value) {
+          const key = entry.pubkey.toBase58();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          combined.push(entry);
+        }
+        break; // Success, exit retry loop
+      } catch (err) {
+        lastError = err;
+        retries--;
+        if (retries > 0) {
+          // Wait before retry with exponential backoff
+          await delay(500 * (4 - retries));
+        }
       }
-    } catch (_) {}
+    }
+
+    // Log if all retries failed
+    if (lastError && retries === 0) {
+      console.warn(
+        paint(
+          `  Warning: Failed to fetch token accounts for ${ownerPubkey.toBase58().slice(0, 8)}... (${lastError.message || 'unknown error'})`,
+          "warn"
+        )
+      );
+    }
   }
 
   return combined;
