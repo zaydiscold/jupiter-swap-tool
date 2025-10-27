@@ -68,10 +68,10 @@ import {
 
 // --------------------------------------------------
 // Jupiter Swap Tool CLI — maintained by @coldcooks (zayd)
-// version 1.3.0
+// version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.0";
+const TOOL_VERSION = "1.3.1";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -10820,7 +10820,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             wallets: [wallet],
             quietSkips: false,
             suppressMetadata: false,
-            walletDelayMs: 0,
+            walletDelayMs: FLOW_WALLET_DELAY_MS,
           });
         } catch (err) {
           console.error(
@@ -10862,7 +10862,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             step.walletDelayMs ??
             flow.walletDelayMs ??
             options.walletDelayMs ??
-            DELAY_BETWEEN_CALLS_MS,
+            FLOW_WALLET_DELAY_MS,
         });
         currentMint = resolvedToMint;
       } catch (err) {
@@ -10890,7 +10890,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             wallets: walletList,
             quietSkips: true,
             suppressMetadata: true,
-            walletDelayMs: DELAY_BETWEEN_CALLS_MS,
+            walletDelayMs: FLOW_WALLET_DELAY_MS,
           });
           currentMint = SOL_MINT;
           console.log(paint(`  ✓ Forced SOL return complete`, "success"));

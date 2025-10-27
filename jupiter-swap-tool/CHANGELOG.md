@@ -1,5 +1,65 @@
 # Changelog
 
+## [1.3.1] - 2025-10-27
+
+### Added
+- **QUIET_MODE**: New environment variable to suppress verbose console output
+  - Hides RPC retry messages, ultra payload JSON dumps, mint addresses, balance calculations
+  - Shows only critical info: swap confirmations, errors, completions
+  - Set `QUIET_MODE=1` or `JUPITER_QUIET_MODE=1` to enable
+- **Infinite Loop Support**: Flows can now run indefinitely without manual prompts
+  - Add `--infinite` or `--loop` flag to any flow command
+  - Add `--loop-cooldown <ms>` to set delay between loops (default: 60s)
+  - Graceful shutdown: Ctrl+C finishes current loop before exiting
+  - Shows loop counter: "Loop #5 completed, starting Loop #6..."
+  - Works with: icarus, zenith, aurora, titan, odyssey, sovereign, nova, arpeggio, horizon, echo
+- **Flow Throttling Environment Variables**:
+  - `FLOW_WALLET_DELAY_MS` - Delay between processing wallets (default: 500ms)
+  - `FLOW_LOOP_COOLDOWN_MS` - Delay between flow loops (default: 60000ms)
+  - `RPC_RETRY_BASE_DELAY_MS` - Base RPC retry delay (default: 1000ms)
+  - `MAX_CONCURRENT_WALLETS` - Max concurrent wallet operations (default: 5)
+
+### Fixed
+- **Fatal 429 Crashes**: Flows no longer crash on RPC rate limit errors
+  - Catches all 429/rate limit errors during flow execution
+  - In infinite mode: logs warning, adds 10s recovery delay, continues to next loop
+  - In manual mode: displays error and exits gracefully
+- **Token Discovery Retry Logic**: Added exponential backoff to `getAllParsedTokenAccounts()`
+  - Retries 3 times with increasing delays (500ms, 1000ms, 1500ms)
+  - Prevents sweep commands from showing "No token balances" during RPC rate limits
+- **Perps Command Output**: Improved user-friendly formatting
+  - Open: Shows clear position metrics (entry price, liquidation, leverage) instead of raw JSON
+  - Positions: Displays detailed position cards with PnL, liquidation distance, close instructions
+  - Close: Shows realized PnL and close fees in readable format
+  - Verbose JSON hidden behind `DEBUG_PERPS=1` or `VERBOSE=1` flags
+- **Perps Price Check Optimization**: Check USD value before swapping to avoid wasting gas
+  - Fetches SOL price before swap to verify $10 minimum for new positions
+  - Skips wallets that don't meet minimum without wasting gas on swap
+
+### Improved
+- **Flow Wallet Delays**: All flow execution now uses configurable wallet delays
+  - Reduces RPC rate limiting by spacing out wallet operations
+  - Customizable via `FLOW_WALLET_DELAY_MS` environment variable
+  - Applied to all flow types (icarus, titan, etc.)
+
+### Usage Examples
+```bash
+# Run Icarus infinitely with quiet mode (recommended for unattended operation)
+QUIET_MODE=1 node cli_trader.js icarus --infinite
+
+# Run with custom delays to avoid rate limits
+QUIET_MODE=1 FLOW_WALLET_DELAY_MS=2000 node cli_trader.js titan --infinite
+
+# Run with shorter loop cooldown
+node cli_trader.js icarus --infinite --loop-cooldown 30000
+
+# Check perps positions with clean output
+node cli_trader.js perps positions crew_19.json
+
+# View verbose perps data for debugging
+VERBOSE=1 node cli_trader.js perps positions crew_19.json
+```
+
 ## [1.3.0] - 2025-10-27
 
 ### Added
