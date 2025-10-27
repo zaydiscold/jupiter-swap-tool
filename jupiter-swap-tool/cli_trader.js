@@ -822,7 +822,7 @@ const IS_MAIN_EXECUTION = (() => {
 
 const KEYPAIR_DIR = "./keypairs";
 const loadKeypairFromFile = sharedLoadKeypairFromFile;
-const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";
+const DEFAULT_RPC_URL = "https://mainnet.helius-rpc.com/?api-key=98a9fb2e-26c6-4420-b0bf-a38ece2eb907";
 const PERPS_COMPUTE_BUDGET = Object.freeze({
   unitLimit: getEnvInteger("PERPS_COMPUTE_UNIT_LIMIT", 1_400_000, { min: 1 }),
   priceMicrolamports: getEnvInteger(
