@@ -3346,6 +3346,26 @@ async function handlePerpsOpen(args) {
           continue;
         }
 
+        // Fetch SOL price to check if we'll meet $10 minimum before swapping
+        const priceData = await fetchPricesForMints([SOL_MINT]);
+        const solPrice = priceData[SOL_MINT]?.usdPrice || 0;
+
+        if (!solPrice || solPrice <= 0) {
+          console.warn(paint(`  Skipping ${wallet.name}: unable to fetch SOL price`, "warn"));
+          continue;
+        }
+
+        // Calculate estimated USD value
+        const estimatedUsdValue = availableSol * solPrice;
+
+        // Check $10 minimum BEFORE swapping to avoid wasting gas
+        if (estimatedUsdValue < 10) {
+          console.warn(paint(`  Skipping ${wallet.name}: ${availableSol.toFixed(4)} SOL ≈ $${estimatedUsdValue.toFixed(2)} (need $10 minimum)`, "warn"));
+          continue;
+        }
+
+        console.log(paint(`    Estimated value: $${estimatedUsdValue.toFixed(2)} (${availableSol.toFixed(4)} SOL × $${solPrice.toFixed(2)})`, "muted"));
+
         // Step 2: Swap SOL → USDC
         console.log(paint(`    Swapping ${availableSol.toFixed(4)} SOL → USDC...`, "muted"));
 
@@ -3398,9 +3418,9 @@ async function handlePerpsOpen(args) {
 
         console.log(paint(`    ✅ Received $${usdcCollateral.toFixed(2)} USDC (→ swap back to SOL for collateral)`, "success"));
 
-        // Check minimum collateral requirement ($10 for new positions)
+        // Safety check: verify USDC amount still meets minimum after slippage
         if (usdcCollateral < 10) {
-          console.warn(paint(`  Skipping ${wallet.name}: need $10 minimum collateral (have $${usdcCollateral.toFixed(2)})`, "warn"));
+          console.warn(paint(`  Skipping ${wallet.name}: swap slippage resulted in $${usdcCollateral.toFixed(2)} (below $10 minimum)`, "warn"));
           continue;
         }
 
