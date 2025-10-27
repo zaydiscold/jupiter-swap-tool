@@ -7903,6 +7903,8 @@ async function sweepAllTokensToSol() {
         mintSet.add(mint);
       }
     }
+    // Add small delay between wallets to avoid RPC rate limiting
+    await delay(100);
   }
 
   if (skippedShareTokens.size > 0) {
@@ -10973,8 +10975,8 @@ async function closeEmptyTokenAccounts() {
 
   const MAX_CLOSE_ACCOUNTS_PER_TX = 12;
 
-  // Process all wallets concurrently for faster cleanup
-  await Promise.all(wallets.map(async (w) => {
+  // Process wallets sequentially with delays to avoid RPC rate limiting
+  for (const w of wallets) {
     const lookupConnection = createRpcConnection("confirmed");
     const parsed = await getAllParsedTokenAccounts(lookupConnection, w.kp.publicKey);
 
@@ -11039,7 +11041,7 @@ async function closeEmptyTokenAccounts() {
 
     if (closable.length === 0) {
       console.log(paint(`No empty token accounts for ${w.name}.`, "muted"));
-      return; // Exit this wallet's async task
+      continue; // Skip to next wallet
     }
 
     const closeConnection = createRpcConnection("confirmed");
@@ -11139,7 +11141,10 @@ async function closeEmptyTokenAccounts() {
         )
       );
     }
-  }))
+
+    // Add delay between wallets to avoid RPC rate limiting
+    await delay(100);
+  }
 }
 
 function toSafeNumber(value) {
