@@ -72,7 +72,7 @@ import {
 // version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.2.2";
+const TOOL_VERSION = "1.3.2.3";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -12095,32 +12095,62 @@ async function ensureAta(connection, ownerPubkey, mint, payerKeypair, programId)
       );
     }
 
-    // create ATA
-    try {
-      const ix = createAssociatedTokenAccountInstruction(
-        payerKeypair.publicKey,
-        ata,
-        ownerPubkey,
-        mint,
-        tokenProgram,
-        ASSOCIATED_TOKEN_PROGRAM_ID
-      );
-      const tx = new Transaction().add(ix);
-      tx.feePayer = payerKeypair.publicKey;
-      const { blockhash } = await connection.getLatestBlockhash();
-      tx.recentBlockhash = blockhash;
-      tx.sign(payerKeypair);
-      const raw = tx.serialize();
-      const sig = await connection.sendRawTransaction(raw);
-      await connection.confirmTransaction(sig, "confirmed");
-      console.log(`Created ATA ${ata.toBase58()} for ${ownerPubkey.toBase58()}`);
-    } catch (createErr) {
-      const isRateLimit = createErr?.message?.includes('429') || createErr?.message?.includes('rate limit');
-      if (isRateLimit) {
-        // Skip ATA creation when rate limited - Jupiter swap may create it automatically
-        return { ata, created: false };
+    // create ATA with retry logic for confirmation timeouts
+    const MAX_ATA_RETRIES = 3;
+    const RETRY_DELAYS = [2000, 5000, 10000]; // 2s, 5s, 10s
+    let lastError = null;
+
+    for (let attempt = 0; attempt < MAX_ATA_RETRIES; attempt++) {
+      try {
+        const ix = createAssociatedTokenAccountInstruction(
+          payerKeypair.publicKey,
+          ata,
+          ownerPubkey,
+          mint,
+          tokenProgram,
+          ASSOCIATED_TOKEN_PROGRAM_ID
+        );
+        const tx = new Transaction().add(ix);
+        tx.feePayer = payerKeypair.publicKey;
+        const { blockhash } = await connection.getLatestBlockhash();
+        tx.recentBlockhash = blockhash;
+        tx.sign(payerKeypair);
+        const raw = tx.serialize();
+        const sig = await connection.sendRawTransaction(raw);
+        await connection.confirmTransaction(sig, "confirmed");
+        console.log(`Created ATA ${ata.toBase58()} for ${ownerPubkey.toBase58()}`);
+        lastError = null; // Success!
+        break;
+      } catch (createErr) {
+        lastError = createErr;
+        const isRateLimit = createErr?.message?.includes('429') || createErr?.message?.includes('rate limit');
+        const isTimeout = createErr?.message?.includes('was not confirmed in') ||
+                         createErr?.message?.includes('timeout');
+
+        if (isRateLimit) {
+          // Skip ATA creation when rate limited - Jupiter swap may create it automatically
+          return { ata, created: false };
+        }
+
+        if (isTimeout && attempt < MAX_ATA_RETRIES - 1) {
+          // Retry on timeout with exponential backoff
+          const delayMs = RETRY_DELAYS[attempt];
+          if (!QUIET_MODE) {
+            console.log(paint(`  ATA creation timeout (attempt ${attempt + 1}/${MAX_ATA_RETRIES}), retrying in ${(delayMs/1000).toFixed(1)}s...`, "warn"));
+          }
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
+        }
+
+        // If it's the last attempt or not a timeout error, throw it
+        if (attempt === MAX_ATA_RETRIES - 1) {
+          throw createErr;
+        }
       }
-      throw createErr;
+    }
+
+    if (lastError) {
+      throw lastError;
     }
   }
   return { ata, created: info === null };

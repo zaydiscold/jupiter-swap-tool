@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.2.3] - 2025-10-27
+
+### Improved
+- **ATA Creation Retry Logic**: ensureAta() now retries transaction confirmation timeouts up to 3 times
+  - Implements exponential backoff: 2s, 5s, 10s delays between retries
+  - Detects confirmation timeout errors: "was not confirmed in" or "timeout"
+  - Shows user-friendly retry messages: "ATA creation timeout (attempt X/3), retrying in Xs..."
+  - Prevents transaction timeout errors from immediately failing swaps
+  - After 3 attempts, throws error for doSwapAcross to handle gracefully
+  - Reduces "skipping: cannot create ATA" errors during network congestion
+
 ## [1.3.2.2] - 2025-10-27
 
 ### Fixed
