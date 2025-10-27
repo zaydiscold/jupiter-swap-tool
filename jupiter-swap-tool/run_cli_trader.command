@@ -19,7 +19,7 @@ cat <<'BANNER'
                |__|    \/         \/        \/              \/            \/
 BANNER
 
-printf 'Jupiter Swap Tool v1.2.1 — made by zayd / cold\033[0m\n'
+printf 'Jupiter Swap Tool v1.3.0 — made by zayd / cold\033[0m\n'
 
 echo "Jupiter Swap Tool CLI launcher"
 read -r -p "RPC URL [${DEFAULT_RPC}]: " USER_RPC

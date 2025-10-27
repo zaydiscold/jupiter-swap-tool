@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.3.0] - 2025-10-27
+
+### Added
+- **Jupiter Perps Trading**: Complete USDC collateral flow for opening perpetual positions
+  - Intelligent SOL → USDC → SOL swap pipeline with 0.01 SOL gas reserve
+  - Automatic $10 minimum collateral validation for new positions
+  - Proper leverage calculation: positionSize = collateral × leverage
+  - Supports batch trading with "all wallets" option
+- **Wallet Transfer Fast Mode**: Skip balance loading for instant transfers
+  - Option [1]: Fast mode (default) - skip RPC balance queries, instant transfer setup
+  - Option [2]: Detailed mode - show all wallet balances before transfer
+  - Eliminates RPC rate limiting delays when user knows wallet numbers
+
+### Fixed
+- **Ultra API Integration**: Corrected parameter names and transaction signing
+  - Fixed `createUltraOrder` parameter mapping (amountLamports, userPublicKey)
+  - Fixed transaction signing with `VersionedTransaction.deserialize/sign`
+  - Fixed API response property access (swapTransaction, outAmount)
+  - Fixed collateral mint requirement for perps positions (must match market mint)
+- **Perps API Payload**: All field types now match API requirements
+  - Leverage, side, maxSlippageBps are strings (not numbers)
+  - Proper decimal handling for SOL (9) and USDC (6)
+
+### Improved
+- **Error Handling**: Better feedback when swaps fail or collateral is insufficient
+- **User Experience**: Clearer console output showing swap progression and position sizing
+
 ## [1.2.3] - 2025-10-26
 
 ### Changed
