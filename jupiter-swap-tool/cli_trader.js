@@ -5,6 +5,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fetch from "node-fetch";
 import bs58 from "bs58";
+import nacl from "tweetnacl";
 import readline from "readline";
 import * as bip39 from "bip39";
 import { derivePath } from "ed25519-hd-key";
@@ -71,7 +72,7 @@ import {
 // version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.1";
+const TOOL_VERSION = "1.3.2";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -3512,7 +3513,7 @@ async function handlePerpsOpen(args) {
         const usdcAmount = (orderResult.outAmount || 0);
         usdcCollateral = usdcAmount / 1e6;
 
-        console.log(paint(`    ✅ Received $${usdcCollateral.toFixed(2)} USDC (→ swap back to SOL for collateral)`, "success"));
+        console.log(paint(`    ✅ Received $${usdcCollateral.toFixed(2)} USDC`, "success"));
 
         // Safety check: verify USDC amount still meets minimum after slippage
         if (usdcCollateral < 10) {
@@ -3520,7 +3521,7 @@ async function handlePerpsOpen(args) {
           continue;
         }
 
-        // Now swap USDC back to SOL for use as collateral (Jupiter Perps requires collateral in market token)
+        // Now swap USDC → SOL for collateral (perps require collateral in market token)
         console.log(paint(`    Swapping USDC → SOL for collateral...`, "muted"));
 
         try {
@@ -3535,6 +3536,10 @@ async function handlePerpsOpen(args) {
 
           if (!reverseOrderResult || !reverseOrderResult.swapTransaction) {
             console.warn(paint(`  Skipping ${wallet.name}: reverse swap quote failed`, "warn"));
+            if (process.env.DEBUG_PERPS) {
+              console.log(paint("  Reverse order result:", "muted"));
+              console.log(JSON.stringify(reverseOrderResult, null, 2));
+            }
             continue;
           }
 
@@ -3544,28 +3549,35 @@ async function handlePerpsOpen(args) {
           rvtx.sign([wallet.kp]);
           const rrawSigned = rvtx.serialize();
           const rsignedBase64 = Buffer.from(rrawSigned).toString('base64');
-          const rderividSignature = bs58.encode(rvtx.signatures[0]);
+          const rderivSignature = bs58.encode(rvtx.signatures[0]);
 
           const reverseExecuteResult = await executeUltraSwap({
             signedTransaction: rsignedBase64,
             clientOrderId: reverseOrderResult.clientOrderId,
-            signatureHint: rderividSignature
+            signatureHint: rderivSignature
           });
 
           if (!reverseExecuteResult || !reverseExecuteResult.signature) {
             console.warn(paint(`  Skipping ${wallet.name}: reverse swap execution failed`, "warn"));
+            if (process.env.DEBUG_PERPS) {
+              console.log(paint("  Execute result:", "muted"));
+              console.log(JSON.stringify(reverseExecuteResult, null, 2));
+            }
             continue;
           }
 
-          console.log(paint(`    ✅ Reverse swap submitted: ${reverseExecuteResult.signature}`, "muted"));
+          console.log(paint(`    ✅ Swap submitted: ${reverseExecuteResult.signature}`, "muted"));
 
-          // Now we have SOL collateral - calculate from the swap output
+          // Now we have SOL collateral
           const solCollateralLamports = reverseOrderResult.outAmount || 0;
           collateralTokenDelta = solCollateralLamports.toString();
 
           console.log(paint(`    ✅ Received ${(solCollateralLamports / 1e9).toFixed(4)} SOL collateral`, "success"));
         } catch (err) {
           console.warn(paint(`  Skipping ${wallet.name}: reverse swap error - ${err.message}`, "warn"));
+          if (process.env.DEBUG_PERPS) {
+            console.error(err);
+          }
           continue;
         }
 
@@ -3576,11 +3588,94 @@ async function handlePerpsOpen(args) {
     } else {
       // Manual size specified - assume it's USDC collateral amount
       usdcCollateral = parseFloat(sizeValue);
-      collateralTokenDelta = Math.floor(usdcCollateral * 1e6).toString();
+      const usdcAmount = Math.floor(usdcCollateral * 1e6);
 
       if (usdcCollateral < 10) {
         console.warn(paint(`  Skipping ${wallet.name}: need $10 minimum collateral for new positions`, "warn"));
         continue;
+      }
+
+      // Check if wallet already has sufficient SOL
+      const connection = createRpcConnection("confirmed");
+      const solBalance = await connection.getBalance(wallet.kp.publicKey);
+      const solAvailable = solBalance / 1e9;
+      const gasReserve = 0.01;
+      const availableForCollateral = Math.max(0, solAvailable - gasReserve);
+
+      // Fetch SOL price to see if existing SOL is sufficient
+      const priceData = await fetchPricesForMints([SOL_MINT]);
+      const solPrice = priceData[SOL_MINT]?.usdPrice || 0;
+      const solValueUsd = availableForCollateral * solPrice;
+
+      if (process.env.DEBUG_PERPS) {
+        console.log(paint(`  Debug: SOL balance=${solAvailable.toFixed(4)}, available=${availableForCollateral.toFixed(4)}, price=$${solPrice.toFixed(2)}, value=$${solValueUsd.toFixed(2)}, needed=$${usdcCollateral.toFixed(2)}`, "muted"));
+      }
+
+      if (solValueUsd >= usdcCollateral) {
+        // Wallet has enough SOL already, use it directly
+        const solLamportsNeeded = Math.floor((usdcCollateral / solPrice) * 1e9);
+        collateralTokenDelta = solLamportsNeeded.toString();
+        console.log(paint(`  ${wallet.name}: Using existing ${(solLamportsNeeded / 1e9).toFixed(4)} SOL ($${usdcCollateral.toFixed(2)}) as collateral`, "muted"));
+      } else {
+        // Need to swap USDC → SOL for collateral
+        console.log(paint(`  ${wallet.name}: Swapping $${usdcCollateral.toFixed(2)} USDC → SOL for collateral...`, "muted"));
+
+        try {
+          const reverseOrderResult = await createUltraOrder({
+          inputMint: DEFAULT_USDC_MINT,
+          outputMint: SOL_MINT,
+          amountLamports: usdcAmount,
+          userPublicKey: wallet.kp.publicKey.toBase58(),
+          slippageBps: 50,
+          wrapAndUnwrapSol: true
+        });
+
+        if (!reverseOrderResult || !reverseOrderResult.swapTransaction) {
+          console.warn(paint(`  Skipping ${wallet.name}: USDC→SOL swap quote failed`, "warn"));
+          if (process.env.DEBUG_PERPS) {
+            console.log(paint("  Reverse order result:", "muted"));
+            console.log(JSON.stringify(reverseOrderResult, null, 2));
+          }
+          continue;
+        }
+
+        // Sign and execute the swap
+        const rtxbuf = Buffer.from(reverseOrderResult.swapTransaction, 'base64');
+        const rvtx = VersionedTransaction.deserialize(rtxbuf);
+        rvtx.sign([wallet.kp]);
+        const rrawSigned = rvtx.serialize();
+        const rsignedBase64 = Buffer.from(rrawSigned).toString('base64');
+        const rderivSignature = bs58.encode(rvtx.signatures[0]);
+
+        const reverseExecuteResult = await executeUltraSwap({
+          signedTransaction: rsignedBase64,
+          clientOrderId: reverseOrderResult.clientOrderId,
+          signatureHint: rderivSignature
+        });
+
+        if (!reverseExecuteResult || !reverseExecuteResult.signature) {
+          console.warn(paint(`  Skipping ${wallet.name}: USDC→SOL swap execution failed`, "warn"));
+          if (process.env.DEBUG_PERPS) {
+            console.log(paint("  Execute result:", "muted"));
+            console.log(JSON.stringify(reverseExecuteResult, null, 2));
+          }
+          continue;
+        }
+
+        console.log(paint(`    ✅ Swap submitted: ${reverseExecuteResult.signature}`, "muted"));
+
+        // Now we have SOL collateral
+        const solCollateralLamports = reverseOrderResult.outAmount || 0;
+        collateralTokenDelta = solCollateralLamports.toString();
+
+        console.log(paint(`    ✅ Received ${(solCollateralLamports / 1e9).toFixed(4)} SOL collateral`, "success"));
+        } catch (err) {
+          console.warn(paint(`  Skipping ${wallet.name}: USDC→SOL swap error - ${err.message}`, "warn"));
+          if (process.env.DEBUG_PERPS) {
+            console.error(err);
+          }
+          continue;
+        }
       }
     }
 
@@ -3673,14 +3768,14 @@ async function handlePerpsOpen(args) {
     const marketMint = marketToken?.mint || SOL_MINT;
 
     // API payload - collateral mint must match market mint for long positions
-    // collateralTokenDelta is now SOL lamports (from reverse swap)
+    // collateralTokenDelta is in base units of the collateral token
     const apiPayload = {
       walletAddress: payload.wallet,
       side: payload.side.toLowerCase(),  // 'long' or 'short' (lowercase!)
       sizeUsd: positionSizeUsd,  // Position size = collateral × leverage
       leverage: leverageNum.toString(),  // Leverage as string
-      collateralTokenDelta: collateralTokenDelta,  // SOL amount in lamports (9 decimals)
-      inputMint: marketMint,  // Collateral token (SOL for SOL markets, etc.)
+      collateralTokenDelta: collateralTokenDelta,  // Amount in base units of collateral token
+      inputMint: marketMint,  // Collateral token (SOL for SOL long, etc.)
       collateralMint: marketMint,  // Must match market mint for long positions
       marketMint: marketMint,  // Market we're trading (SOL, ETH, etc.)
       maxSlippageBps: "50",  // 0.5% slippage tolerance (as string!)
@@ -3724,11 +3819,54 @@ async function handlePerpsOpen(args) {
         if (result.data?.error) {
           console.error(paint(`  Error: ${result.data.error}`, "error"));
         }
+        if (process.env.DEBUG_PERPS) {
+          console.log(paint("  Full API response:", "muted"));
+          console.log(JSON.stringify(result, null, 2));
+        }
         continue;
       }
 
-      // CRITICAL: The API returns a transaction that must be signed and submitted
-      const transactionBase64 = result.data.transaction || result.data.swapTransaction;
+      // Check if this is an instant keeper transaction
+      const isInstant = result.data.transactionType === "instant";
+      const positionPubkey = result.data.positionPubkey;
+
+      if (process.env.DEBUG_PERPS) {
+        console.log(paint("  Full API success response:", "muted"));
+        console.log(JSON.stringify(result.data, null, 2));
+      }
+
+      if (isInstant && positionPubkey) {
+        // Instant transactions with keeper signatures are handled automatically by Jupiter
+        console.log(paint(`  ✅ ${wallet.name}: Position request submitted to keeper`, "success"));
+        console.log(paint(`    Position ID: ${positionPubkey}`, "info"));
+        console.log(paint(`    Note: Keeper will process this transaction. Check 'perps positions ${wallet.name}' in a few moments.`, "muted"));
+
+        // Show position details from quote
+        const quote = result.data.quote || {};
+        if (quote.side) {
+          const sideLabel = String(quote.side).toUpperCase();
+          const sideColor = sideLabel === "LONG" ? "success" : "warn";
+          console.log(paint(`    Direction: ${sideLabel}`, sideColor));
+        }
+        if (quote.leverage) {
+          console.log(paint(`    Leverage: ${quote.leverage}x`, "info"));
+        }
+        if (quote.positionSizeUsd) {
+          const posSize = parseFloat(quote.positionSizeUsd).toFixed(2);
+          console.log(paint(`    Position Size: $${posSize}`, "info"));
+        }
+        if (quote.entryPriceUsd) {
+          console.log(paint(`    Entry Price: $${parseFloat(quote.entryPriceUsd).toFixed(2)}`, "muted"));
+        }
+        if (quote.liquidationPriceUsd) {
+          const liqPrice = parseFloat(quote.liquidationPriceUsd).toFixed(2);
+          console.log(paint(`    Liquidation Price: $${liqPrice} ⚠️`, "warn"));
+        }
+        continue;  // Skip manual transaction submission for instant transactions
+      }
+
+      // For non-instant transactions, sign and submit manually
+      const transactionBase64 = result.data.transaction || result.data.swapTransaction || result.data.serializedTxBase64;
 
       if (!transactionBase64) {
         console.error(paint(`  ❌ ${wallet.name}: API did not return a transaction`, "error"));
@@ -3743,23 +3881,77 @@ async function handlePerpsOpen(args) {
         const connection = createRpcConnection("confirmed");
         const txBuffer = Buffer.from(transactionBase64, 'base64');
         const vtx = VersionedTransaction.deserialize(txBuffer);
-        vtx.sign([wallet.kp]);
+
+        if (process.env.DEBUG_PERPS) {
+          console.log(paint(`  Pre-sign signatures count: ${vtx.signatures.length}`, "muted"));
+          console.log(paint(`  Required signers: ${vtx.message.staticAccountKeys.length}`, "muted"));
+          console.log(paint(`  Wallet pubkey: ${wallet.kp.publicKey.toBase58()}`, "muted"));
+        }
+
+        // Find our wallet's position in the signer list
+        const walletPubkey = wallet.kp.publicKey;
+        let walletSignerIndex = -1;
+        for (let i = 0; i < vtx.message.staticAccountKeys.length; i++) {
+          if (vtx.message.staticAccountKeys[i].equals(walletPubkey)) {
+            walletSignerIndex = i;
+            break;
+          }
+        }
+
+        if (walletSignerIndex === -1) {
+          throw new Error(`Wallet ${wallet.kp.publicKey.toBase58()} is not a signer in this transaction`);
+        }
+
+        if (process.env.DEBUG_PERPS) {
+          console.log(paint(`  Wallet signer index: ${walletSignerIndex}`, "muted"));
+        }
+
+        // Sign the message and insert our signature at the correct position
+        const message = vtx.message.serialize();
+        const walletSignature = nacl.sign.detached(message, wallet.kp.secretKey);
+        vtx.signatures[walletSignerIndex] = Buffer.from(walletSignature);
+
+        if (process.env.DEBUG_PERPS) {
+          console.log(paint(`  Post-sign signatures count: ${vtx.signatures.length}`, "muted"));
+        }
 
         const rawTx = vtx.serialize();
+
+        // Use blockhash from API metadata if available
+        const txMetadata = result.data.txMetadata;
+        const blockhash = txMetadata?.blockhash;
+        const lastValidBlockHeight = txMetadata?.lastValidBlockHeight ? parseInt(txMetadata.lastValidBlockHeight) : null;
+
+        if (process.env.DEBUG_PERPS && txMetadata) {
+          console.log(paint(`  Using API blockhash: ${blockhash}`, "muted"));
+          console.log(paint(`  Last valid block height: ${lastValidBlockHeight}`, "muted"));
+        }
+
+        // Skip preflight for keeper-signed transactions (instant execution)
+        const requireKeeper = result.data.requireKeeperSignature === true;
         const signature = await connection.sendRawTransaction(rawTx, {
-          skipPreflight: false,
+          skipPreflight: requireKeeper,  // Skip preflight if keeper signature required
           maxRetries: 3
         });
 
         console.log(paint(`    Transaction submitted: ${signature}`, "muted"));
 
-        // Wait for confirmation
-        const latestBlockhash = await connection.getLatestBlockhash();
-        await connection.confirmTransaction({
-          signature,
-          blockhash: latestBlockhash.blockhash,
-          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        }, "confirmed");
+        // Wait for confirmation using API-provided blockhash
+        if (blockhash && lastValidBlockHeight) {
+          await connection.confirmTransaction({
+            signature,
+            blockhash: blockhash,
+            lastValidBlockHeight: lastValidBlockHeight,
+          }, "confirmed");
+        } else {
+          // Fallback: get fresh blockhash
+          const latestBlockhash = await connection.getLatestBlockhash();
+          await connection.confirmTransaction({
+            signature,
+            blockhash: latestBlockhash.blockhash,
+            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+          }, "confirmed");
+        }
 
         console.log(paint(`\n  ✅ ${wallet.name}: Position opened successfully!`, "success"));
 
@@ -10340,6 +10532,9 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
   // Create per-wallet session maps for independent random token selection
   const perWalletSessions = new Map();
 
+  // Track total SOL volume traded across all swaps in this session (as mutable object for pass-by-reference)
+  const volumeAccumulator = { lamports: 0n };
+
   let walletList = Array.isArray(options.wallets) && options.wallets.length > 0
     ? options.wallets
     : listWallets();
@@ -10357,9 +10552,15 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
 
   const seedSource =
     walletList[0]?.kp?.publicKey?.toBase58?.() ?? flow.key ?? "prewritten";
+  const cycleNumber = options.cycleNumber ?? 1;
   let flowRng = typeof options.rng === "function" ? options.rng : null;
   if (!flowRng) {
-    flowRng = createDeterministicRng(`${flow.key}:${seedSource}:flow`);
+    // TRUE RANDOMIZATION: Add timestamp and random entropy for unique, unpredictable behavior each cycle
+    // This ensures no two cycles ever produce the same token sequence (crypto-grade unpredictability)
+    const timestamp = Date.now();
+    const randomEntropy = Math.floor(Math.random() * 1000000000);
+    const processEntropy = process.hrtime ? process.hrtime.bigint().toString() : Math.random().toString();
+    flowRng = createDeterministicRng(`${flow.key}:${seedSource}:cycle${cycleNumber}:t${timestamp}:r${randomEntropy}:p${processEntropy}`);
   }
 
   const runtimeProfile = PREWRITTEN_FLOW_DEFINITIONS?.[normalizedKey]?.runtimeProfile;
@@ -10788,14 +10989,24 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     }
   }
 
+  // Check if this flow uses per-wallet randomization (incompatible with forced SOL returns)
+  const hasPerWalletRandomization = schedule.some(step => {
+    if (!step.randomization || typeof step.randomization !== 'object') return false;
+    const mode = step.randomization.mode;
+    return mode === 'sol-to-random' || mode === 'random-to-random' ||
+           mode === 'session-to-random' || mode === 'session-to-sol';
+  });
+
   // Initialize swap counter for forced SOL returns
   let swapCounter = 0;
   let nextSolReturnAt = null;
-  if (flow.forceSolReturnEvery && typeof flow.forceSolReturnEvery === 'object') {
+  if (flow.forceSolReturnEvery && typeof flow.forceSolReturnEvery === 'object' && !hasPerWalletRandomization) {
     const min = Number(flow.forceSolReturnEvery.min) || 4;
     const max = Number(flow.forceSolReturnEvery.max) || min;
     nextSolReturnAt = Math.floor(min + flowRng() * (max - min + 1));
     console.log(paint(`Forced SOL return enabled: every ${nextSolReturnAt} swaps.`, "muted"));
+  } else if (flow.forceSolReturnEvery && hasPerWalletRandomization) {
+    console.log(paint(`Forced SOL return disabled: incompatible with per-wallet randomization.`, "muted"));
   }
 
   for (let index = 0; index < schedule.length; index += 1) {
@@ -10803,6 +11014,64 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     const normalizedAmount = normalizeFlowAmount(step.amount, { rng: flowRng });
     const amountLabel = describeFlowAmount(normalizedAmount);
     const hopLabel = `Hop ${index + 1}/${plannedSwaps}`;
+
+    // Every 10 hops: close empty token accounts to reclaim SOL rent
+    if ((index + 1) % 10 === 0 && index > 0) {
+      console.log(paint(`\n🧹 Hop ${index + 1}: Closing empty token accounts to reclaim SOL rent...`, "info"));
+
+      for (const wallet of walletList) {
+        try {
+          const connection = createRpcConnection("confirmed");
+          const walletPubkey = wallet.kp.publicKey;
+
+          // Get all token accounts for this wallet
+          const tokenAccounts = await connection.getParsedTokenAccountsByOwner(walletPubkey, {
+            programId: TOKEN_PROGRAM_ID
+          });
+
+          let closedCount = 0;
+          const ixs = [];
+
+          for (const account of tokenAccounts.value) {
+            const balance = account.account.data.parsed.info.tokenAmount.uiAmount;
+            const mint = account.account.data.parsed.info.mint;
+
+            // Close accounts with zero balance (not SOL)
+            if (balance === 0 && mint !== SOL_MINT) {
+              const closeIx = createCloseAccountInstruction(
+                account.pubkey,
+                walletPubkey,
+                walletPubkey
+              );
+              ixs.push(closeIx);
+              closedCount++;
+            }
+          }
+
+          if (ixs.length > 0) {
+            // Send transaction to close all empty accounts
+            const tx = new Transaction().add(...ixs);
+            const signature = await connection.sendTransaction(tx, [wallet.kp], {
+              skipPreflight: false,
+              maxRetries: 3
+            });
+            await connection.confirmTransaction(signature, "confirmed");
+
+            const reclaimedSol = (closedCount * 0.00203928).toFixed(6);
+            console.log(paint(`  ${wallet.name}: Closed ${closedCount} account(s), reclaimed ~${reclaimedSol} SOL`, "success"));
+          }
+        } catch (err) {
+          console.error(paint(`  ${wallet.name}: Failed to close accounts: ${err.message}`, "warn"));
+        }
+      }
+
+      // Display running volume total
+      const totalVolumeDecimal = Number(volumeAccumulator.lamports) / 1e9;
+      console.log(paint(`  📊 Running session volume: ${totalVolumeDecimal.toFixed(6)} SOL traded`, "info"));
+
+      console.log(paint(`  Pausing 3 seconds to let balances settle...\n`, "muted"));
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
 
     // Check if this step has randomization that needs per-wallet resolution
     const hasRandomization = step.randomization && typeof step.randomization === 'object';
@@ -10871,6 +11140,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             quietSkips: false,
             suppressMetadata: false,
             walletDelayMs: FLOW_WALLET_DELAY_MS,
+            volumeAccumulator,
           });
         } catch (err) {
           console.error(
@@ -10913,6 +11183,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             flow.walletDelayMs ??
             options.walletDelayMs ??
             FLOW_WALLET_DELAY_MS,
+          volumeAccumulator,
         });
         currentMint = resolvedToMint;
       } catch (err) {
@@ -10941,6 +11212,7 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
             quietSkips: true,
             suppressMetadata: true,
             walletDelayMs: FLOW_WALLET_DELAY_MS,
+            volumeAccumulator,
           });
           currentMint = SOL_MINT;
           console.log(paint(`  ✓ Forced SOL return complete`, "success"));
@@ -10989,6 +11261,15 @@ async function runPrewrittenFlowPlan(flowKey, options = {}) {
     paint(
       `Prewritten flow ${flow.label} complete: ${plannedSwaps} hop(s) executed.`,
       "success"
+    )
+  );
+
+  // Display final session volume summary
+  const finalVolumeDecimal = Number(volumeAccumulator.lamports) / 1e9;
+  console.log(
+    paint(
+      `📊 Total session volume: ${finalVolumeDecimal.toFixed(6)} SOL traded across all swaps`,
+      "info"
     )
   );
 
@@ -15193,6 +15474,12 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
               `  SOL balance: ${formatBaseUnits(solBalanceLamports, 9)} → ${formatBaseUnits(solAfterSwap, 9)} (Δ ${formatLamportsDelta(solDelta)})`
             );
             solBalanceLamports = solAfterSwap;
+
+            // Accumulate absolute value of SOL delta to track total volume traded
+            if (options.volumeAccumulator && typeof options.volumeAccumulator === 'object') {
+              const absDelta = solDelta < 0n ? -solDelta : solDelta;
+              options.volumeAccumulator.lamports += absDelta;
+            }
           }
           if (!SOL_LIKE_MINTS.has(inputMint)) {
             const tokenBalanceAfter = await runWithRpcRetry("getTokenBalance", () =>
@@ -16634,7 +16921,7 @@ async function runFlowWithLoopOption(flowKey, options = {}) {
 
       // Wrap flow execution in try-catch to prevent crashes
       try {
-        await runPrewrittenFlowPlan(flowKey, {});
+        await runPrewrittenFlowPlan(flowKey, { cycleNumber: loopCount });
       } catch (err) {
         // Check if this is an RPC rate limit error
         const isRateLimit = err.message && (

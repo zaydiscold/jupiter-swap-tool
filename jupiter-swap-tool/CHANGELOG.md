@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.3.2] - 2025-10-27
+
+### Added
+- **Session Volume Tracking**: All trading flows now track and display total SOL volume traded
+  - Running volume total displayed every 10 hops (when closing token accounts)
+  - Final session summary shows total SOL traded across all swaps
+  - Format: `📊 Total session volume: X.XXXXXX SOL traded across all swaps`
+  - Tracks absolute value of SOL balance deltas to measure actual trading activity
+  - Applied to all flows: Arpeggio, Horizon, Echo, Icarus, Zenith, Aurora, Titan, Odyssey, Sovereign, Nova
+
+- **True Random Flow Behavior**: Crypto-grade randomization for unpredictable trading patterns
+  - Each cycle now generates completely unique token sequences (no repeats)
+  - Three layers of entropy: millisecond timestamp + Math.random() + process high-res timer
+  - Running the same flow 1 second apart produces different results
+  - Applies to ALL flows universally (deterministic and random flows alike)
+  - Example: Running Icarus 3 times = 3 completely different token sequences
+  - Prevents pattern detection and ensures untraceable trading behavior
+
+### Changed
+- **RNG Seed Generation**: Upgraded from deterministic cycle-based to true random entropy
+  - Old: `flow:wallet:cycle1:flow` (predictable, same cycle = same tokens)
+  - New: `flow:wallet:cycle1:t1730000000000:r123456789:pXXXXX` (unique every time)
+  - Makes trading patterns impossible to predict or replicate
+
 ## [1.3.1] - 2025-10-27
 
 ### Fixed (CRITICAL)
