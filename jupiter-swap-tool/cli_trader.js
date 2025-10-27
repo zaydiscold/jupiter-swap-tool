@@ -3719,7 +3719,48 @@ async function handlePerpsOpen(args) {
     try {
       const result = await perpsApiRequest(request);
 
-      if (result.ok && result.data) {
+      if (!result.ok || !result.data) {
+        console.error(paint(`  ❌ ${wallet.name}: Failed to open position`, "error"));
+        if (result.data?.error) {
+          console.error(paint(`  Error: ${result.data.error}`, "error"));
+        }
+        continue;
+      }
+
+      // CRITICAL: The API returns a transaction that must be signed and submitted
+      const transactionBase64 = result.data.transaction || result.data.swapTransaction;
+
+      if (!transactionBase64) {
+        console.error(paint(`  ❌ ${wallet.name}: API did not return a transaction`, "error"));
+        if (process.env.DEBUG_PERPS) {
+          console.log(JSON.stringify(result.data, null, 2));
+        }
+        continue;
+      }
+
+      // Sign and submit the transaction to actually open the position
+      try {
+        const connection = createRpcConnection("confirmed");
+        const txBuffer = Buffer.from(transactionBase64, 'base64');
+        const vtx = VersionedTransaction.deserialize(txBuffer);
+        vtx.sign([wallet.kp]);
+
+        const rawTx = vtx.serialize();
+        const signature = await connection.sendRawTransaction(rawTx, {
+          skipPreflight: false,
+          maxRetries: 3
+        });
+
+        console.log(paint(`    Transaction submitted: ${signature}`, "muted"));
+
+        // Wait for confirmation
+        const latestBlockhash = await connection.getLatestBlockhash();
+        await connection.confirmTransaction({
+          signature,
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        }, "confirmed");
+
         console.log(paint(`\n  ✅ ${wallet.name}: Position opened successfully!`, "success"));
 
         // Extract readable position info from the quote
@@ -3729,6 +3770,8 @@ async function handlePerpsOpen(args) {
         if (positionPubkey) {
           console.log(paint(`    Position ID: ${positionPubkey}`, "info"));
         }
+
+        console.log(paint(`    Signature: ${signature}`, "muted"));
 
         // Show key position metrics in a user-friendly format
         if (quote.side) {
@@ -3782,15 +3825,22 @@ async function handlePerpsOpen(args) {
         if (process.env.DEBUG_PERPS || process.env.VERBOSE) {
           logPerpsApiResult("increase-position", result);
         }
-      } else {
-        console.error(paint(`  ❌ ${wallet.name}: Failed to open position`, "error"));
-        if (result.data?.error || result.data?.message) {
-          console.error(paint(`    Error: ${result.data?.error || result.data?.message}`, "error"));
+
+      } catch (txErr) {
+        // Transaction signing/submission error
+        console.error(paint(`  ❌ ${wallet.name}: Failed to submit position transaction`, "error"));
+        console.error(paint(`    Error: ${txErr.message}`, "error"));
+        if (process.env.DEBUG_PERPS) {
+          console.error(txErr);
         }
-        logPerpsApiResult("increase-position", result);
+        continue;
       }
+
     } catch (err) {
       console.error(paint(`  ${wallet.name}: Perps open request failed: ${err.message}`, "error"));
+      if (process.env.DEBUG_PERPS) {
+        console.error(err);
+      }
     }
 
     // Small delay between wallet requests to avoid rate limiting

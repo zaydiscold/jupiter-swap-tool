@@ -2,6 +2,15 @@
 
 ## [1.3.1] - 2025-10-27
 
+### Fixed (CRITICAL)
+- **Perps Position Opening Bug**: The `perps open` command was only calling the API but never signing/submitting the transaction to the blockchain
+  - Swaps would execute successfully (visible on-chain)
+  - But the perps position transaction was never submitted
+  - Result: No actual position opened, funds just swapped back and forth
+  - Now properly deserializes, signs, and submits the transaction returned by the API
+  - Waits for confirmation before showing success message
+  - Positions will now actually appear on Jupiter Perps interface
+
 ### Added
 - **Interactive Flow Configuration**: Flows now prompt for settings when started via CLI
   - "Enable quiet mode?" - Default: Yes (less console spam)
