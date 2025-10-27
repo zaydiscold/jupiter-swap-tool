@@ -1649,6 +1649,19 @@ const ERROR_SUPPRESSION_WINDOW_MS = process.env.JUPITER_SWAP_TOOL_ERROR_SUPPRESS
 const LAUNCHER_GUARD_MAX_AGE_MS = process.env.JUPITER_SWAP_TOOL_LAUNCHER_GUARD_MAX_AGE_MS
   ? Math.max(0, parseInt(process.env.JUPITER_SWAP_TOOL_LAUNCHER_GUARD_MAX_AGE_MS, 10) || 0)
   : 5 * 60 * 1000;
+const QUIET_MODE = process.env.QUIET_MODE === "1" || process.env.JUPITER_QUIET_MODE === "1";
+const FLOW_WALLET_DELAY_MS = process.env.FLOW_WALLET_DELAY_MS
+  ? Math.max(0, parseInt(process.env.FLOW_WALLET_DELAY_MS, 10) || 0)
+  : 500;
+const FLOW_LOOP_COOLDOWN_MS = process.env.FLOW_LOOP_COOLDOWN_MS
+  ? Math.max(0, parseInt(process.env.FLOW_LOOP_COOLDOWN_MS, 10) || 0)
+  : 60000;
+const RPC_RETRY_BASE_DELAY_MS = process.env.RPC_RETRY_BASE_DELAY_MS
+  ? Math.max(100, parseInt(process.env.RPC_RETRY_BASE_DELAY_MS, 10) || 1000)
+  : 1000;
+const MAX_CONCURRENT_WALLETS = process.env.MAX_CONCURRENT_WALLETS
+  ? Math.max(1, parseInt(process.env.MAX_CONCURRENT_WALLETS, 10) || 5)
+  : 5;
 const RECENT_ERROR_LOGS = new Map();
 let verboseErrorHintShown = false;
 const DEFAULT_DERIVATION_PATH = "m/44'/501'/0'/0'";
@@ -14667,6 +14680,16 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       console.log(paint(message, "info"));
     };
     const logMuted = (message, value) => {
+      // Suppress verbose logs in QUIET_MODE
+      if (QUIET_MODE) {
+        // Only log critical info in quiet mode - skip verbose debug logs
+        const criticalKeywords = ['confirmed', 'error', 'failed', 'success', 'completed'];
+        const msgLower = String(message).toLowerCase();
+        const isCritical = criticalKeywords.some(keyword => msgLower.includes(keyword));
+        if (!isCritical) {
+          return;  // Skip non-critical logs in quiet mode
+        }
+      }
       ensureHeader();
       if (value === undefined) {
         console.log(paint(message, "muted"));
@@ -16441,33 +16464,129 @@ async function perpsDecreaseCommand(rawArgs) {
   }
 }
 
-// Helper function to run flows with optional indefinite looping
-async function runFlowWithLoopOption(flowKey) {
-  while (true) {
-    await runPrewrittenFlowPlan(flowKey, {});
+// Helper function to parse flow command-line options
+function parseFlowOptions(args) {
+  const options = {};
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg || typeof arg !== 'string') continue;
 
-    // Prompt user if they want to loop
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
-
-    const answer = await new Promise((resolve) => {
-      rl.question(
-        paint(`\n🔁 Run ${flowKey} again? (y/n): `, "label"),
-        resolve
-      );
-    });
-
-    rl.close();
-
-    const normalized = (answer || "").trim().toLowerCase();
-    if (normalized !== "y" && normalized !== "yes") {
-      console.log(paint(`✅ ${flowKey} completed.`, "success"));
-      break;
+    const lower = arg.toLowerCase();
+    if (lower === '--infinite' || lower === '--loop') {
+      options.infinite = true;
+    } else if (lower === '--loop-cooldown' || lower === '--cooldown') {
+      if (i + 1 < args.length) {
+        const value = parseInt(args[i + 1], 10);
+        if (Number.isFinite(value) && value >= 0) {
+          options.loopCooldown = value;
+          i++; // Skip next arg
+        }
+      }
     }
+  }
+  return options;
+}
 
-    console.log(paint(`\n♻️  Restarting ${flowKey}...\n`, "info"));
+// Helper function to run flows with optional indefinite looping
+async function runFlowWithLoopOption(flowKey, options = {}) {
+  const infiniteMode = options.infinite || options.loop || false;
+  const loopCooldownMs = options.loopCooldown ?? FLOW_LOOP_COOLDOWN_MS;
+  let loopCount = 0;
+
+  // Set up graceful shutdown handler
+  let shutdownRequested = false;
+  const handleShutdown = () => {
+    if (!shutdownRequested) {
+      shutdownRequested = true;
+      console.log(paint(`\n\n⚠️  Shutdown requested. Finishing current loop...`, "warn"));
+    }
+  };
+  process.on('SIGINT', handleShutdown);
+  process.on('SIGTERM', handleShutdown);
+
+  try {
+    while (true) {
+      loopCount++;
+
+      if (infiniteMode && loopCount > 1) {
+        console.log(paint(`\n━━━ Loop #${loopCount} starting ━━━`, "label"));
+      }
+
+      // Wrap flow execution in try-catch to prevent crashes
+      try {
+        await runPrewrittenFlowPlan(flowKey, {});
+      } catch (err) {
+        // Check if this is an RPC rate limit error
+        const isRateLimit = err.message && (
+          err.message.includes('429') ||
+          err.message.includes('Too Many Requests') ||
+          err.message.includes('rate limit')
+        );
+
+        if (isRateLimit) {
+          console.error(paint(`\n⚠️  RPC rate limit hit during flow execution`, "warn"));
+          console.log(paint(`  Error: ${err.message}`, "error"));
+          if (infiniteMode) {
+            console.log(paint(`  Increasing cooldown and continuing to next loop...`, "warn"));
+            // Add extra delay for rate limit recovery
+            await new Promise(resolve => setTimeout(resolve, 10000));  // 10s extra delay
+          }
+        } else {
+          console.error(paint(`\n❌ Flow execution error: ${err.message}`, "error"));
+        }
+
+        if (!infiniteMode) {
+          throw err;  // Re-throw in non-infinite mode
+        }
+        // In infinite mode, log error and continue to next loop
+        console.log(paint(`  Continuing to next loop...`, "info"));
+      }
+
+      // Check if shutdown was requested
+      if (shutdownRequested) {
+        console.log(paint(`\n✅ ${flowKey} shut down gracefully after ${loopCount} loop(s).`, "success"));
+        break;
+      }
+
+      if (infiniteMode) {
+        // Infinite mode: automatic restart with cooldown
+        console.log(paint(`\n✅ Loop #${loopCount} completed.`, "success"));
+        if (loopCooldownMs > 0) {
+          const cooldownSec = (loopCooldownMs / 1000).toFixed(1);
+          console.log(paint(`  Cooldown: ${cooldownSec}s before next loop...`, "muted"));
+          await new Promise(resolve => setTimeout(resolve, loopCooldownMs));
+        }
+        console.log(paint(`\n♻️  Starting Loop #${loopCount + 1}...\n`, "info"));
+        continue;
+      }
+
+      // Manual mode: prompt user
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+
+      const answer = await new Promise((resolve) => {
+        rl.question(
+          paint(`\n🔁 Run ${flowKey} again? (y/n): `, "label"),
+          resolve
+        );
+      });
+
+      rl.close();
+
+      const normalized = (answer || "").trim().toLowerCase();
+      if (normalized !== "y" && normalized !== "yes") {
+        console.log(paint(`✅ ${flowKey} completed after ${loopCount} loop(s).`, "success"));
+        break;
+      }
+
+      console.log(paint(`\n♻️  Restarting ${flowKey}...\n`, "info"));
+    }
+  } finally {
+    // Clean up signal handlers
+    process.off('SIGINT', handleShutdown);
+    process.off('SIGTERM', handleShutdown);
   }
 }
 
@@ -16931,25 +17050,35 @@ async function main() {
     ) {
       await closeEmptyTokenAccounts();
     } else if (cmd === "arpeggio") {
-      await runFlowWithLoopOption("arpeggio");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("arpeggio", flowOpts);
     } else if (cmd === "horizon") {
-      await runFlowWithLoopOption("horizon");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("horizon", flowOpts);
     } else if (cmd === "echo") {
-      await runFlowWithLoopOption("echo");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("echo", flowOpts);
     } else if (cmd === "icarus") {
-      await runFlowWithLoopOption("icarus");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("icarus", flowOpts);
     } else if (cmd === "zenith") {
-      await runFlowWithLoopOption("zenith");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("zenith", flowOpts);
     } else if (cmd === "aurora") {
-      await runFlowWithLoopOption("aurora");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("aurora", flowOpts);
     } else if (cmd === "titan") {
-      await runFlowWithLoopOption("titan");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("titan", flowOpts);
     } else if (cmd === "odyssey") {
-      await runFlowWithLoopOption("odyssey");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("odyssey", flowOpts);
     } else if (cmd === "sovereign") {
-      await runFlowWithLoopOption("sovereign");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("sovereign", flowOpts);
     } else if (cmd === "nova") {
-      await runFlowWithLoopOption("nova");
+      const flowOpts = parseFlowOptions(args.slice(1));
+      await runFlowWithLoopOption("nova", flowOpts);
     } else {
       throw new Error("Unknown command: " + cmd);
     }
