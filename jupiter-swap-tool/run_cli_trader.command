@@ -624,17 +624,22 @@ flows_menu() {
         update_launcher_state
         ;;
       7|t)
-        run_cli_command "Titan whale flow (aggressive)" node cli_trader.js titan
+        run_cli_command "Titan whale flow (aggressive — $5+ min, 30s-10m holds)" node cli_trader.js titan
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       8|o)
-        run_cli_command "Odyssey whale flow (diverse)" node cli_trader.js odyssey
+        run_cli_command "Odyssey whale flow (diverse — $5+ min, 30s-10m holds)" node cli_trader.js odyssey
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
       9|v)
-        run_cli_command "Sovereign whale flow (strategic)" node cli_trader.js sovereign
+        run_cli_command "Sovereign whale flow (strategic — $5+ min, 30s-10m holds)" node cli_trader.js sovereign
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      0|n)
+        run_cli_command "Nova supernova flow ($3.5+ min, 30s-10m holds)" node cli_trader.js nova
         read -p "Press Enter to continue..." _
         update_launcher_state
         ;;
@@ -713,6 +718,224 @@ lend_menu() {
         ;;
       *)
         echo "Borrow tooling is coming soon — choose 1-6 or 'b' to exit."
+        ;;
+    esac
+  done
+}
+
+perps_menu() {
+  while true; do
+    echo
+    echo "Jupiter Perps trading:"
+    JUPITER_SWAP_TOOL_SKIP_INIT=1 \
+    JUPITER_SWAP_TOOL_NO_BANNER=1 \
+      node cli_trader.js hotkeys perps-menu --no-title --indent 2 || \
+      echo "  (unable to load perps hotkeys)"
+    read -r -p "perps> " PERPS_OPT
+    PERPS_OPT_LOWER=$(printf '%s' "$PERPS_OPT" | tr '[:upper:]' '[:lower:]')
+    case "$PERPS_OPT_LOWER" in
+      ""|b)
+        break
+        ;;
+      1|markets)
+        run_cli_command "View perps markets" node cli_trader.js perps markets
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      2|positions)
+        echo "Leave blank to show all wallets."
+        read -r -p "Wallet identifiers (# or filename, blank = all): " PERPS_WALLETS
+        if [[ -z "$PERPS_WALLETS" ]]; then
+          PERPS_WALLETS="*"
+        fi
+        run_cli_command "View perps positions" node cli_trader.js perps positions "$PERPS_WALLETS"
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      3|long)
+        echo
+        echo "=== Open Long Position ==="
+        echo
+        read -r -p "Wallet (filename, #, or 'all'): " PERPS_WALLET
+        if [[ -z "$PERPS_WALLET" ]]; then
+          PERPS_WALLET="all"
+          echo "  Defaulting to ALL wallets"
+        fi
+
+        echo
+        echo "Available markets: SOL, ETH, WBTC, USDC, USDT"
+        read -r -p "Market symbol (blank = SOL): " PERPS_MARKET
+        # Validate market - only accept valid symbols or default to SOL
+        PERPS_MARKET=$(printf '%s' "$PERPS_MARKET" | tr '[:lower:]' '[:upper:]')
+        case "$PERPS_MARKET" in
+          SOL|ETH|WBTC|USDC|USDT)
+            # Valid market
+            ;;
+          *)
+            PERPS_MARKET="SOL"
+            echo "  Using default market: SOL"
+            ;;
+        esac
+
+        read -r -p "Position size in USD (blank = max available): " PERPS_SIZE
+        if [[ -z "$PERPS_SIZE" ]]; then
+          PERPS_SIZE="max"
+          echo "  Will use maximum available balance"
+        fi
+
+        read -r -p "Leverage (1-100x, blank = 5): " PERPS_LEVERAGE
+        PERPS_LEVERAGE=${PERPS_LEVERAGE:-5}
+
+        echo
+        echo "Opening LONG position:"
+        echo "  Wallet: $PERPS_WALLET"
+        echo "  Market: $PERPS_MARKET"
+        echo "  Size: \$${PERPS_SIZE}"
+        echo "  Leverage: ${PERPS_LEVERAGE}x"
+        echo
+        read -r -p "Confirm? (y/N): " CONFIRM
+        CONFIRM=$(printf '%s' "$CONFIRM" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$CONFIRM" == "y" || "$CONFIRM" == "yes" ]]; then
+          run_cli_command "Open long position" node cli_trader.js perps open "$PERPS_WALLET" "$PERPS_MARKET" long "$PERPS_SIZE" --leverage "$PERPS_LEVERAGE"
+        else
+          echo "Cancelled."
+        fi
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      4|short)
+        echo
+        echo "=== Open Short Position ==="
+        echo
+        read -r -p "Wallet (filename, #, or 'all'): " PERPS_WALLET
+        if [[ -z "$PERPS_WALLET" ]]; then
+          PERPS_WALLET="all"
+          echo "  Defaulting to ALL wallets"
+        fi
+
+        echo
+        echo "Available markets: SOL, ETH, WBTC, USDC, USDT"
+        read -r -p "Market symbol (blank = SOL): " PERPS_MARKET
+        # Validate market - only accept valid symbols or default to SOL
+        PERPS_MARKET=$(printf '%s' "$PERPS_MARKET" | tr '[:lower:]' '[:upper:]')
+        case "$PERPS_MARKET" in
+          SOL|ETH|WBTC|USDC|USDT)
+            # Valid market
+            ;;
+          *)
+            PERPS_MARKET="SOL"
+            echo "  Using default market: SOL"
+            ;;
+        esac
+
+        read -r -p "Position size in USD (blank = max available): " PERPS_SIZE
+        if [[ -z "$PERPS_SIZE" ]]; then
+          PERPS_SIZE="max"
+          echo "  Will use maximum available balance"
+        fi
+
+        read -r -p "Leverage (1-100x, blank = 5): " PERPS_LEVERAGE
+        PERPS_LEVERAGE=${PERPS_LEVERAGE:-5}
+
+        echo
+        echo "Opening SHORT position:"
+        echo "  Wallet: $PERPS_WALLET"
+        echo "  Market: $PERPS_MARKET"
+        echo "  Size: \$${PERPS_SIZE}"
+        echo "  Leverage: ${PERPS_LEVERAGE}x"
+        echo
+        read -r -p "Confirm? (y/N): " CONFIRM
+        CONFIRM=$(printf '%s' "$CONFIRM" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$CONFIRM" == "y" || "$CONFIRM" == "yes" ]]; then
+          run_cli_command "Open short position" node cli_trader.js perps open "$PERPS_WALLET" "$PERPS_MARKET" short "$PERPS_SIZE" --leverage "$PERPS_LEVERAGE"
+        else
+          echo "Cancelled."
+        fi
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      5|close)
+        echo
+        echo "=== Close Specific Position ==="
+        echo
+        read -r -p "Wallet (filename or #): " PERPS_WALLET
+        if [[ -z "$PERPS_WALLET" ]]; then
+          echo "❌ Wallet is required"
+          read -p "Press Enter to continue..." _
+          continue
+        fi
+
+        echo
+        echo "First, let's view your open positions..."
+        run_cli_command "View positions" node cli_trader.js perps positions "$PERPS_WALLET"
+        echo
+
+        read -r -p "Position public key to close: " PERPS_POSITION
+        if [[ -z "$PERPS_POSITION" ]]; then
+          echo "❌ Position key is required"
+          read -p "Press Enter to continue..." _
+          continue
+        fi
+
+        read -r -p "Size to close in USD (blank = close entire position): " PERPS_SIZE
+
+        echo
+        echo "Closing position:"
+        echo "  Wallet: $PERPS_WALLET"
+        echo "  Position: $PERPS_POSITION"
+        if [[ -n "$PERPS_SIZE" ]]; then
+          echo "  Size: \$${PERPS_SIZE}"
+        else
+          echo "  Size: ENTIRE POSITION"
+        fi
+        echo
+        read -r -p "Confirm? (y/N): " CONFIRM
+        CONFIRM=$(printf '%s' "$CONFIRM" | tr '[:upper:]' '[:lower:]')
+
+        if [[ "$CONFIRM" == "y" || "$CONFIRM" == "yes" ]]; then
+          if [[ -n "$PERPS_SIZE" ]]; then
+            run_cli_command "Close position" node cli_trader.js perps close "$PERPS_WALLET" --position "$PERPS_POSITION" --size "$PERPS_SIZE"
+          else
+            run_cli_command "Close position" node cli_trader.js perps close "$PERPS_WALLET" --position "$PERPS_POSITION"
+          fi
+        else
+          echo "Cancelled."
+        fi
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      6|closeall)
+        echo
+        echo "⚠️  === EMERGENCY: Close ALL Positions ==="
+        echo
+        read -r -p "Wallet (filename or #): " PERPS_WALLET
+        if [[ -z "$PERPS_WALLET" ]]; then
+          echo "❌ Wallet is required"
+          read -p "Press Enter to continue..." _
+          continue
+        fi
+
+        echo
+        echo "First, let's view your open positions..."
+        run_cli_command "View positions" node cli_trader.js perps positions "$PERPS_WALLET"
+        echo
+
+        echo "⚠️  WARNING: This will close ALL open positions for $PERPS_WALLET"
+        echo
+        read -r -p "Type 'CLOSE ALL' to confirm: " CONFIRM
+
+        if [[ "$CONFIRM" == "CLOSE ALL" ]]; then
+          run_cli_command "Close all positions" node cli_trader.js perps close "$PERPS_WALLET" --close-all
+        else
+          echo "Cancelled (confirmation did not match)."
+        fi
+        read -p "Press Enter to continue..." _
+        update_launcher_state
+        ;;
+      *)
+        echo "Unknown option: $PERPS_OPT"
         ;;
     esac
   done
@@ -916,6 +1139,11 @@ while true; do
       ;;
     t|test|tests)
       test_menu
+      refresh_caches_after_command
+      continue
+      ;;
+    p|perps)
+      perps_menu
       refresh_caches_after_command
       continue
       ;;

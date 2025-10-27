@@ -1,0 +1,286 @@
+{
+  "version": "1.0",
+  "lastSync": "2025-10-27T10:54:05.630Z",
+  "wallets": [
+    {
+      "number": 1,
+      "filename": "crew_1.json",
+      "role": "master-master",
+      "master": null,
+      "group": 1
+    },
+    {
+      "number": 2,
+      "filename": "crew_2.json",
+      "role": "slave",
+      "master": 1,
+      "group": 1
+    },
+    {
+      "number": 3,
+      "filename": "crew_3.json",
+      "role": "slave",
+      "master": 1,
+      "group": 1
+    },
+    {
+      "number": 4,
+      "filename": "crew_4.json",
+      "role": "slave",
+      "master": 1,
+      "group": 1
+    },
+    {
+      "number": 5,
+      "filename": "crew_5.json",
+      "role": "slave",
+      "master": 1,
+      "group": 1
+    },
+    {
+      "number": 6,
+      "filename": "crew_6.json",
+      "role": "master",
+      "master": 6,
+      "group": 2
+    },
+    {
+      "number": 7,
+      "filename": "crew_7.json",
+      "role": "slave",
+      "master": 6,
+      "group": 2
+    },
+    {
+      "number": 8,
+      "filename": "crew_8.json",
+      "role": "slave",
+      "master": 6,
+      "group": 2
+    },
+    {
+      "number": 9,
+      "filename": "crew_9.json",
+      "role": "slave",
+      "master": 6,
+      "group": 2
+    },
+    {
+      "number": 10,
+      "filename": "crew_10.json",
+      "role": "slave",
+      "master": 6,
+      "group": 2
+    },
+    {
+      "number": 11,
+      "filename": "crew_11.json",
+      "role": "master",
+      "master": 11,
+      "group": 3
+    },
+    {
+      "number": 12,
+      "filename": "crew_12.json",
+      "role": "slave",
+      "master": 11,
+      "group": 3
+    },
+    {
+      "number": 13,
+      "filename": "crew_13.json",
+      "role": "slave",
+      "master": 11,
+      "group": 3
+    },
+    {
+      "number": 14,
+      "filename": "crew_14.json",
+      "role": "slave",
+      "master": 11,
+      "group": 3
+    },
+    {
+      "number": 15,
+      "filename": "crew_15.json",
+      "role": "slave",
+      "master": 11,
+      "group": 3
+    },
+    {
+      "number": 16,
+      "filename": "crew_16.json",
+      "role": "master",
+      "master": 16,
+      "group": 4
+    },
+    {
+      "number": 17,
+      "filename": "crew_17.json",
+      "role": "slave",
+      "master": 16,
+      "group": 4
+    },
+    {
+      "number": 18,
+      "filename": "crew_18.json",
+      "role": "slave",
+      "master": 16,
+      "group": 4
+    },
+    {
+      "number": 19,
+      "filename": "crew_19.json",
+      "role": "slave",
+      "master": 16,
+      "group": 4
+    },
+    {
+      "number": 20,
+      "filename": "crew_20.json",
+      "role": "slave",
+      "master": 16,
+      "group": 4
+    },
+    {
+      "number": 21,
+      "filename": "crew_21.json",
+      "role": "master",
+      "master": 21,
+      "group": 5
+    },
+    {
+      "number": 22,
+      "filename": "crew_22.json",
+      "role": "slave",
+      "master": 21,
+      "group": 5
+    },
+    {
+      "number": 23,
+      "filename": "crew_23.json",
+      "role": "slave",
+      "master": 21,
+      "group": 5
+    },
+    {
+      "number": 24,
+      "filename": "crew_24.json",
+      "role": "slave",
+      "master": 21,
+      "group": 5
+    },
+    {
+      "number": 25,
+      "filename": "crew_25.json",
+      "role": "slave",
+      "master": 21,
+      "group": 5
+    },
+    {
+      "number": 26,
+      "filename": "crew_26.json",
+      "role": "master",
+      "master": 26,
+      "group": 6
+    },
+    {
+      "number": 27,
+      "filename": "crew_27.json",
+      "role": "slave",
+      "master": 26,
+      "group": 6
+    },
+    {
+      "number": 28,
+      "filename": "crew_28.json",
+      "role": "slave",
+      "master": 26,
+      "group": 6
+    },
+    {
+      "number": 29,
+      "filename": "crew_29.json",
+      "role": "slave",
+      "master": 26,
+      "group": 6
+    },
+    {
+      "number": 30,
+      "filename": "crew_30.json",
+      "role": "slave",
+      "master": 26,
+      "group": 6
+    },
+    {
+      "number": 31,
+      "filename": "crew_31.json",
+      "role": "master",
+      "master": 31,
+      "group": 7
+    },
+    {
+      "number": 32,
+      "filename": "crew_32.json",
+      "role": "slave",
+      "master": 31,
+      "group": 7
+    },
+    {
+      "number": 33,
+      "filename": "crew_33.json",
+      "role": "slave",
+      "master": 31,
+      "group": 7
+    },
+    {
+      "number": 34,
+      "filename": "crew_34.json",
+      "role": "slave",
+      "master": 31,
+      "group": 7
+    },
+    {
+      "number": 35,
+      "filename": "crew_35.json",
+      "role": "slave",
+      "master": 31,
+      "group": 7
+    },
+    {
+      "number": 36,
+      "filename": "crew_36.json",
+      "role": "master",
+      "master": 36,
+      "group": 8
+    },
+    {
+      "number": 37,
+      "filename": "crew_37.json",
+      "role": "slave",
+      "master": 36,
+      "group": 8
+    },
+    {
+      "number": 38,
+      "filename": "crew_38.json",
+      "role": "slave",
+      "master": 36,
+      "group": 8
+    },
+    {
+      "number": 39,
+      "filename": "crew_39.json",
+      "role": "slave",
+      "master": 36,
+      "group": 8
+    },
+    {
+      "number": 40,
+      "filename": "crew_40.json",
+      "role": "slave",
+      "master": 36,
+      "group": 8
+    }
+  ]
+}
