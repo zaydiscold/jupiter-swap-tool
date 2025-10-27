@@ -28,6 +28,7 @@
   - `MAX_CONCURRENT_WALLETS` - Max concurrent wallet operations (default: 5)
 
 ### Fixed
+- **Quiet Mode Interference**: Removed broken logMuted override that was breaking error handling in sweep and other commands
 - **Fatal 429 Crashes**: Flows no longer crash on RPC rate limit errors
   - Catches all 429/rate limit errors during flow execution
   - In infinite mode: logs warning, adds 10s recovery delay, continues to next loop
