@@ -14683,7 +14683,7 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       // Suppress verbose logs in QUIET_MODE
       if (QUIET_MODE) {
         // Only log critical info in quiet mode - skip verbose debug logs
-        const criticalKeywords = ['confirmed', 'error', 'failed', 'success', 'completed'];
+        const criticalKeywords = ['confirmed', 'error', 'failed', 'success', 'completed', 'transaction', 'swap'];
         const msgLower = String(message).toLowerCase();
         const isCritical = criticalKeywords.some(keyword => msgLower.includes(keyword));
         if (!isCritical) {
@@ -16552,22 +16552,9 @@ async function runFlowWithLoopOption(flowKey, options = {}) {
     console.log(paint(`\nStarting ${flowKey} flow...\n`, "success"));
   }
 
-  // Apply quiet mode setting (override global QUIET_MODE for this session)
-  if (shouldPrompt && useQuietMode !== QUIET_MODE) {
-    // Store original logMuted function
-    const originalLogMuted = global.logMuted || logMuted;
-
-    // Override logMuted temporarily if quiet mode differs from global
-    if (useQuietMode && !QUIET_MODE) {
-      global.logMuted = (message, value) => {
-        const criticalKeywords = ['confirmed', 'error', 'failed', 'success', 'completed'];
-        const msgLower = String(message).toLowerCase();
-        const isCritical = criticalKeywords.some(keyword => msgLower.includes(keyword));
-        if (!isCritical) return;
-        originalLogMuted(message, value);
-      };
-    }
-  }
+  // Note: Quiet mode is controlled by QUIET_MODE env var
+  // Interactive prompt only shows user the option but doesn't override it
+  // To enable: set QUIET_MODE=1 before running
 
   // Default loop cooldown if still not set
   if (loopCooldownMs === null) {
