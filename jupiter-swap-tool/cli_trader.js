@@ -72,7 +72,7 @@ import {
 // version 1.3.1
 // --------------------------------------------------
 
-const TOOL_VERSION = "1.3.2.3";
+const TOOL_VERSION = "1.3.2.4";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -15760,6 +15760,18 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
         }
       }
     } catch (e) {
+      // CRITICAL SAFETY NET: Always catch rate limit errors to prevent crashes
+      // Check BEFORE calling classifySwapError for maximum reliability
+      const rawMessage = String(e?.message || e || "").toLowerCase();
+      if (rawMessage.includes("429") || rawMessage.includes("too many requests") || rawMessage.includes("rate limit") || rawMessage.includes("rate limited")) {
+        if (!quietSkips) {
+          logWarn(`  rate limit error detected, rotating RPC and continuing...`);
+        }
+        rotateConnection("rate-limit outer (safety net)", "outer swap stage");
+        await delay(2000); // Longer delay for rate limits
+        continue; // ALWAYS continue, never crash
+      }
+
       const errorInfo = classifySwapError(e);
 
       // Check if the error is about a non-tradable token (lend share token)
@@ -15768,7 +15780,7 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
         // Skip lend share tokens - user can manually withdraw via 'lend withdraw' command
         logWarn(`  ${w.name}: skipping lend share token (not tradable via swap API). Use 'lend withdraw' to redeem.`);
         if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
-        break; // Skip this wallet for this token
+        continue; // Changed from break to continue to process next wallet
       }
 
       if (errorInfo.type === 'min_output') {
@@ -15782,10 +15794,10 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
         continue;
       }
 
-      // Handle rate limiting at outer level
+      // Handle rate limiting at outer level (secondary check)
       if (errorInfo.type === 'rate_limit') {
         rotateConnection("rate-limit outer", "outer swap stage");
-        await delay(500);
+        await delay(1000); // Longer delay for classified rate limits
         continue;
       }
       
@@ -15826,6 +15838,9 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       
       // Mark token as problematic if it's not SOL
       if (!SOL_LIKE_MINTS.has(inputMint)) walletSkipRegistry?.add(inputMint);
+
+      // CRITICAL: Always continue to next wallet instead of crashing
+      continue;
     }
     const postWalletDelay = resolveWalletDelayMs(engine);
     if (postWalletDelay > 0) {

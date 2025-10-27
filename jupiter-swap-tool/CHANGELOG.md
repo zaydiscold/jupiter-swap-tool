@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.2.4] - 2025-10-27
+
+### Fixed (CRITICAL)
+- **Rate Limit Crash Prevention**: Added multiple layers of safety to prevent 429 errors from crashing the process
+  - PRIMARY SAFETY NET: Raw string check for "429", "too many requests", "rate limit" BEFORE error classification
+  - Executes immediately when outer catch block triggers, rotating RPC with 2s delay
+  - SECONDARY CHECK: Classified rate limit errors handled with 1s delay
+  - EXPLICIT CONTINUE: All error paths now explicitly continue to next wallet instead of relying on fall-through
+  - Guarantees process never crashes on rate limits - always logs, rotates, and continues
+  - Fixes: "Error: 429 Too Many Requests" causing "Node.js exited with status 1"
+
 ## [1.3.2.3] - 2025-10-27
 
 ### Improved
