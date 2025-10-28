@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.2.7] - 2025-10-27
+
+### Changed
+- **Sovereign Flow Adjustment**: Updated whale Aurora variant with longer hold times and higher minimum
+  - Minimum swap: 0.02 SOL → 0.025 SOL (higher whale threshold)
+  - Hold time: 30s-10m → 1m-15m (extended duration for commanding positions)
+  - Updated in flow definition and launcher menu description
+  - Applies to both token acquisition delay and inter-swap wait times
+  - Allows more strategic long-term position building
+
 ## [1.3.2.6] - 2025-10-27
 
 ### Added

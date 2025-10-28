@@ -124,7 +124,7 @@ process.on('uncaughtException', (error, origin) => {
   }
 });
 
-const TOOL_VERSION = "1.3.2.6";
+const TOOL_VERSION = "1.3.2.7";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -428,7 +428,7 @@ const HOTKEY_MAP = buildHotkeyMap([
         {
           action: "sovereign-flow",
           keys: ["9", "s"],
-          description: "Sovereign (whale Aurora — 0.02 SOL min, 30s-10m holds)",
+          description: "Sovereign (whale Aurora — 0.025 SOL min, 1m-15m holds)",
         },
         {
           action: "nova-flow",
@@ -10154,16 +10154,16 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
       key: "sovereign",
       label: "Sovereign",
       description:
-        "High-value version of Aurora with 0.02 SOL minimum swaps and extended delays for commanding long-term positions.",
+        "High-value version of Aurora with 0.025 SOL minimum swaps, 1-15 minute holds for commanding long-term positions.",
       startMint: SOL_MINT,
-      minSwapSol: 0.02,
+      minSwapSol: 0.025,
       cycleTemplate: [
         {
           fromMint: SOL_MINT,
           toMint: RANDOM_MINT_PLACEHOLDER,
-          amount: { mode: "range", min: 0.02, max: 0.35 },
+          amount: { mode: "range", min: 0.025, max: 0.35 },
           description: "Feather SOL into a random token (whale-sized)",
-          delayAfterMs: { min: 30_000, max: 600_000 },  // 30s-10min delay AFTER acquiring token
+          delayAfterMs: { min: 60_000, max: 900_000 },  // 1min-15min delay AFTER acquiring token
           randomization: {
             mode: "sol-to-random",
             sessionGroup: "sovereign-core",
@@ -10181,14 +10181,14 @@ const PREWRITTEN_FLOW_PLAN_MAP = new Map([
             mode: "session-to-sol",
             sessionGroup: "sovereign-core",
           },
-          delayAfterMs: { min: 30_000, max: 600_000 },
+          delayAfterMs: { min: 60_000, max: 900_000 },  // 1min-15min delay before next cycle
         },
       ],
       swapCountRange: { min: 20, max: 150 },
       minimumCycles: 2,
       requireTerminalSolHop: true,
       forceSolReturnEvery: { min: 4, max: 7 },  // Return to SOL every 4-7 swaps for safety
-      waitBoundsMs: { min: 30_000, max: 600_000 },  // 30 seconds to 10 minutes between swaps
+      waitBoundsMs: { min: 60_000, max: 900_000 },  // 1 minute to 15 minutes between swaps
       defaultDurationMs: 8 * 60 * 60 * 1000,
       loopable: true,
     },
