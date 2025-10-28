@@ -124,7 +124,7 @@ process.on('uncaughtException', (error, origin) => {
   }
 });
 
-const TOOL_VERSION = "1.3.2.5";
+const TOOL_VERSION = "1.3.2.6";
 const GENERAL_USAGE_MESSAGE = `Commands: tokens [--verbose|--refresh] | lend earn ... | lend overview (borrow coming soon) | perps <markets|positions|open|close> [...options] | wallet <wrap|unwrap|list|info|sync|groups|transfer|fund|redistribute|aggregate> [...] | list | generate <n> [prefix] | import-wallet --secret <secret> [--prefix name] [--path path] [--force] | balances [tokenMint[:symbol] ...] | fund-all <from> <lamportsEach> | redistribute <wallet> | fund <from> <to> <lamports> | send <from> <to> <lamports> | aggregate <wallet> | aggregate-hierarchical | aggregate-masters | airdrop <wallet> <lamports> | airdrop-all <lamports> | campaign <meme-carousel|scatter-then-converge|btc-eth-circuit|icarus|zenith|aurora> <30m|1h|2h|6h> [--batch <1|2|all>] [--dry-run] | swap <inputMint> <outputMint> [amount|all|random] | swap-all <inputMint> <outputMint> | swap-sol-to <mint> [amount|all|random] | buckshot | wallet-guard-status [--summary|--refresh] | test-rpcs [all|index|match|url] | test-ultra [inputMint] [outputMint] [amount] [--wallet name] [--submit] | sol-usdc-popcat | long-circle | interval-cycle | crew1-cycle | arpeggio | horizon | echo | icarus | zenith | aurora | titan | odyssey | sovereign | nova | sweep-defaults | sweep-all | sweep-to-btc-eth | reclaim-sol | target-loop [startMint] | force-reset-wallets
 See docs/cli-commands.txt for a detailed command reference.`;
 
@@ -14816,12 +14816,14 @@ async function showBalances(tokenArgs = []) {
     }
   }
 
+  let totalSolLamports = 0n;
   for (const w of wallets) {
     let solLamports = solLamportsMap.get(w.name);
     if (solLamports === undefined) {
       await balanceRpcDelay();
       solLamports = BigInt(await getSolBalance(connection, w.kp.publicKey));
     }
+    totalSolLamports += solLamports;
     const solDisplay = formatBaseUnits(solLamports, 9);
     const isPrimaryCrew = w.name === "crew_1.json";
     const walletLine = `Wallet ${w.name}  ${w.kp.publicKey.toBase58()}`;
@@ -14866,6 +14868,10 @@ async function showBalances(tokenArgs = []) {
       );
     }
   }
+
+  // Display total SOL balance across all wallets
+  const totalSolDisplay = formatBaseUnits(totalSolLamports, 9);
+  console.log(paint(`\n💰 Total SOL balance across all wallets: ${totalSolDisplay} SOL`, "success"));
 }
 
 function parseImportWalletArgs(rawArgs) {
@@ -15125,14 +15131,18 @@ async function doSwapAcross(inputMint, outputMint, amountInput, options = {}) {
       const next = getCurrentRpcEndpoint();
       const reasonLabel = reason || "rotation";
       const sameEndpoint = next === previous;
-      const message = sameEndpoint
-        ? `RPC ${previous} (${reasonLabel}) during ${label}; no healthy alternatives, retrying same endpoint`
-        : `RPC ${previous} (${reasonLabel}) during ${label}; switched to ${next}`;
-      if (quietSkips) {
-        console.warn(paint(message, "warn"));
-      } else {
-        logWarn(`  ${message}`);
+
+      // Only log when endpoint actually changes or for non-rate-limit errors
+      if (!sameEndpoint) {
+        const message = `RPC ${previous} (${reasonLabel}) during ${label}; switched to ${next}`;
+        if (quietSkips) {
+          console.warn(paint(message, "warn"));
+        } else {
+          logWarn(`  ${message}`);
+        }
       }
+      // For rate limits with no healthy alternatives, stay silent (just retry with longer delays)
+
       rpcLogged = false;
       return { previous, next };
     };

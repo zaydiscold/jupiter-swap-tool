@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.2.6] - 2025-10-27
+
+### Added
+- **Total SOL Balance Display**: Wallet balance check now shows total SOL across all wallets
+  - Added accumulation of SOL from all wallets during balance check
+  - Displays prominent summary: "💰 Total SOL balance across all wallets: X.XXXXXX SOL"
+  - Shows at end of balances output for easy fee/loss tracking
+  - Helps monitor overall portfolio value
+
+### Improved
+- **RPC Logging Spam Reduction**: Silenced repetitive "no healthy alternatives" messages during rate limits
+  - Only logs when RPC endpoint actually changes (successful rotation)
+  - Suppresses spam when same endpoint retried during rate limits
+  - Allows silent retry with exponential backoff during rate limit periods
+  - Reduces console noise while maintaining connection rotation logic
+  - Combined with global error handlers for seamless rate limit recovery
+
 ## [1.3.2.5] - 2025-10-27
 
 ### Fixed (CRITICAL - NUCLEAR OPTION)
