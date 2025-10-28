@@ -300,5 +300,41 @@
       "default-sweep",
       "long-circle"
     ]
+  },
+  {
+    "symbol": "CRUMBCAT",
+    "mint": "Hz7MeU72BNF9rCWyUFAwKTyCcjr6qsJm1jwYehnqjups",
+    "decimals": 6,
+    "program": "spl",
+    "tags": [
+      "swappable",
+      "fanout",
+      "default-sweep",
+      "long-circle"
+    ]
+  },
+  {
+    "symbol": "KIRBY",
+    "mint": "EoLW32eUjN9XibMLEb53CMzLtg9XxnHFU6fbpSukjups",
+    "decimals": 6,
+    "program": "spl",
+    "tags": [
+      "swappable",
+      "fanout",
+      "default-sweep",
+      "long-circle"
+    ]
+  },
+  {
+    "symbol": "priceless",
+    "mint": "AFk1RUr18RCFjhKHQN7ufxPBiQYWjXifAw4y4n44jups",
+    "decimals": 6,
+    "program": "spl",
+    "tags": [
+      "swappable",
+      "fanout",
+      "default-sweep",
+      "long-circle"
+    ]
   }
 ]

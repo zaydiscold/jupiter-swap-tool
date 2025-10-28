@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.2.8] - 2025-10-27
+
+### Added
+- **New Meme Tokens**: Added 3 new tokens to the catalog and all trading flows
+  - CRUMBCAT (Hz7MeU72BNF9rCWyUFAwKTyCcjr6qsJm1jwYehnqjups)
+  - KIRBY (EoLW32eUjN9XibMLEb53CMzLtg9XxnHFU6fbpSukjups)
+  - priceless (AFk1RUr18RCFjhKHQN7ufxPBiQYWjXifAw4y4n44jups)
+  - Tokens automatically included in:
+    - All advanced flows: Arpeggio, Horizon, Echo, Icarus, Zenith, Aurora, Titan, Odyssey, Sovereign, Nova
+    - Sweep-to-BTC/ETH flow (now includes URANUS, JLP, JupSOL, JUP, SPYx, CRCLx, NVDAx, plus 3 new tokens)
+    - Buckshot flow (same expanded token set)
+  - All tagged with "swappable", "fanout", "default-sweep", "long-circle" for maximum flow participation
+
 ## [1.3.2.7] - 2025-10-27
 
 ### Changed
